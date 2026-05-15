@@ -67,18 +67,21 @@ uv --version
 
 ---
 
-# 📦 5. Setup Project Dependencies
+# 📦 5. Setup Project Dependencies (Stable Python 3.11)
 
 Inside project folder:
 
 ```bash
 cd /home/ec2-user/openalgo
+uv python install 3.11
+uv venv --python 3.11
 uv sync
 ```
 
 This will:
 
-- Create `.venv`
+- Install stable **Python 3.11** (DO NOT use 3.14+ for production yet)
+- Create `.venv` tied to Python 3.11
 - Install dependencies
 - Prepare runtime environment
 
@@ -86,10 +89,11 @@ This will:
 
 # 🔐 6. Fix Permissions (CRITICAL)
 
-Ensure correct ownership:
+Ensure correct ownership and safe permissions:
 
 ```bash
 sudo chown -R ec2-user:ec2-user /home/ec2-user/openalgo
+chmod -R u+rwX /home/ec2-user/openalgo
 ```
 
 ---
@@ -120,12 +124,32 @@ Before systemd setup, test manually:
 
 ```bash
 cd /home/ec2-user/openalgo
+uv run python --version
+```
+
+**CRITICAL:** Ensure it says `Python 3.11.x`. If it says `3.14.x`, delete `.venv` and recreate it with `--python 3.11`.
+
+Run the app:
+
+```bash
 uv run app.py
 ```
 
 If working:
 
 - Open browser → `http://<EC2_PUBLIC_IP>:5000`
+- Or test via terminal: `curl http://localhost:5000`
+
+**Note:** If the app is listening on `8765` instead of `5000`, verify your `.env` or check if it's a websocket server. 
+
+Verify listening port:
+
+```bash
+sudo ss -tulnp | grep 5000
+```
+
+Expected:
+`LISTEN 0 128 0.0.0.0:5000`
 
 Stop with:
 
@@ -154,11 +178,16 @@ After=network.target
 User=ec2-user
 WorkingDirectory=/home/ec2-user/openalgo
 
+EnvironmentFile=/home/ec2-user/openalgo/.env
+Environment=PYTHONUNBUFFERED=1
+
 ExecStart=/home/ec2-user/.local/bin/uv run app.py
 
 Restart=always
 RestartSec=5
-Environment=PYTHONUNBUFFERED=1
+
+KillMode=control-group
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -268,13 +297,43 @@ journalctl -u openalgo -n 100 --no-pager
 
 ---
 
-## ❌ App not accessible
+## ❌ App not accessible / Stability Issues
 
-Check:
+If you see `RuntimeError: cannot schedule new futures after interpreter shutdown` or the server hangs:
 
-- Flask bind → `0.0.0.0`
-- Security group open port 5000
-- systemd running
+1. **Check Python Version:** `uv run python --version` (Must be 3.11)
+2. **Check Ports:** `sudo ss -tulnp | grep LISTEN`
+3. **Security group:** Open port 5000 in AWS Console.
+
+---
+
+## 🛠️ Recommended Clean Reinstall (Python 3.11)
+
+If your environment is broken or using Python 3.14:
+
+```bash
+# 1. Stop Service
+sudo systemctl stop openalgo
+
+# 2. Remove Broken Environment
+cd /home/ec2-user/openalgo
+rm -rf .venv
+rm -rf ~/.local/share/uv/python
+
+# 3. Install Stable Python
+uv python install 3.11
+
+# 4. Create Fresh venv
+uv venv --python 3.11
+
+# 5. Reinstall Dependencies
+uv sync
+
+# 6. Verify & Reload
+uv run python --version  # Should be 3.11
+sudo systemctl daemon-reload
+sudo systemctl start openalgo
+```
 
 ---
 
@@ -290,16 +349,30 @@ After setup:
 
 ---
 
-# 🚀 Optional Next Upgrade (Recommended)
+# 🚀 Production Recommendations
 
-For production-grade setup:
+For real production deployment, consider these upgrades:
 
-- Nginx reverse proxy (80/443)
-- HTTPS SSL (Let’s Encrypt)
-- Domain instead of IP
-- Cloudflare protection
-- Auto monitoring & logs
-- Zero downtime deployment
+1. **WSGI Server:** Instead of `uv run app.py`, use **Gunicorn** or **Uvicorn**.
+   ```bash
+   uv add gunicorn  # or uv add uvicorn
+   ```
+
+   **Update `ExecStart` in service file:**
+
+   For Flask (Gunicorn):
+   ```ini
+   ExecStart=/home/ec2-user/openalgo/.venv/bin/gunicorn -w 2 -b 0.0.0.0:5000 app:app
+   ```
+
+   For FastAPI (Uvicorn):
+   ```ini
+   ExecStart=/home/ec2-user/openalgo/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 5000
+   ```
+
+2. **Reverse Proxy:** Use Nginx for SSL (HTTPS) and port forwarding.
+3. **Process Groups:** We added `KillMode=control-group` to ensure all child threads (like APScheduler) are killed properly on restart.
+4. **Environment Variables:** Use `EnvironmentFile` in systemd to load configurations directly from `.env`.
 
 ---
 
