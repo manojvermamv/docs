@@ -1,9 +1,3 @@
-Below is a **clean production-ready README.md** you can directly copy into your repo.
-
-It is designed as a **fresh EC2 setup automation guide for OpenAlgo**, including cleanup, install, systemd service, testing, restart, stop, and troubleshooting.
-
----
-
 # 📘 OpenAlgo EC2 Production Setup Guide (Automated)
 
 This guide explains how to install, configure, and run OpenAlgo on a fresh AWS EC2 instance with **systemd (background service)**, using `uv` as the Python runtime manager.
