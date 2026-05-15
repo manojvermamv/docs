@@ -84,9 +84,9 @@ uv sync
 
 This will:
 
-* Create `.venv`
-* Install dependencies
-* Prepare runtime environment
+- Create `.venv`
+- Install dependencies
+- Prepare runtime environment
 
 ---
 
@@ -131,7 +131,7 @@ uv run app.py
 
 If working:
 
-* Open browser → `http://<EC2_PUBLIC_IP>:5000`
+- Open browser → `http://<EC2_PUBLIC_IP>:5000`
 
 Stop with:
 
@@ -278,9 +278,9 @@ journalctl -u openalgo -n 100 --no-pager
 
 Check:
 
-* Flask bind → `0.0.0.0`
-* Security group open port 5000
-* systemd running
+- Flask bind → `0.0.0.0`
+- Security group open port 5000
+- systemd running
 
 ---
 
@@ -300,12 +300,12 @@ After setup:
 
 For production-grade setup:
 
-* Nginx reverse proxy (80/443)
-* HTTPS SSL (Let’s Encrypt)
-* Domain instead of IP
-* Cloudflare protection
-* Auto monitoring & logs
-* Zero downtime deployment
+- Nginx reverse proxy (80/443)
+- HTTPS SSL (Let’s Encrypt)
+- Domain instead of IP
+- Cloudflare protection
+- Auto monitoring & logs
+- Zero downtime deployment
 
 ---
 
