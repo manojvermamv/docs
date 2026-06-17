@@ -81,8 +81,7 @@ Add this function:
 
 ```powershell
 function git-ai-commit {
-
-    $diff = git diff --staged
+    $diff = git diff --staged --unified=1
     $stat = git diff --staged --stat
 
     if (-not $diff) {
@@ -90,30 +89,40 @@ function git-ai-commit {
         return
     }
 
+    $maxPromptSize = 40000
+
+    $estimatedSize =
+        ($diff | Out-String).Length +
+        ($stat | Out-String).Length
+
+    # if ($estimatedSize -gt $maxPromptSize) {
+    #     Write-Host ""
+    #     Write-Host "Staged changes are too large for AI commit generation." -ForegroundColor Yellow
+    #     Write-Host "Prompt size: $estimatedSize characters" -ForegroundColor Yellow
+    #     Write-Host "Limit: $maxPromptSize characters" -ForegroundColor Yellow
+    #     Write-Host ""
+    #     Write-Host "Commit manually or split the changes into smaller commits." -ForegroundColor Yellow
+    #     return
+    # }
 
     $prompt = @"
 Generate a git commit message from the staged diff.
 
 IMPORTANT:
 Always output TWO parts:
-
 1. First line: conventional commit title
 2. After a blank line: commit description body
-
 
 Rules:
 - Use Conventional Commits format:
   feat:, fix:, refactor:, docs:, test:, chore:, etc.
-
 - Title max 72 characters.
 - Body is required.
 - Keep the message concise and meaningful.
 
-
 For small changes:
 - Use a short clear title.
 - Keep body minimal.
-
 
 For large changes:
 - Summarize the overall purpose in the title.
@@ -125,17 +134,16 @@ For large changes:
 - Use fewer bullets for simple changes.
 - Each bullet should represent a meaningful grouped change, not individual code edits.
 
-
 General:
 - Explain what changed and why it matters.
-- Do not include unnecessary file names.
+- Do not output raw implementation details.
+- Do not include file names unless important.
 - Output ONLY the commit message.
 - No SUBJECT/BODY labels.
 - No markdown code blocks.
 - No extra explanation.
 
-
-Example:
+Example output:
 
 fix: improve authentication handling
 
@@ -143,82 +151,128 @@ fix: improve authentication handling
 - Improved session expiry handling
 - Simplified error handling paths
 
-
 Change summary:
-
 $stat
 
-
 Diff:
-
 $diff
 "@
 
+    # Run OpenCode
 
-    $msg = opencode run $prompt 2>$null
+    $msg = $prompt | opencode run 2>&1
+    $exitCode = $LASTEXITCODE
+
+    if ($exitCode -ne 0) {
+        Write-Host ""
+        Write-Host "OpenCode failed:" -ForegroundColor Red
+        Write-Host $msg
+        return
+    }
+
+    if ($msg -is [System.Management.Automation.ErrorRecord]) {
+
+        Write-Host ""
+        Write-Host "OpenCode error:" -ForegroundColor Red
+        Write-Host $msg
+        return
+
+    }
+
+    # If opencode returns multiple lines, [string]$msg joins them with spaces.
+    if ($msg -is [array]) {
+        $msg = $msg -join "`n"
+    }
+    else {
+        $msg = [string]$msg
+    }
+
+    if ([string]::IsNullOrWhiteSpace($msg)) {
+        Write-Host ""
+        Write-Host "OpenCode returned no output." -ForegroundColor Red
+        return
+    }
+
     $msg = $msg.Trim()
-
 
     # First line = commit title
     # Remaining lines = commit body
 
-    $lines = $msg -split "`r?`n"
+    $lines = @($msg -split "`r?`n")
 
-    $title = $lines[0].Trim()
+    if ($lines.Count -eq 0) {
+        Write-Host "Failed to parse commit message." -ForegroundColor Red
+        return
+    }
 
+    $commitLineIndex = -1
 
-    if ($lines.Length -gt 1) {
+    for ($i = 0; $i -lt $lines.Count; $i++) {
 
-        $bodyLines = $lines[1..($lines.Length - 1)]
+        # Optional leading backtick for markdown code block formatting
+        if ($lines[$i] -match '^\s*`?(feat|fix|docs|refactor|test|chore|build|ci|perf|style|revert|security)(\(.+\))?:\s') {
 
-
-        # Remove blank lines after title
-
-        while ($bodyLines.Count -gt 0 -and $bodyLines[0].Trim() -eq "") {
-            $bodyLines = $bodyLines[1..($bodyLines.Count - 1)]
+            $commitLineIndex = $i
+            break
         }
-
-
-        $body = ($bodyLines -join "`n").Trim()
-
-    }
-    else {
-
-        $body = ""
-
     }
 
+    if ($commitLineIndex -eq -1) {
+
+        Write-Host "Could not find a valid conventional commit message." -ForegroundColor Red
+        return
+    }
+
+    $title = $lines[$commitLineIndex].Trim(" ```t`r`n")
+
+    $body = ""
+
+    if ($commitLineIndex + 1 -lt $lines.Count) {
+
+        $body = ($lines[($commitLineIndex + 1)..($lines.Count - 1)] -join "`n").Trim()
+
+        $body = $body -replace '^\s*```[a-zA-Z]*\s*', ''
+        $body = $body -replace '\s*```\s*$', ''
+        $body = $body.Trim()
+    }
 
     Write-Host ""
     Write-Host "Commit title:" -ForegroundColor Green
     Write-Host $title
 
-
-    if ($body) {
+    if (-not [string]::IsNullOrWhiteSpace($body)) {
 
         Write-Host ""
         Write-Host "Commit body:" -ForegroundColor Green
         Write-Host $body
-
     }
-
 
     Write-Host ""
 
+    # Commit using a temporary file
+    # Avoids quoting and multiline issues
 
-    # Use Git subject + body separation
+    $tempFile = [System.IO.Path]::GetTempFileName()
 
-    if ($body) {
+    try {
 
-        git commit -m "$title" -m "$body"
+        if (-not [string]::IsNullOrWhiteSpace($body)) {
+            "$title`r`n`r`n$body" | Set-Content $tempFile -Encoding UTF8
+        }
+        else {
+            $title | Set-Content $tempFile -Encoding UTF8
+        }
+
+        git commit -F $tempFile
 
     }
-    else {
+    finally {
 
-        git commit -m "$title"
+        if (Test-Path $tempFile) {
+            Remove-Item $tempFile -Force
+        }
 
     }
-
 }
 ```
 
