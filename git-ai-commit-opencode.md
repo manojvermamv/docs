@@ -105,6 +105,10 @@ function git-ai-commit {
     #     return
     # }
 
+    $gitDir = git rev-parse --git-dir
+    $diffFile = Join-Path $gitDir "ai-commit-diff.tmp"
+    $diff | Set-Content $diffFile -Encoding UTF8
+
     $prompt = @"
 Generate a git commit message from the staged diff.
 
@@ -154,14 +158,32 @@ fix: improve authentication handling
 Change summary:
 $stat
 
-Diff:
-$diff
+Read diff from file:
+$diffFile
+
+Do NOT expect full diff inline.
 "@
 
     # Run OpenCode
+    $oldConsoleEncoding = [Console]::OutputEncoding
+    $oldOutputEncoding = $OutputEncoding
 
-    $msg = $prompt | opencode run 2>&1
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+
+    try {
+        $msg = $prompt | opencode run 2>&1
+    }
+    finally {
+        [Console]::OutputEncoding = $oldConsoleEncoding
+        $OutputEncoding = $oldOutputEncoding
+    }
+
     $exitCode = $LASTEXITCODE
+
+    if (Test-Path $diffFile) {
+        Remove-Item $diffFile -Force -ErrorAction SilentlyContinue
+    }
 
     if ($exitCode -ne 0) {
         Write-Host ""
@@ -193,6 +215,9 @@ $diff
         return
     }
 
+    # Clean ANSI escape sequences and BOM
+    $msg = $msg -replace '\x1B\[[0-9;]*[a-zA-Z]', ''
+    $msg = $msg -replace '^\uFEFF', ''
     $msg = $msg.Trim()
 
     # First line = commit title
@@ -209,8 +234,8 @@ $diff
 
     for ($i = 0; $i -lt $lines.Count; $i++) {
 
-        # Optional leading backtick for markdown code block formatting
-        if ($lines[$i] -match '^\s*`?(feat|fix|docs|refactor|test|chore|build|ci|perf|style|revert|security)(\(.+\))?:\s') {
+        # Optional leading characters (like emojis or markdown) before conventional commit
+        if ($lines[$i] -match '(?i)(feat|fix|docs|refactor|test|chore|build|ci|perf|style|revert|security)(\(.+\))?:\s') {
 
             $commitLineIndex = $i
             break
