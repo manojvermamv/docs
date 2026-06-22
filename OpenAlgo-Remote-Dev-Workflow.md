@@ -443,3 +443,11 @@ findmnt /opt/openalgo-logs
 * OpenAlgo Official Documentation
 * Docker Volumes Documentation
 * SSH/SCP Key-based Authentication Guide
+
+---
+
+## 📥 Download Trade Journal (`trades.csv`)
+To securely download your `trades.csv` journal directly from the running OpenAlgo Docker container, run the following command in PowerShell:
+
+```powershell
+ssh -i "C:\Users\Manoj\.ssh\DebianPairKey.pem" admin@SERVER_PUBLIC_IP "docker exec openalgo-web cat /app/trades.csv" > trades.csv
