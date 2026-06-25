@@ -339,17 +339,36 @@ function oa-logs {
     # =========================
     if ($Mode -eq "download") {
 
-        $localPath = ".\openalgo-logs"
+        # $localPath = ".\openalgo-logs"
+        $localPath = "."
 
         if (!(Test-Path $localPath)) {
             New-Item -ItemType Directory -Path $localPath | Out-Null
         }
 
-        Write-Host "[OpenAlgo] Downloading logs..." -ForegroundColor Cyan
+        # Build base filename: Logs-25JUN2026.txt
+        $datePart  = (Get-Date).ToString("ddMMMyyyy").ToUpper()   # e.g. 25JUN2026
+        $baseName  = "Logs-$datePart"
+        $extension = ".txt"
 
-	    scp -o ConnectTimeout=5 -i $OA_KEY "${OA_USER}@${OA_HOST}:$latestLog" $localPath
+        # Resolve unique filename inside the subdir
+        $destFile = Join-Path $localPath "$baseName$extension"
+        $counter  = 1
+        while (Test-Path $destFile) {
+            $destFile = Join-Path $localPath "$baseName-$counter$extension"
+            $counter++
+        }
 
-        Write-Host "[OpenAlgo] Logs saved to $localPath" -ForegroundColor Green
+        Write-Host "[OpenAlgo] Downloading log to: $destFile" -ForegroundColor Cyan
+
+        scp -o ConnectTimeout=5 -i $OA_KEY "${OA_USER}@${OA_HOST}:$latestLog" $destFile
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERROR] Download failed" -ForegroundColor Red
+            return
+        }
+
+        Write-Host "[OpenAlgo] Log saved → $destFile" -ForegroundColor Green
         return
     }
 
