@@ -72,6 +72,7 @@ services:
     volumes:
       - 'opencode-data:/home/opencode/.local/share/opencode'
       - 'opencode-config:/home/opencode/.config/opencode'
+      - 'opencode-cache:/home/opencode/.cache'
       - '/home/ubuntu:/workspace'
     healthcheck:
       test:
