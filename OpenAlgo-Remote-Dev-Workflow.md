@@ -156,6 +156,10 @@ openalgo-mount() {
     findmnt "$strategy_target"
     findmnt "$log_target"
 }
+
+# Aliases
+alias oa-mount='openalgo-mount'
+alias oamount='openalgo-mount'
 ```
 
 #### 🧠 Key Behavior
