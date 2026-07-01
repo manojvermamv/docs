@@ -83,9 +83,133 @@
 
 ---
 
+# 🚨 CRITICAL PRE-CHECK (MUST BE DONE BEFORE STEP 1)
+
+> **Never format or mount a new volume over an existing `/data` directory without first determining whether `/data` already contains production data.**
+
+Run:
+
+```bash
+echo "===== Existing /data ====="
+sudo ls -lah /data
+
+echo
+echo "===== Disk Usage ====="
+sudo du -sh /data 2>/dev/null
+
+echo
+echo "===== Current Mount ====="
+findmnt /data || echo "/data is NOT a mount point"
+```
+
+---
+
+### Case A — `/data` already contains production files
+
+Example:
+
+```
+/data/coolify
+/data/docker
+/data/postgres
+/data/redis
+```
+
+**STOP.**
+
+Do **NOT**
+
+```bash
+mkfs.ext4
+mount /dev/nvme1n1 /data
+```
+
+until the existing `/data` has been backed up or copied.
+
+Otherwise the mount hides the existing directory.
+
+---
+
+### Case B — `/data` is empty
+
+Example
+
+```
+total 8
+.
+..
+```
+
+Now it is safe to continue.
+
+---
+
+## 🚨 NEW STEP 1A — Backup Existing `/data`
+
+Before touching the new disk:
+
+```bash
+sudo tar czf ~/data-backup-before-ebs.tar.gz /data
+```
+
+or, if it's large,
+
+```bash
+sudo rsync -aHAX /data/ /mnt/backup/data/
+```
+
+Only after this backup exists should you continue.
+
+---
+
+## 🚨 NEW STEP 1B — Confirm the Target Disk
+
+Never assume `/dev/nvme1n1` is the new disk.
+
+Always verify:
+
+```bash
+lsblk -f
+```
+
+Confirm:
+
+* filesystem
+* size
+* UUID
+* mountpoint
+
+Example:
+
+```
+nvme0n1
+└─/
+
+nvme1n1
+(no filesystem)
+```
+
+Only an unformatted new disk should be formatted.
+
+---
+
 # Step 1 — Create Filesystem
 
-> ⚠️ Skip this step if the disk already contains data.
+Instead of
+
+```bash
+sudo mkfs.ext4 /dev/nvme1n1
+```
+
+it should say
+
+> **Run only if ALL of the following are true:**
+>
+> * `/dev/nvme1n1` is the new EBS volume
+> * it contains no data
+> * `/data` has already been backed up (if it previously existed)
+
+Then:
 
 ```bash
 sudo mkfs.ext4 /dev/nvme1n1
@@ -101,11 +225,32 @@ sudo mkdir -p /data
 
 ---
 
-# Step 3 — Mount Disk
+# Step 3 — 🚨 Mount Disk
+
+Immediately after
 
 ```bash
 sudo mount /dev/nvme1n1 /data
 ```
+
+verify what happened.
+
+```bash
+echo "Mounted filesystem:"
+df -h /data
+
+echo
+echo "Contents:"
+sudo ls -lah /data
+```
+
+If `/data` suddenly becomes empty while it previously contained application data,
+
+**STOP IMMEDIATELY.**
+
+Do not continue.
+
+This indicates you've mounted a fresh filesystem over an existing directory and hidden the original contents.
 
 ---
 
@@ -577,6 +722,22 @@ Must be
 ```text
 active (running)
 ```
+
+---
+
+# One important correction
+
+There is one detail I'd adjust from the diagnosis you quoted:
+
+> "The evidence points to your Coolify configuration data being lost before or during the migration."
+
+A more precise statement is:
+
+> **The evidence points to the Coolify configuration under `/data/coolify` not being migrated to the new EBS volume before `/data` was mounted.**
+
+That's an important distinction. In many cases, the data is **not actually deleted**—it's still present on the original root filesystem at the old `/data` path, but it's hidden by the new mount. If the old root filesystem hadn't been modified or the directories overwritten later, simply unmounting `/data` could have revealed the original contents again. Unfortunately, after subsequent recovery attempts and reinstallations, some of that state may have been replaced, which is why recovery became much more difficult.
+
+This is the key lesson that should be added prominently to the migration guide: **when moving Docker to a new EBS volume, you must migrate both the Docker data-root and any application-managed host data (such as `/data/coolify`) before switching the mount.**
 
 ---
 
