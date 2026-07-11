@@ -716,6 +716,7 @@ services:
 
     volumes:
       - '/home:/host/home:rw'
+      - '/opt:/host/opt:rw'
       - '/data:/host/data:rw'
       - '/data/coolify:/host/coolify:ro'
       - '/var/log:/host/logs:ro'
