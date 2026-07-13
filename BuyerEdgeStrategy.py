@@ -3703,7 +3703,7 @@ class DataFetcher:
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 class EntryStopLossPolicy:
-    """Resolves Phase A initial hard SL points (premium-based) using delta-aware moneyness adaptation or fallback fixed points!"""
+    """Resolves Phase A initial hard SL points (premium-based) using delta-aware moneyness adaptation or fallback fixed points."""
 
     def __init__(self, fetcher: DataFetcher, config: BotConfig):
         self._fetcher = fetcher
