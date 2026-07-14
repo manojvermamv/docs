@@ -535,6 +535,12 @@ class BrokerConfig:
             errs.append(f"ORDER_STATUS_POLL_INTERVAL={self.order_status_poll_interval} must be >= 0")
         if not self.openalgo_username:
             errs.append("OPENALGO_USERNAME is still the empty string — set it to your own OpenAlgo username")
+        if self.quote_api_rps <= 0:
+            errs.append(f"QUOTE_API_RPS={self.quote_api_rps} must be > 0")
+        if self.quote_api_burst <= 0:
+            errs.append(f"QUOTE_API_BURST={self.quote_api_burst} must be > 0")
+        if not self.strategy_name:
+            errs.append("STRATEGY_NAME must not be empty")
         return errs
 
 
@@ -634,6 +640,10 @@ class MarketConfig:
                 errs.append(f"{fname}={val!r} must be in HH:MM format")
         if self.max_hold_minutes < 0:
             errs.append(f"MAX_HOLD_MINUTES={self.max_hold_minutes} must be >= 0 (0=disabled)")
+        if self.signal_check_interval <= 0:
+            errs.append(f"SIGNAL_CHECK_INTERVAL={self.signal_check_interval} must be > 0")
+        if self.lookback_days < 1:
+            errs.append(f"LOOKBACK_DAYS={self.lookback_days} must be >= 1")
         return errs
 
 
@@ -852,9 +862,17 @@ class RiskConfig:
             errs.append(f"DRAWDOWN_RATE_WINDOW_MINS={self.drawdown_rate_window_mins} must be >= 1")
         if self.drawdown_rate_max_loss < 0:
             errs.append(f"DRAWDOWN_RATE_MAX_LOSS={self.drawdown_rate_max_loss} must be >= 0")
+        if self.drawdown_rate_enabled and self.drawdown_rate_max_loss <= 0:
+            errs.append("DRAWDOWN_RATE_ENABLED=True but DRAWDOWN_RATE_MAX_LOSS <= 0 — no effective limit")
         if self.max_daily_loss_amount <= 0 and self.max_daily_loss_pct <= 0:
             errs.append("All daily loss limits disabled (MAX_DAILY_LOSS_AMOUNT and "
                         "MAX_DAILY_LOSS_PCT are both ≤ 0) — no loss limit will be enforced")
+        if self.max_trades_per_session < 0:
+            errs.append(f"MAX_TRADES_PER_SESSION={self.max_trades_per_session} must be >= 0 (0 = unlimited)")
+        if self.entry_cooldown_secs < 0:
+            errs.append(f"ENTRY_COOLDOWN_SECS={self.entry_cooldown_secs} must be >= 0")
+        if self.max_daily_profit_amount < 0:
+            errs.append(f"MAX_DAILY_PROFIT_AMOUNT={self.max_daily_profit_amount} must be >= 0 (0 = disabled)")
         return errs
 
 
@@ -1259,6 +1277,7 @@ class PositionCore:
     entry_conviction: float        = 0.0
     trail_act_mult:  float         = 1.0
     entry_bucket:    int           = 0
+    entry_sl_source: str           = ""
 
 
 @dataclass
@@ -1402,7 +1421,8 @@ class OptionPosition:
               entry_delta=None, moneyness="Unknown",
               sl=0.0, initial_sl=0.0, tgt=0.0,
               entry_time=None, entry_conviction=0.0, trail_act_mult=1.0,
-              entry_bucket=0, slot_id=None) -> "OptionPosition":
+              entry_bucket=0, slot_id=None,
+              entry_sl_source="") -> "OptionPosition":
         _ts = int(time.time() * 1_000_000)
         _sid = slot_id or f"{underlying}_{option_type}_{_ts}"
         _ep = entry_premium
@@ -1415,7 +1435,7 @@ class OptionPosition:
                 initial_sl=initial_sl, tgt=tgt,
                 entry_time=entry_time or get_ist_now(),
                 entry_conviction=entry_conviction, trail_act_mult=trail_act_mult,
-                entry_bucket=entry_bucket,
+                entry_bucket=entry_bucket, entry_sl_source=entry_sl_source,
             ),
             broker=PositionBroker(),
             trail=TrailState(sl=sl),
@@ -1559,6 +1579,10 @@ class OptionPosition:
     @property
     def entry_bucket(self) -> int: return self.core.entry_bucket
     @property
+    def entry_sl_source(self) -> str: return self.core.entry_sl_source
+    @entry_sl_source.setter
+    def entry_sl_source(self, val): self.core.entry_sl_source = val
+    @property
     def activation_bucket(self) -> int | None: return self.analytics.activation_bucket
     @activation_bucket.setter
     def activation_bucket(self, val): self.analytics.activation_bucket = val
@@ -1678,6 +1702,7 @@ class PendingEntry:
     created_at:       datetime
     entry_delta:      float | None = None  # Preserved for moneyness-adapted tgt/trail on async fill
     entry_conviction: float = 0.0          # Conviction at entry for adaptive risk on async fill
+    entry_sl_source:  str = ""             # SL source label (moneyness_adapted_XXX / hard_sl_pts_fallback)
 
 
 @dataclass
@@ -1726,6 +1751,7 @@ class TradeRecord:
     record_type: str = "full_exit"
     slot_id: str = ""
     tranche_id: str = ""
+    entry_sl_source: str = ""
 
     header: ClassVar[list[str]] = [
         "timestamp", "underlying", "option_symbol", "direction", "qty",
@@ -1737,7 +1763,7 @@ class TradeRecord:
         "activation_gain_pts", "activation_gain_pct", "activation_time",
         "bars_to_activation", "peak_after_activation", "bars_after_activation",
         "max_favorable_excursion", "max_adverse_excursion_after_activation",
-        "record_type", "slot_id", "tranche_id",
+        "record_type", "slot_id", "tranche_id", "entry_sl_source",
     ]
 
     def to_row(self) -> list[str]:
@@ -1775,6 +1801,7 @@ class TradeRecord:
             self.record_type,
             self.slot_id,
             self.tranche_id,
+            self.entry_sl_source,
         ]
 
 
@@ -1879,6 +1906,7 @@ class TradeAnalytics:
             record_type="partial_exit" if tranche else "full_exit",
             slot_id=pos.slot_id,
             tranche_id=tranche.tranche_id if tranche else "",
+            entry_sl_source=pos.entry_sl_source,
         )
 
     @staticmethod
@@ -1927,6 +1955,7 @@ class TradeAnalytics:
             record_type="partial_exit",
             slot_id=pos.slot_id,
             tranche_id=tr.tranche_id,
+            entry_sl_source=pos.entry_sl_source,
         )
 
 
@@ -6012,6 +6041,7 @@ class OrderManager:
         sl_pts: float | None = None,
         entry_delta: float | None = None,
         entry_conviction: float = 0.0,
+        entry_sl_source: str = "",
     ) -> None:
         """Register filled entry with delta tracking for moneyness analysis."""
         cfg = self.config
@@ -6040,6 +6070,7 @@ class OrderManager:
             entry_conviction=max(0.0, min(1.0, entry_conviction)),
             trail_act_mult=act_mult,
             entry_bucket=self._state.bucket_counter,
+            entry_sl_source=entry_sl_source,
         )
         pos.tranches = _build_tranches(pos, qty, cfg)
         with self._state.state_lock:
@@ -6272,6 +6303,7 @@ class OrderManager:
         sl_pts: float | None = None,
         entry_delta: float | None = None,
         entry_conviction: float = 0.0,
+        entry_sl_source: str = "",
     ) -> bool:
         """Place a market BUY order, poll for fill, then register the position with moneyness tracking."""
         cfg = self.config
@@ -6289,6 +6321,7 @@ class OrderManager:
                 underlying, option_symbol, qty, spot, direction, executed,
                 sl_pts=resolved_sl_pts, entry_delta=entry_delta,
                 entry_conviction=entry_conviction,
+                entry_sl_source=entry_sl_source,
             )
             return True
 
@@ -6352,6 +6385,7 @@ class OrderManager:
                     created_at=get_ist_now(),
                     entry_delta=entry_delta,
                     entry_conviction=entry_conviction,
+                    entry_sl_source=entry_sl_source,
                 )
 
             filled = self.poll_order_status(order_id)
@@ -6382,6 +6416,7 @@ class OrderManager:
                 underlying, option_symbol, qty, spot, direction, executed,
                 sl_pts=resolved_sl_pts, entry_delta=entry_delta,
                 entry_conviction=entry_conviction,
+                entry_sl_source=entry_sl_source,
             )
             return True
         except Exception as exc:
@@ -6621,6 +6656,7 @@ class OrderManager:
                         sl_pts=pending_entry.sl_pts,
                         entry_delta=pending_entry.entry_delta,
                         entry_conviction=pending_entry.entry_conviction,
+                        entry_sl_source=pending_entry.entry_sl_source,
                     )
                     # If filled after square_off_time, queue immediate exit
                     if square_off_hm and now_hm >= square_off_hm:
@@ -7581,6 +7617,7 @@ class OptionsBuyerEdgeBot:
             sl_pts=entry_sl_pts,
             entry_delta=best.get("_abs_delta"),
             entry_conviction=entry_conviction,
+            entry_sl_source=entry_sl_source,
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -7671,6 +7708,7 @@ class OptionsBuyerEdgeBot:
         inf("[STRATEGY] Strategy scan thread started")
         while True:
             try:
+                self.risk._maybe_reset_daily_state()
                 self._cleanup_stale_positions()
                 self.orders.check_pending_entries()
                 self.orders.check_pending_exits()
