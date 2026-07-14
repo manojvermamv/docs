@@ -818,6 +818,16 @@ class EntryConfig:
             errs.append(f"ADAPTIVE_WIN_STREAK_TRIGGER={self.adaptive_win_streak_trigger} must be >= 1")
         if self.adaptive_win_streak_step < 1:
             errs.append(f"ADAPTIVE_WIN_STREAK_STEP={self.adaptive_win_streak_step} must be >= 1")
+        if self.fast_ema_period < 1 or self.slow_ema_period < 1 or self.rsi_period < 1:
+            errs.append(f"Indicator periods must be >= 1 (fast_ema={self.fast_ema_period}, slow_ema={self.slow_ema_period}, rsi={self.rsi_period})")
+        if self.fast_ema_period >= self.slow_ema_period:
+            errs.append(f"FAST_EMA_PERIOD={self.fast_ema_period} must be < SLOW_EMA_PERIOD={self.slow_ema_period}")
+        if self.min_oi_filter < 0:
+            errs.append(f"MIN_OI_FILTER={self.min_oi_filter} must be >= 0")
+        if self.min_vol_filter < 0:
+            errs.append(f"MIN_VOL_FILTER={self.min_vol_filter} must be >= 0")
+        if self.spot_reward_pct < 0:
+            errs.append(f"SPOT_REWARD_PCT={self.spot_reward_pct} must be >= 0")
         return errs
 
 
@@ -977,6 +987,24 @@ class TrailConfig:
             errs.append(f"ATR_ACTIVATION_BUFFER_PTS={self.atr_activation_buffer_pts} must be >= 0")
         if self.atr_min_ratchet_improvement_pct < 0:
             errs.append(f"ATR_MIN_RATCHET_IMPROVEMENT_PCT={self.atr_min_ratchet_improvement_pct} must be >= 0")
+        if self.atr_period < 1:
+            errs.append(f"TRAIL_ATR_PERIOD={self.atr_period} must be >= 1")
+        if self.atr_mult <= 0:
+            errs.append(f"TRAIL_ATR_MULT={self.atr_mult} must be > 0")
+        if self.step_pts <= 0:
+            errs.append(f"TRAIL_STEP_PTS={self.step_pts} must be > 0")
+        if self.step_pct <= 0:
+            errs.append(f"TRAIL_STEP_PCT={self.step_pct} must be > 0")
+        if self.activate_at_pct < 0:
+            errs.append(f"TRAIL_ACTIVATE_AT_PCT={self.activate_at_pct} must be >= 0")
+        if self.activate_at_max_pts < 0:
+            errs.append(f"TRAIL_ACTIVATE_AT_MAX_PTS={self.activate_at_max_pts} must be >= 0")
+        if self.delta_itm_step_pct <= 0:
+            errs.append(f"TRAIL_DELTA_ITM_STEP_PCT={self.delta_itm_step_pct} must be > 0")
+        if self.delta_atm_step_pct <= 0:
+            errs.append(f"TRAIL_DELTA_ATM_STEP_PCT={self.delta_atm_step_pct} must be > 0")
+        if self.delta_otm_step_pct <= 0:
+            errs.append(f"TRAIL_DELTA_OTM_STEP_PCT={self.delta_otm_step_pct} must be > 0")
         return errs
 
 # ── 3f — JournalConfig ────────────────────────────────────────────────────
@@ -1079,6 +1107,8 @@ class TrancheConfig:
 
     def validate(self) -> list[str]:
         errs: list[str] = []
+        if self.min_qty_per_tranche < 1:
+            errs.append(f"TRANCHE_MIN_QTY={self.min_qty_per_tranche} must be >= 1")
         if self.tp_ceiling_pct < 50 or self.tp_ceiling_pct > 100:
             errs.append(f"TRANCHE_TP_CEILING_PCT={self.tp_ceiling_pct} must be in [50, 100]")
         if self.enabled:
@@ -1796,7 +1826,7 @@ class TradeRecord:
             self.bars_to_activation or "",
             f"{self.peak_after_activation:.2f}" if self.peak_after_activation is not None else "",
             self.bars_after_activation or "",
-            f"{self.max_favorable_excursion:.2f}",
+            f"{self.max_favorable_excursion:.2f}" if self.max_favorable_excursion is not None else "",
             f"{self.max_adverse_excursion_after_activation:.2f}" if self.max_adverse_excursion_after_activation is not None else "",
             self.record_type,
             self.slot_id,
@@ -6092,7 +6122,7 @@ class OrderManager:
         )
 
         if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
-            if cfg.broker.use_basket_protection and hasattr(self.client, "basketorder"):
+            if cfg.broker.use_basket_protection and hasattr(self.client, "basketorder") and not cfg.tranche.enabled:
                 self._place_protection_basket(underlying, pos, option_symbol, qty, sl, tgt)
             else:
                 self._place_protection_orders_sequential(underlying, pos, option_symbol, qty, sl, tgt)
@@ -6932,19 +6962,51 @@ class OptionsBuyerEdgeBot:
                 pos.tranches = _build_tranches(pos, qty, cfg)
 
                 # Query SL/TGT order IDs from orderbook
+                sl_orders: list[dict] = []
+                tgt_orders: list[dict] = []
                 for order in open_orders:
                     o_sym = order.get("symbol", "")
                     o_stat = str(order.get("order_status", "")).lower()
                     o_type = str(order.get("pricetype", "")).lower()
                     if o_stat in ("pending", "open", "trigger pending") and o_sym == sym:
                         if "sl" in o_type:
-                            pos.sl_order_id = order.get("orderid")
+                            sl_orders.append(order)
                         elif "limit" in o_type or o_type == "market":
-                            pos.tgt_order_id = order.get("orderid")
-                            _order_price = float(order.get("price", 0) or 0)
-                            if _order_price > 0:
-                                pos.tgt = _order_price
-                                inf(f"[STARTUP] {underlying}: restored TGT price ₹{_order_price:.2f} from broker order")
+                            tgt_orders.append(order)
+
+                is_multi = len(pos.tranches) > 1
+                if is_multi:
+                    # Multi-tranche: match orders to tranches by quantity
+                    for tr in pos.tranches:
+                        for o in sl_orders:
+                            if int(o.get("quantity", 0) or 0) == tr.qty and not tr.sl_order_id:
+                                tr.sl_order_id = o.get("orderid")
+                                break
+                        for o in tgt_orders:
+                            if int(o.get("quantity", 0) or 0) == tr.qty and not tr.tgt_order_id:
+                                tr.tgt_order_id = o.get("orderid")
+                                _order_price = float(o.get("price", 0) or 0)
+                                if _order_price > 0:
+                                    tr.tp_pts = _order_price - pos.entry_premium
+                                    if tr.is_runner:
+                                        pos.tgt = _order_price
+                                        inf(f"[STARTUP] {underlying}: restored runner TGT ₹{_order_price:.2f}")
+                                    else:
+                                        inf(f"[STARTUP] {underlying}: restored tranche {tr.tranche_id} TGT ₹{_order_price:.2f}")
+                                break
+                    runner = pos.runner_tranche
+                    if runner:
+                        pos.sl_order_id = runner.sl_order_id
+                else:
+                    # Single-tranche: flat field assignment (backward compat)
+                    for o in sl_orders:
+                        pos.sl_order_id = o.get("orderid")
+                    for o in tgt_orders:
+                        pos.tgt_order_id = o.get("orderid")
+                        _order_price = float(o.get("price", 0) or 0)
+                        if _order_price > 0:
+                            pos.tgt = _order_price
+                            inf(f"[STARTUP] {underlying}: restored TGT price ₹{_order_price:.2f} from broker order")
 
                 if pos.sl_order_id or pos.tgt_order_id:
                     pos.broker_protection = True
@@ -7016,10 +7078,13 @@ class OptionsBuyerEdgeBot:
                     continue
                 stale.append(pos)
             for pos in stale:
-                inf(f"[CLEANUP] Force-removing stale position {pos.symbol} ({pos.slot_id})")
+                inf(f"[CLEANUP] Force-removing stale position {pos.symbol} ({pos.slot_id}) — "
+                    f"exit already processed, removing from book. If PnL seems missing check broker.")
+                _advance_stage(pos, LifecycleStage.CLOSED)
                 self.state.positions.pop(pos.slot_id, None)
                 self.state.pending_opposite_exit.discard(pos.underlying)
-                self.state.exit_queue.discard(pos.slot_id)
+                with self.state.exit_lock:
+                    self.state.exit_queue.discard(pos.slot_id)
 
     def _send_live_pnl_alert(self, open_positions: list[OptionPosition]) -> None:
         """Fetch live positions and dispatch a single-line active PNL alert."""
