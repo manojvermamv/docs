@@ -7708,7 +7708,6 @@ class OptionsBuyerEdgeBot:
         inf("[STRATEGY] Strategy scan thread started")
         while True:
             try:
-                self.risk._maybe_reset_daily_state()
                 self._cleanup_stale_positions()
                 self.orders.check_pending_entries()
                 self.orders.check_pending_exits()
