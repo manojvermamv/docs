@@ -4901,7 +4901,7 @@ class RiskManager:
         with self._state.state_lock:
             trade_count        = self._session_trade_count
             consecutive_losses = self._session_consecutive_losses
-            daily_pnl          = self._daily_pnl
+            daily_pnl          = self.daily_pnl
             last_entry_time    = self._last_entry_times.get(symbol)
             entry_in_flight    = self._state.entry_in_flight.get(symbol, 0)
 
@@ -4998,6 +4998,7 @@ class RiskManager:
 
     @property
     def daily_pnl(self) -> float:
+        self._maybe_reset_daily_state()
         return self._daily_pnl
 
     @property
