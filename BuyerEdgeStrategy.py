@@ -3904,6 +3904,8 @@ class TrailSLEngine:
         self._config = config
         self.modify_callback: Callable[[str, float, str | None], bool] | None = None
         self._last_pl_pct: dict[str, float] = {}
+        self._data_skip_logged: set[str] = set()
+        self._kl_tick_count: dict[str, int] = {}
 
     def _compute_raw_activation_threshold(self, pos: OptionPosition) -> tuple[float, float, float]:
         """Returns (raw_threshold, capped_threshold, target_gain_cap).
@@ -3976,8 +3978,6 @@ class TrailSLEngine:
                 _missing.append("spot_ltp")
 
             if _missing:
-                if not hasattr(self, '_data_skip_logged'):
-                    self._data_skip_logged: set[str] = set()
                 _key = f"{underlying}|{'_'.join(_missing)}"
                 if _key not in self._data_skip_logged:
                     self._data_skip_logged.add(_key)
@@ -3988,7 +3988,7 @@ class TrailSLEngine:
                         f"age={(time.time() - _ts):.1f}s" if _ts else ""
                     )
                 continue
-            if hasattr(self, '_data_skip_logged'):
+            if self._data_skip_logged:
                 self._data_skip_logged.clear()
             confirmed_close = opt_ltp
             if confirmed_close is None:
@@ -4064,7 +4064,6 @@ class TrailSLEngine:
         """
         cfg = self._config
         method = cfg.trail.sl_method
-        ep = pos.entry_premium
 
         # ── fixed_pts: always return a fixed raw premium point step ──────────
         if method == "fixed_pts":
@@ -4458,8 +4457,6 @@ class TrailSLEngine:
 
         # ── Diagnostic: data snapshot on every key_level trail call ─────────
         _roi_pct = ((premium_ltp - ep) / ep * 100.0) if ep > 0 else 0.0
-        if not hasattr(self, '_kl_tick_count'):
-            self._kl_tick_count: dict[str, int] = {}
         self._kl_tick_count[underlying] = self._kl_tick_count.get(underlying, 0) + 1
         _kl_cnt = self._kl_tick_count[underlying]
         if _kl_cnt <= 5 or _kl_cnt % 10 == 0:
@@ -4767,9 +4764,7 @@ class StrikeSelector:
         # ── Stage 4: Conviction-driven asymmetry scoring ──────────────────────
         # IV weight: lower IV = better buyer conditions.
         # IVR missing → do NOT penalize; skip IV component (set ivr_weight to 0).
-        ivr_known    = iv_rank is not None
-        ivr_val      = iv_rank if ivr_known else 0.0
-        iv_score_raw: float = (1 - ivr_val / 100) if ivr_known else 0.0
+        iv_score_raw: float = (1 - (iv_rank or 0.0) / 100) if iv_rank is not None else 0.0
 
         # Delta weight scales with conviction; liquidity gets the remainder.
         delta_weight = STRIKE_DELTA_WEIGHT_BASE + conviction * STRIKE_DELTA_WEIGHT_RANGE
@@ -5095,6 +5090,9 @@ class WebSocketManager:
         self._repaired_subscriptions: int = 0
         self._ws_start_time: float = time.time()
         self._telemetry_last_log_time: float = 0.0
+        self._raw_cb_count: int = 0
+        self._tick_counts: dict[str, int] = {}
+        self._spot_tick_counts: dict[str, int] = {}
 
     def set_fetcher(self, fetcher: DataFetcher) -> None:
         """Set DataFetcher reference to consolidate greeks API calls."""
@@ -5227,8 +5225,6 @@ class WebSocketManager:
           Part B — spot trail (spot-based SL ratchet for indices)
         """
         # ── RAW CALLBACK DIAGNOSTIC — fires on EVERY WS message ────────────
-        if not hasattr(self, '_raw_cb_count'):
-            self._raw_cb_count = 0
         self._raw_cb_count += 1
         _raw_cnt = self._raw_cb_count
         if _raw_cnt <= 5 or _raw_cnt % 50 == 0:
@@ -5281,8 +5277,6 @@ class WebSocketManager:
             if pos.exit_pending:
                 continue
             if pos.symbol == symbol:
-                if not hasattr(self, '_tick_counts'):
-                    self._tick_counts: dict[str, int] = {}
                 self._tick_counts[symbol] = self._tick_counts.get(symbol, 0) + 1
                 cnt = self._tick_counts[symbol]
                 # Log every 5th tick to avoid flooding, plus first tick
@@ -5296,8 +5290,6 @@ class WebSocketManager:
                         f"kl_active={pos.kl_active} kl_next={pos.kl_next_level}"
                     )
             elif pos.spot_symbol == symbol:
-                if not hasattr(self, '_spot_tick_counts'):
-                    self._spot_tick_counts: dict[str, int] = {}
                 self._spot_tick_counts[underlying] = self._spot_tick_counts.get(underlying, 0) + 1
                 cnt = self._spot_tick_counts[underlying]
                 if cnt <= 3 or cnt % 5 == 0:
@@ -6839,6 +6831,7 @@ class OptionsBuyerEdgeBot:
         self.ws.set_notify_callback(self._send_alert)  # U-G: WS watchdog alert
         self.trail_engine.modify_callback = self.orders.modify_broker_sl
         self._last_pnl_alert_time: float = 0.0
+        self._last_quote_refresh_ts: dict[str, float] = {}
 
     def _send_alert(self, message: str, priority: int = 1) -> None:
         try:
@@ -7730,9 +7723,6 @@ class OptionsBuyerEdgeBot:
         if not stale_underlyings:
             return
 
-        # Cooldown tracking
-        if not hasattr(self, '_last_quote_refresh_ts'):
-            self._last_quote_refresh_ts: dict[str, float] = {}
         last_ts = self._last_quote_refresh_ts
         now = time.time()
 
