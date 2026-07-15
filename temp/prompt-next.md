@@ -169,5 +169,23 @@ Here is official 'https://github.com/decolua/9router/blob/master/docker-compose.
 And After Done in the end; Process the `9router` related only (Skip all others completely) from entire available chat/session/workspace context as the single source of truth and produce a complete, coherent, production-quality output in clean Markdown — do not invent facts, steps, values, or claims that weren't actually present or confirmed in that context. Consolidate all relevant information, decisions, corrections, and refinements discussed so far into one unified piece, eliminating redundancy and repetition, resolving contradictions by treating the most recently confirmed version as authoritative, and explicitly flagging any gap you had to fill with a reasonable assumption. Redact or placeholder any sensitive, private, or confidential information rather than reproducing it verbatim. Compress aggressively, surfacing only the decisions, conclusions, and action items that matter — omit exploratory back-and-forth. Organize as overview → key points → decisions made → open questions → next steps. Keep language concise, precise, and free of filler, using clear headings, lists, tables, code blocks, or other Markdown elements only where they genuinely aid readability, to create a polished, self-contained, ready-to-use document that a reader unfamiliar with the original conversation could still fully understand.
 ```
 
+---
 
+# New Online Auditing Pormpts
 
+### A
+```text
+Now refetch the new script and validate against below applied patches on your last findings (Verify after fetched & loaded the new script from GitHub);
+[Your/AI made changes summary goes here]
+```
+
+### B
+```text
+Now refetch the new script and validate against applied patches (By checking diff from last/previous version script) on your last findings (Verify after fetched & loaded the new script from GitHub).
+```
+
+### C
+
+```text
+
+```
