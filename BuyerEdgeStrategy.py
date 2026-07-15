@@ -3201,7 +3201,7 @@ class SignalEngine:
         best_fit_iv_side: str | None = None,
     ) -> SignalResult:
         """Compute composite directional score (−100 → +100) and trap_score (0 → 100)."""
-        cfg = self.config
+        cfg = self._config
         components: list[ScoreComponent] = []
         reasons:    list[str] = []
 
@@ -4589,8 +4589,8 @@ class StrikeSelector:
     """Selects the best entry strike using check_all_checkpoints criteria."""
 
     def __init__(self, fetcher: DataFetcher, cfg: BotConfig):
-        self.fetcher = fetcher
-        self.config  = cfg
+        self._fetcher = fetcher
+        self._config  = cfg
 
     @staticmethod
     def simple_otm(
@@ -4641,7 +4641,7 @@ class StrikeSelector:
 
         Returns None if no qualifying strike found.
         """
-        cfg = self.config
+        cfg = self._config
 
         # ── Guard: empty input ────────────────────────────────────────────────
         if not chain_rows or not spot:
@@ -4720,8 +4720,8 @@ class StrikeSelector:
         delta_available = False
         annotated: list[dict] = []
         for row in candidates:
-            abs_delta = self.fetcher.fetch_option_delta(symbol, row.get(opt_key))
-            gamma = self.fetcher.fetch_option_gamma(symbol, row.get(opt_key))
+            abs_delta = self._fetcher.fetch_option_delta(symbol, row.get(opt_key))
+            gamma = self._fetcher.fetch_option_gamma(symbol, row.get(opt_key))
             row = dict(row)                         # copy — safe to annotate
             if abs_delta is not None:
                 row["_abs_delta"] = abs_delta
@@ -6873,7 +6873,7 @@ class OptionsBuyerEdgeBot:
           Open SL/TGT orders with no matching position → cancel.
         """
         try:
-        cfg = self._config
+            cfg = self.config
             resp = self.client.positionbook()
             if not isinstance(resp, dict) or resp.get("status") != "success":
                 return
