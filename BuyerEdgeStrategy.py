@@ -6012,6 +6012,8 @@ class OrderManager:
                 f"remaining_qty={pos.remaining_qty}"
             )
             self._risk.record_exit(pnl)
+            _pts_loss = max(0.0, pos.entry_premium - executed_price)
+            self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
             tranche_record = TradeAnalytics.build_tranche(
                 underlying=underlying, pos=pos, tr=tr,
                 paper_trade=self.config.broker.paper_trade,
@@ -6784,6 +6786,8 @@ class OrderManager:
                         tr.exit_price = info.get("executed", 0)
                         tr_pnl = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price > 0 else 0.0
                         self._risk.record_exit(tr_pnl)
+                        _pts_loss = max(0.0, pos.entry_premium - tr.exit_price)
+                        self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
                         tr_exit_record = TradeAnalytics.build_tranche(
                             underlying=underlying, pos=pos, tr=tr,
                             paper_trade=cfg.broker.paper_trade,
@@ -6993,7 +6997,7 @@ class OrderManager:
             pending = list(self._state.pending_exits.items())
         for slot_id, pending_exit in pending:
             order_id = pending_exit.order_id
-            filled = self.poll_order_status(order_id, max_retries=1, sleep_secs=0)
+            raw = self._raw_order_status(order_id)
             with self._state.state_lock:
                 pos = self._state.positions.slot(slot_id)
             if not pos:
@@ -7002,10 +7006,9 @@ class OrderManager:
                 continue
             underlying = pos.underlying
             opt_sym = pos.symbol
-            if filled:
-                data           = filled.get("data") or filled
-                status         = str(data.get("order_status", "")).lower() if isinstance(data, dict) else ""
-                executed_price = float((data.get("average_price") if isinstance(data, dict) else None) or 0)
+            if raw:
+                status         = str(raw.get("order_status", "")).lower()
+                executed_price = float(raw.get("average_price", 0) or 0)
                 if status == "complete" and executed_price:
                     pnl = _calc_pnl(pos, executed_price)
                     pnl_sign = "✅" if pnl >= 0 else "❌"
@@ -7024,10 +7027,10 @@ class OrderManager:
                 elif status in ("rejected", "cancelled", "canceled"):
                     now_hm = get_ist_now().strftime("%H:%M")
                     is_past_cutoff = bool(self.config.market.square_off_time and now_hm >= self.config.market.square_off_time)
-                    exit_filled_qty = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
+                    exit_filled_qty = int(raw.get("filled_quantity", 0) or raw.get("filled_qty", 0) or 0)
 
                     if exit_filled_qty > 0:
-                        avg_price = float(data.get("average_price", 0) or 0)
+                        avg_price = float(raw.get("average_price", 0) or 0)
                         if avg_price > 0:
                             reduction = min(exit_filled_qty, pos.remaining_qty)
                             rem = reduction
@@ -7074,7 +7077,7 @@ class OrderManager:
                             best_price = 0.0
                             pnl = 0.0
                             journal_reason = ExitReason.FORCE_UNTRACK_UNKNOWN
-                            
+
                         self._finalize_exit(underlying, pos, best_price, pnl, journal_reason,
                                             exit_price_source="estimated",
                                             opt_symbol=opt_sym, pop_pending_exit=True)
@@ -7088,11 +7091,23 @@ class OrderManager:
                             pos.exit_pending = False
                         with self._state.exit_lock:
                             self._state.exit_queue.discard(pos.slot_id)
+                        # F71: SELL was rejected zero-fill; place_exit already cancelled SL/TP
+                        if pos.remaining_qty > 0:
+                            for trr in pos.tranches:
+                                trr.sl_order_id = None
+                                trr.tgt_order_id = None
+                            pos.sl_order_id = None
+                            pos.tgt_order_id = None
+                            self._place_protection_orders_sequential(
+                                underlying, pos, opt_sym, pos.remaining_qty,
+                                pos.sl, pos.tgt,
+                            )
                         self._notify(
                             f"\U0001f6a8 {self.config.broker.strategy_name}: pending EXIT {order_id} {status} for {underlying} {opt_sym}\n"
-                            "Position remains tracked; software exit may retry on next trigger.",
+                            "Position remains tracked; protection re-placed.",
                             9,
                         )
+
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
