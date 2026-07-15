@@ -818,6 +818,24 @@ class EntryConfig:
             errs.append(f"ADAPTIVE_WIN_STREAK_TRIGGER={self.adaptive_win_streak_trigger} must be >= 1")
         if self.adaptive_win_streak_step < 1:
             errs.append(f"ADAPTIVE_WIN_STREAK_STEP={self.adaptive_win_streak_step} must be >= 1")
+
+        # ── Group 3: Indicator periods — zero = ta.* crash ──
+        if self.fast_ema_period < 1 or self.slow_ema_period < 1 or self.rsi_period < 1:
+            errs.append(f"Indicator periods must be >= 1 "
+                        f"(fast_ema={self.fast_ema_period}, slow_ema={self.slow_ema_period}, "
+                        f"rsi={self.rsi_period})")
+        if self.fast_ema_period >= self.slow_ema_period:
+            errs.append(f"FAST_EMA_PERIOD={self.fast_ema_period} must be < "
+                        f"SLOW_EMA_PERIOD={self.slow_ema_period}")
+
+        # ── Group 4: Filter/reward — 0 = sentinel (filter off / no LIMIT profit) ──
+        if self.min_oi_filter < 0:
+            errs.append(f"MIN_OI_FILTER={self.min_oi_filter} must be >= 0")
+        if self.min_vol_filter < 0:
+            errs.append(f"MIN_VOL_FILTER={self.min_vol_filter} must be >= 0")
+        if self.spot_reward_pct < 0:
+            errs.append(f"SPOT_REWARD_PCT={self.spot_reward_pct} must be >= 0")
+
         return errs
 
 
@@ -977,6 +995,29 @@ class TrailConfig:
             errs.append(f"ATR_ACTIVATION_BUFFER_PTS={self.atr_activation_buffer_pts} must be >= 0")
         if self.atr_min_ratchet_improvement_pct < 0:
             errs.append(f"ATR_MIN_RATCHET_IMPROVEMENT_PCT={self.atr_min_ratchet_improvement_pct} must be >= 0")
+
+        # ── Group 1: ATR/step/delta sizing — zero always degenerate ──
+        if self.atr_period < 1:
+            errs.append(f"TRAIL_ATR_PERIOD={self.atr_period} must be >= 1")
+        if self.atr_mult <= 0:
+            errs.append(f"TRAIL_ATR_MULT={self.atr_mult} must be > 0")
+        if self.step_pts <= 0:
+            errs.append(f"TRAIL_STEP_PTS={self.step_pts} must be > 0")
+        if self.step_pct <= 0:
+            errs.append(f"TRAIL_STEP_PCT={self.step_pct} must be > 0")
+        if self.delta_itm_step_pct <= 0:
+            errs.append(f"TRAIL_DELTA_ITM_STEP_PCT={self.delta_itm_step_pct} must be > 0")
+        if self.delta_atm_step_pct <= 0:
+            errs.append(f"TRAIL_DELTA_ATM_STEP_PCT={self.delta_atm_step_pct} must be > 0")
+        if self.delta_otm_step_pct <= 0:
+            errs.append(f"TRAIL_DELTA_OTM_STEP_PCT={self.delta_otm_step_pct} must be > 0")
+
+        # ── Group 2: Activation — 0 is valid for pct (immediate), NOT for max_pts ──
+        if self.activate_at_pct < 0:
+            errs.append(f"TRAIL_ACTIVATE_AT_PCT={self.activate_at_pct} must be >= 0")
+        if self.activate_at_max_pts <= 0:
+            errs.append(f"TRAIL_ACTIVATE_AT_MAX_PTS={self.activate_at_max_pts} must be > 0")
+
         return errs
 
 # ── 3f — JournalConfig ────────────────────────────────────────────────────
@@ -6094,7 +6135,7 @@ class OrderManager:
         )
 
         if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
-            if cfg.broker.use_basket_protection and hasattr(self.client, "basketorder"):
+            if cfg.broker.use_basket_protection and hasattr(self.client, "basketorder") and not cfg.tranche.enabled:
                 self._place_protection_basket(underlying, pos, option_symbol, qty, sl, tgt)
             else:
                 self._place_protection_orders_sequential(underlying, pos, option_symbol, qty, sl, tgt)
@@ -7960,16 +8001,12 @@ class OptionsBuyerEdgeBot:
         raise KeyboardInterrupt()
 
     def _validate_thresholds(self) -> None:
-        """Check threshold relationships at startup."""
+        """Check threshold relationships (single-field checks now in TrailConfig.validate())."""
         cfg = self.config
         _act = cfg.trail.activate_at_max_pts
         _step_pts = cfg.trail.step_pts
         _step_pct = cfg.trail.step_pct
         _ep_sample = 100.0
-        if _act <= 0:
-            err(f"[VALIDATION] activate_at_max_pts={_act} must be > 0")
-        if _step_pts <= 0:
-            err(f"[VALIDATION] step_pts={_step_pts} must be > 0")
         if _step_pts >= _act:
             inf(f"[VALIDATION] step_pts={_step_pts} >= activate_at_max_pts={_act} — first step overshoots activation")
         if _ep_sample * (_step_pct / 100.0) >= _act:
