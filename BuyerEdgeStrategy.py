@@ -3160,8 +3160,8 @@ STATISTIC_REGISTRY: list[StatisticSpec] = [
 class SignalEngine:
     """Computes composite directional score and trap score from market data."""
 
-    def __init__(self, config: BotConfig):
-        self.config = config
+    def __init__(self, cfg: BotConfig):
+        self.config = cfg
 
     @staticmethod
     def iv_rank(
@@ -3306,9 +3306,9 @@ class SignalEngine:
 class DataFetcher:
     """Fetches all market data using the OpenAlgo SDK client."""
 
-    def __init__(self, client: api, config: BotConfig, notify_callback: Callable[[str, int], None] | None = None):
+    def __init__(self, client: api, cfg: BotConfig, notify_callback: Callable[[str, int], None] | None = None):
         self.client = client
-        self.config = config
+        self.config = cfg
         self._greeks_cache: OrderedDict[tuple[str, str], dict[str, float]] = OrderedDict()
         self._greeks_cache_hits: int = 0
         self._notify = notify_callback
@@ -3785,9 +3785,9 @@ class DataFetcher:
 class EntryStopLossPolicy:
     """Resolves Phase A initial hard SL points (premium-based) using delta-aware moneyness adaptation or fallback fixed points."""
 
-    def __init__(self, fetcher: DataFetcher, config: BotConfig):
+    def __init__(self, fetcher: DataFetcher, cfg: BotConfig):
         self._fetcher = fetcher
-        self._config = config
+        self._config = cfg
 
     @staticmethod
     def get_moneyness_multipliers(delta: float | None) -> tuple[str, float, float, float]:
@@ -3907,9 +3907,9 @@ class TrailSLEngine:
     Supports fixed %, ATR-based, and live Delta-based trailing steps.
     """
 
-    def __init__(self, fetcher: DataFetcher, config: BotConfig):
+    def __init__(self, fetcher: DataFetcher, cfg: BotConfig):
         self._fetcher = fetcher
-        self._config = config
+        self._config = cfg
         self.modify_callback: Callable[[str, float, str | None], bool] | None = None
         self._last_pl_pct: dict[str, float] = {}
         self._data_skip_logged: set[str] = set()
@@ -4588,9 +4588,9 @@ class TrailSLEngine:
 class StrikeSelector:
     """Selects the best entry strike using check_all_checkpoints criteria."""
 
-    def __init__(self, fetcher: DataFetcher, config: BotConfig):
+    def __init__(self, fetcher: DataFetcher, cfg: BotConfig):
         self.fetcher = fetcher
-        self.config  = config
+        self.config  = cfg
 
     @staticmethod
     def simple_otm(
@@ -4772,7 +4772,8 @@ class StrikeSelector:
         # ── Stage 4: Conviction-driven asymmetry scoring ──────────────────────
         # IV weight: lower IV = better buyer conditions.
         # IVR missing → do NOT penalize; skip IV component (set ivr_weight to 0).
-        iv_score_raw: float = (1 - (iv_rank or 0.0) / 100) if iv_rank is not None else 0.0
+        ivr_known: bool = iv_rank is not None
+        iv_score_raw: float = (1 - (iv_rank or 0.0) / 100) if ivr_known else 0.0
 
         # Delta weight scales with conviction; liquidity gets the remainder.
         delta_weight = STRIKE_DELTA_WEIGHT_BASE + conviction * STRIKE_DELTA_WEIGHT_RANGE
@@ -4877,9 +4878,9 @@ class StrikeSelector:
 class RiskManager:
     """Manages session-level risk: trade counts, loss streaks, entry cooldowns."""
 
-    def __init__(self, client: api, config: BotConfig, state: BotState):
+    def __init__(self, client: api, cfg: BotConfig, state: BotState):
         self.client  = client
-        self.config  = config
+        self.config  = cfg
         self._state  = state
 
         self._session_date               = get_ist_now().strftime("%Y-%m-%d")
@@ -5069,9 +5070,9 @@ class WebSocketManager:
     to avoid circular dependency with OrderManager.
     """
 
-    def __init__(self, client: api, config: BotConfig, state: BotState):
+    def __init__(self, client: api, cfg: BotConfig, state: BotState):
         self.client = client
-        self.config = config
+        self.config = cfg
         self._state = state
         self._exit_callback:      Callable[[str, str, str | None], None] | None = None
         self._notify_callback:    Callable[[str, int], None] | None = None   # U-G: wired after init
@@ -5565,7 +5566,7 @@ class OrderManager:
     def __init__(
         self,
         client:  api,
-        config:  BotConfig,
+        cfg:  BotConfig,
         state:   BotState,
         risk:    "RiskManager",
         ws:      WebSocketManager,
@@ -5573,7 +5574,7 @@ class OrderManager:
         notify:  Callable[[str, int], None],
     ):
         self.client = client
-        self.config = config
+        self.config = cfg
         self._state = state
         self._risk  = risk
         self._ws    = ws
@@ -6817,10 +6818,10 @@ class OptionsBuyerEdgeBot:
     two long-lived threads: WebSocket + strategy scan loop.
     """
 
-    def __init__(self, config: BotConfig):
-        self.config = config
+    def __init__(self, cfg: BotConfig):
+        self.config = cfg
         # Verbosity: 0=False (errors only, default) | 1=True (connection/auth/subscription) | 2=Debug (LTP/Quote/Depth updates)
-        api_kwargs: dict = dict(api_key=config.broker.api_key, host=config.broker.api_host, verbose=2)
+        api_kwargs: dict = dict(api_key=cfg.broker.api_key, host=cfg.broker.api_host, verbose=2)
         if config.broker.ws_url:
             api_kwargs["ws_url"] = config.broker.ws_url   # explicit override; otherwise SDK derives from host
         self.client  = api(**api_kwargs)
