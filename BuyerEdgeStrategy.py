@@ -137,21 +137,13 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F53 ◐ Pending: V2-A5 tranche signal-deterioration exit (L6937-6949) — code structure verified but awaiting live multi-position session; exits one non-runner tranche via _exit_non_runner_tranche on opposing signal.
 # F58 ✓ Fixed: _refresh_stale_snapshots write-gates skipped is_stale() check — fetched quote overwrote cache even when WS tick arrived during fetch; added or snap2.is_stale(timeout) to both write-gates.
 
-# F59 ✓ Fixed: 6 lazy-init attrs moved to __init__ (raw_cb_count, tick_counts, spot_tick_counts,
-#     data_skip_logged, kl_tick_count, last_quote_refresh_ts). Removed hasattr guards. All instance
-#     attributes declared in __init__ — no lazy hasattr patterns going forward.
-#     Also: removed dead ep = pos.entry_premium from _get_step_pts (unused). Fixed ivr_val type
-#     ambiguity (TYP-052) by inlining iv_rank guard.
-
 # ==============================================================================
 # CODING CONVENTIONS
 # ==============================================================================
 #
-# Attribute initialization:
-#   All instance attributes MUST be declared in __init__ with a type annotation.
-#   No lazy hasattr(self, '_x') patterns — they bypass type checkers, hide init-order
-#   dependencies, and make refactoring harder. If a dict/set/counter is always needed,
-#   init it empty in __init__.
+# Attribute initialization: All instance attributes MUST be declared in __init__
+# with a type annotation. No lazy hasattr(self, '_x') patterns — they bypass type
+# checkers, hide init-order dependencies, and complicate refactoring.
 
 # ==============================================================================
 # AUDIT STATUS
