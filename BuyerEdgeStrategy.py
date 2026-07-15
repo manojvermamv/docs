@@ -4932,6 +4932,7 @@ class RiskManager:
                 self._session_consecutive_losses = 0
                 self._session_consecutive_wins   = 0
                 self._daily_pnl                  = 0.0
+                self._pnl_at_last_fetch          = 0.0
                 self._last_entry_times.clear()
                 self._state.reset_market_caches()
                 self._state.reset_strike_loss_pts()
