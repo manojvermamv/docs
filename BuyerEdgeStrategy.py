@@ -3318,8 +3318,8 @@ class DataFetcher:
         self._auth_error_notified: bool = False  # One-time alert per session for UDAPI100050
         self._rate_limit_notified: bool = False  # One-time alert per session for UDAPI10005 rate limit
         # Token bucket rate limiter for fetch_quote (global across all callers)
-        self._quote_rate_limit_rps: float = config.broker.quote_api_rps
-        self._quote_burst: int = config.broker.quote_api_burst
+        self._quote_rate_limit_rps: float = cfg.broker.quote_api_rps
+        self._quote_burst: int = cfg.broker.quote_api_burst
         self._quote_tokens: float = float(self._quote_burst)
         self._quote_last_refill: float = time.time()
         self._quote_lock = threading.Lock()
@@ -6822,18 +6822,18 @@ class OptionsBuyerEdgeBot:
         self.config = cfg
         # Verbosity: 0=False (errors only, default) | 1=True (connection/auth/subscription) | 2=Debug (LTP/Quote/Depth updates)
         api_kwargs: dict = dict(api_key=cfg.broker.api_key, host=cfg.broker.api_host, verbose=2)
-        if config.broker.ws_url:
-            api_kwargs["ws_url"] = config.broker.ws_url   # explicit override; otherwise SDK derives from host
+        if cfg.broker.ws_url:
+            api_kwargs["ws_url"] = cfg.broker.ws_url   # explicit override; otherwise SDK derives from host
         self.client  = api(**api_kwargs)
-        self.state   = BotState(chain_smooth_bars=config.market.chain_smooth_bars)
-        self.risk    = RiskManager(self.client, config, self.state)
-        self.fetcher = DataFetcher(self.client, config, notify_callback=self._send_alert)
-        self.sl_policy      = EntryStopLossPolicy(self.fetcher, config)
-        self.trail_engine   = TrailSLEngine(self.fetcher, config)
-        self.scorer         = SignalEngine(config)
-        self.strikes        = StrikeSelector(self.fetcher, config)
-        self.ws             = WebSocketManager(self.client, config, self.state)
-        self.orders         = OrderManager(self.client, config, self.state, self.risk, self.ws, self.fetcher, self._send_alert)
+        self.state   = BotState(chain_smooth_bars=cfg.market.chain_smooth_bars)
+        self.risk    = RiskManager(self.client, cfg, self.state)
+        self.fetcher = DataFetcher(self.client, cfg, notify_callback=self._send_alert)
+        self.sl_policy      = EntryStopLossPolicy(self.fetcher, cfg)
+        self.trail_engine   = TrailSLEngine(self.fetcher, cfg)
+        self.scorer         = SignalEngine(cfg)
+        self.strikes        = StrikeSelector(self.fetcher, cfg)
+        self.ws             = WebSocketManager(self.client, cfg, self.state)
+        self.orders         = OrderManager(self.client, cfg, self.state, self.risk, self.ws, self.fetcher, self._send_alert)
         # Wire callbacks and dependencies to break circular dependency + consolidate API calls
         self.ws.set_fetcher(self.fetcher)       # Reuse DataFetcher cache for delta in trailing SL
         self.ws.set_exit_callback(self.orders.place_exit)
