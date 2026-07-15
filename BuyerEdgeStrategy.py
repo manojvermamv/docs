@@ -818,16 +818,6 @@ class EntryConfig:
             errs.append(f"ADAPTIVE_WIN_STREAK_TRIGGER={self.adaptive_win_streak_trigger} must be >= 1")
         if self.adaptive_win_streak_step < 1:
             errs.append(f"ADAPTIVE_WIN_STREAK_STEP={self.adaptive_win_streak_step} must be >= 1")
-        if self.fast_ema_period < 1 or self.slow_ema_period < 1 or self.rsi_period < 1:
-            errs.append(f"Indicator periods must be >= 1 (fast_ema={self.fast_ema_period}, slow_ema={self.slow_ema_period}, rsi={self.rsi_period})")
-        if self.fast_ema_period >= self.slow_ema_period:
-            errs.append(f"FAST_EMA_PERIOD={self.fast_ema_period} must be < SLOW_EMA_PERIOD={self.slow_ema_period}")
-        if self.min_oi_filter < 0:
-            errs.append(f"MIN_OI_FILTER={self.min_oi_filter} must be >= 0")
-        if self.min_vol_filter < 0:
-            errs.append(f"MIN_VOL_FILTER={self.min_vol_filter} must be >= 0")
-        if self.spot_reward_pct < 0:
-            errs.append(f"SPOT_REWARD_PCT={self.spot_reward_pct} must be >= 0")
         return errs
 
 
@@ -987,24 +977,6 @@ class TrailConfig:
             errs.append(f"ATR_ACTIVATION_BUFFER_PTS={self.atr_activation_buffer_pts} must be >= 0")
         if self.atr_min_ratchet_improvement_pct < 0:
             errs.append(f"ATR_MIN_RATCHET_IMPROVEMENT_PCT={self.atr_min_ratchet_improvement_pct} must be >= 0")
-        if self.atr_period < 1:
-            errs.append(f"TRAIL_ATR_PERIOD={self.atr_period} must be >= 1")
-        if self.atr_mult <= 0:
-            errs.append(f"TRAIL_ATR_MULT={self.atr_mult} must be > 0")
-        if self.step_pts <= 0:
-            errs.append(f"TRAIL_STEP_PTS={self.step_pts} must be > 0")
-        if self.step_pct <= 0:
-            errs.append(f"TRAIL_STEP_PCT={self.step_pct} must be > 0")
-        if self.activate_at_pct < 0:
-            errs.append(f"TRAIL_ACTIVATE_AT_PCT={self.activate_at_pct} must be >= 0")
-        if self.activate_at_max_pts < 0:
-            errs.append(f"TRAIL_ACTIVATE_AT_MAX_PTS={self.activate_at_max_pts} must be >= 0")
-        if self.delta_itm_step_pct <= 0:
-            errs.append(f"TRAIL_DELTA_ITM_STEP_PCT={self.delta_itm_step_pct} must be > 0")
-        if self.delta_atm_step_pct <= 0:
-            errs.append(f"TRAIL_DELTA_ATM_STEP_PCT={self.delta_atm_step_pct} must be > 0")
-        if self.delta_otm_step_pct <= 0:
-            errs.append(f"TRAIL_DELTA_OTM_STEP_PCT={self.delta_otm_step_pct} must be > 0")
         return errs
 
 # ── 3f — JournalConfig ────────────────────────────────────────────────────
@@ -6122,7 +6094,7 @@ class OrderManager:
         )
 
         if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
-            if cfg.broker.use_basket_protection and hasattr(self.client, "basketorder") and not cfg.tranche.enabled:
+            if cfg.broker.use_basket_protection and hasattr(self.client, "basketorder"):
                 self._place_protection_basket(underlying, pos, option_symbol, qty, sl, tgt)
             else:
                 self._place_protection_orders_sequential(underlying, pos, option_symbol, qty, sl, tgt)
