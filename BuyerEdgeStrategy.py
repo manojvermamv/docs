@@ -1050,7 +1050,8 @@ class JournalConfig:
             analytics_enabled=os.getenv("ANALYTICS_ENABLED", str(defaults.analytics_enabled)).lower() in ("1", "true", "yes"),
         )
 
-    def validate(self) -> list[str]:
+    @staticmethod
+    def validate() -> list[str]:
         return []
 
 
@@ -8003,7 +8004,8 @@ class OptionsBuyerEdgeBot:
             # Already inside a running event loop (e.g. eventlet) — skip test
             inf("[WS-TEST] SKIP — cannot run async test inside existing event loop")
 
-    def _sigterm_handler(self, _signum: int, _frame) -> None:
+    @staticmethod
+    def _sigterm_handler(_signum: int, _frame) -> None:
         raise KeyboardInterrupt()
 
     def _validate_thresholds(self) -> None:
