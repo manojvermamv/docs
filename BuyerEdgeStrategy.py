@@ -1762,6 +1762,7 @@ class PendingExit:
     order_id:   str
     reason:     str
     created_at: datetime
+    exit_qty:   int = 0  # requested exit quantity — used for partial-fill reconciliation
 
 
 # ── TradeRecord / JournalWriter ──────────────────────────────────────────
@@ -5581,6 +5582,49 @@ class OrderManager:
         self._fetcher = fetcher
         self._notify = notify
         self._journal = JournalWriter(self.config.journal.trade_journal_path)
+        self._pending_tranche_exits: dict[str, str] = {}  # key=f"{underlying}_{tr.tranche_id}" → order_id
+
+    def _cancel_and_confirm(self, order_id: str, pending: PendingEntry | None = None) -> bool:
+        """Cancel order_id and confirm dead via broker status check.
+        
+        Returns True when the order is confirmed cancelled/rejected.
+        If the order filled during the cancel race, reconciles via register_filled_entry
+        using the pending PendingEntry (if provided) and returns False.
+        Never removes the pending_entries dict entry — caller's responsibility.
+        """
+        try:
+            cancel_resp = self.client.cancelorder(order_id=order_id, strategy=self.config.broker.strategy_name)
+            if not isinstance(cancel_resp, dict) or cancel_resp.get("status") != "success":
+                inf(f"[ORDER] Cancel response not successful for {order_id}: {cancel_resp}")
+                return False
+        except Exception as exc:
+            err(f"[ORDER] Cancel-error {order_id}: ", exc)
+            return False
+        try:
+            confirm = self.client.orderstatus(order_id=order_id, strategy=self.config.broker.strategy_name)
+            if isinstance(confirm, dict):
+                data = confirm.get("data") or confirm
+                bs = str(data.get("order_status", "")).lower()
+                if bs in ("cancelled", "canceled", "rejected"):
+                    inf(f"[ORDER] Cancel confirmed for {order_id}: {bs}")
+                    return True
+                ep = float(data.get("average_price", 0) or data.get("price", 0) or 0)
+                fq = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
+                if bs in ("complete", "filled", "executed") and ep > 0 and fq > 0 and pending:
+                    self._risk.record_entry(pending.underlying)
+                    self.register_filled_entry(
+                        pending.underlying, pending.symbol, fq,
+                        pending.spot, pending.direction, ep,
+                        sl_pts=pending.sl_pts, entry_delta=pending.entry_delta,
+                        entry_conviction=pending.entry_conviction,
+                        entry_sl_source=pending.entry_sl_source,
+                    )
+                    inf(f"[ORDER] Cancel-race {order_id}: reconciled {fq} @ \u20b9{ep:.2f}")
+                    return False
+                inf(f"[ORDER] Cancel-confirm status for {order_id}: {bs}")
+        except Exception as exc:
+            err(f"[ORDER] Cancel-confirm error {order_id}: ", exc)
+        return False
 
     def poll_order_status(
         self,
@@ -6436,15 +6480,11 @@ class OrderManager:
 
             filled = self.poll_order_status(order_id)
             if not filled:
-                try:
-                    cancel_resp = self.client.cancelorder(
-                        order_id=order_id, strategy=self.config.broker.strategy_name
-                    )
-                    inf(f"[ORDER] Timed-out entry cancelled {order_id}: {cancel_resp}")
+                if self._cancel_and_confirm(order_id, pending_entry):
                     with self._state.state_lock:
                         self._state.pending_entries.pop(order_id, None)
-                except Exception as exc:
-                    err(f"[ORDER] Cancel error for timed-out entry {order_id}: ", exc)
+                else:
+                    inf(f"[ORDER] Cannot confirm cancel for {order_id} — keeping pending entry")
                 inf(f"[ORDER] Entry order {order_id} not filled within poll window — abandoning")
                 return False
 
@@ -6458,19 +6498,14 @@ class OrderManager:
 
             filled_qty = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
             if filled_qty > 0 and filled_qty != qty:
-                try:
-                    cancel_resp = self.client.cancelorder(
-                        order_id=order_id, strategy=self.config.broker.strategy_name
-                    )
-                    inf(f"[ORDER] Residual entry cancelled for {order_id}: {cancel_resp}")
+                if self._cancel_and_confirm(order_id, pending_entry):
                     qty = filled_qty
                     inf(
                         f"[ORDER] Partial fill accepted for {order_id}: requested {qty}, "
                         f"filled {filled_qty}"
                     )
-                except Exception as exc:
-                    err(f"[ORDER] Cancel residual entry error for {order_id}: ", exc)
-                    inf(f"[ORDER] Cannot confirm residual cancel — keeping pending entry")
+                else:
+                    inf(f"[ORDER] Cannot confirm residual cancel for {order_id} — keeping pending entry")
                     return False
             with self._state.state_lock:
                 self._state.pending_entries.pop(order_id, None)
@@ -6494,92 +6529,107 @@ class OrderManager:
         cfg = self.config
         if tr.is_exit_placed or tr.is_runner:
             return
-        # Cancel the tranche's opposite order (if any)
-        for attr_name, oid in [("sl_order_id", tr.sl_order_id), ("tgt_order_id", tr.tgt_order_id)]:
-            if oid:
-                try:
-                    self.client.cancelorder(order_id=oid, strategy=cfg.broker.strategy_name)
-                except Exception as exc:
-                    err(f"[ORDER] Cancel {attr_name} error for {underlying} t={tr.tranche_id}: ", exc)
-        if cfg.broker.paper_trade:
-            executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
-        else:
-            order_id = None
-            try:
-                resp = self.client.placeorder(
-                    strategy=cfg.broker.strategy_name,
-                    symbol=pos.symbol,
-                    action="SELL",
-                    exchange=cfg.market.fno_exchange,
-                    price_type="MARKET",
-                    product="MIS",
-                    quantity=tr.qty,
-                )
-                if isinstance(resp, dict) and resp.get("status") == "success":
-                    order_id = resp.get("orderid")
-                    inf(f"[ORDER] Partial exit order {order_id} placed for {underlying} t={tr.tranche_id}")
-                else:
-                    inf(f"[ORDER] Partial exit order response: {resp}")
-            except Exception as exc:
-                err(f"[ORDER] Partial exit error for {underlying} t={tr.tranche_id}: ", exc)
-            if order_id is None:
-                inf(f"[ORDER] Partial exit SELL failed for {underlying} t={tr.tranche_id} — re-placing protection")
-                try:
-                    sl_resp = self.client.placeorder(
-                        strategy=cfg.broker.strategy_name,
-                        symbol=pos.symbol,
-                        action="SELL",
-                        exchange=cfg.market.fno_exchange,
-                        price_type="SL-M",
-                        product="MIS",
-                        quantity=tr.qty,
-                        price=0,
-                        trigger_price=pos.sl,
-                    )
-                    if isinstance(sl_resp, dict) and sl_resp.get("status") == "success":
-                        tr.sl_order_id = sl_resp.get("orderid")
-                        inf(f"[ORDER] SL-M re-placed for {underlying} t={tr.tranche_id}: ₹{pos.sl:.2f}")
-                except Exception as exc:
-                    err(f"[ORDER] SL-M re-place error for {underlying} t={tr.tranche_id}: ", exc)
-                if not tr.is_runner:
-                    _tgt_price = tr.tp_pts if tr.tp_pts is not None else pos.tgt
-                    try:
-                        tgt_resp = self.client.placeorder(
-                            strategy=cfg.broker.strategy_name,
-                            symbol=pos.symbol,
-                            action="SELL",
-                            exchange=cfg.market.fno_exchange,
-                            price_type="LIMIT",
-                            product="MIS",
-                            quantity=tr.qty,
-                            price=_tgt_price,
-                        )
-                        if isinstance(tgt_resp, dict) and tgt_resp.get("status") == "success":
-                            tr.tgt_order_id = tgt_resp.get("orderid")
-                            inf(f"[ORDER] LIMIT re-placed for {underlying} t={tr.tranche_id}: ₹{_tgt_price:.2f}")
-                    except Exception as exc:
-                        err(f"[ORDER] LIMIT re-place error for {underlying} t={tr.tranche_id}: ", exc)
-                return
-            filled = self.poll_order_status(order_id)
+        # Check if we already have a pending SELL for this tranche
+        _tranche_key = f"{underlying}_{tr.tranche_id}"
+        _pending_oid = self._pending_tranche_exits.get(_tranche_key)
+        if _pending_oid:
+            filled = self.poll_order_status(_pending_oid, max_retries=1, sleep_secs=0)
             if filled:
                 data = filled.get("data") or filled
-                executed_price = float(data.get("average_price", 0) or 0)
+                bs = str(data.get("order_status", "")).lower() if isinstance(data, dict) else ""
+                ep = float(data.get("average_price", 0) or 0)
+                if bs in ("complete", "filled", "executed") and ep > 0:
+                    self._pending_tranche_exits.pop(_tranche_key, None)
+                    executed_price = ep
+                    # SELL confirmed — NOW cancel protection
+                    for attr_name, oid in [("sl_order_id", tr.sl_order_id), ("tgt_order_id", tr.tgt_order_id)]:
+                        if oid:
+                            try:
+                                self.client.cancelorder(order_id=oid, strategy=cfg.broker.strategy_name)
+                            except Exception as exc:
+                                err(f"[ORDER] Cancel {attr_name} error for {underlying} t={tr.tranche_id}: ", exc)
+                    tr.is_exit_placed = True
+                    tr.exit_reason = reason
+                    tr.exit_price = executed_price
+                    pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
+                    inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
+                        f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
+                    self._risk.record_exit(pnl)
+                    tr_exit_record = TradeAnalytics.build_tranche(
+                        underlying=underlying, pos=pos, tr=tr,
+                        paper_trade=cfg.broker.paper_trade,
+                    )
+                    self._journal.write(tr_exit_record)
+                else:
+                    inf(f"[ORDER] Tranche exit SELL {_pending_oid} status {bs} — pending")
             else:
-                executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
-                inf(f"[ORDER] Partial exit SELL unconfirmed {underlying} t={tr.tranche_id} "
-                    f"— using LTP \u20b9{executed_price:.2f}")
-        tr.is_exit_placed = True
-        tr.exit_reason = reason
-        tr.exit_price = executed_price
-        pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
-        inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
-            f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
-        self._risk.record_exit(pnl)
-        tr_exit_record = TradeAnalytics.build_tranche(
-            underlying=underlying, pos=pos, tr=tr,
-            paper_trade=cfg.broker.paper_trade,
-        )
-        self._journal.write(tr_exit_record)
+                inf(f"[ORDER] Tranche exit SELL {_pending_oid} still unconfirmed for {underlying} t={tr.tranche_id}")
+            return
+        if cfg.broker.paper_trade:
+            executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
+            tr.is_exit_placed = True
+            tr.exit_reason = reason
+            tr.exit_price = executed_price
+            pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
+            inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
+                f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
+            self._risk.record_exit(pnl)
+            tr_exit_record = TradeAnalytics.build_tranche(
+                underlying=underlying, pos=pos, tr=tr,
+                paper_trade=cfg.broker.paper_trade,
+            )
+            self._journal.write(tr_exit_record)
+            return
+        # Place SELL first — keep protection active until fill confirmed
+        order_id = None
+        try:
+            resp = self.client.placeorder(
+                strategy=cfg.broker.strategy_name,
+                symbol=pos.symbol,
+                action="SELL",
+                exchange=cfg.market.fno_exchange,
+                price_type="MARKET",
+                product="MIS",
+                quantity=tr.qty,
+            )
+            if isinstance(resp, dict) and resp.get("status") == "success":
+                order_id = resp.get("orderid")
+                inf(f"[ORDER] Partial exit order {order_id} placed for {underlying} t={tr.tranche_id}")
+            else:
+                inf(f"[ORDER] Partial exit order response: {resp}")
+        except Exception as exc:
+            err(f"[ORDER] Partial exit error for {underlying} t={tr.tranche_id}: ", exc)
+        if order_id is None:
+            inf(f"[ORDER] Partial exit SELL failed for {underlying} t={tr.tranche_id} — protection remains active")
+            return
+        filled = self.poll_order_status(order_id)
+        if filled:
+            data = filled.get("data") or filled
+            executed_price = float(data.get("average_price", 0) or 0)
+            if executed_price > 0:
+                # SELL confirmed — NOW cancel protection
+                for attr_name, oid in [("sl_order_id", tr.sl_order_id), ("tgt_order_id", tr.tgt_order_id)]:
+                    if oid:
+                        try:
+                            self.client.cancelorder(order_id=oid, strategy=cfg.broker.strategy_name)
+                        except Exception as exc:
+                            err(f"[ORDER] Cancel {attr_name} error for {underlying} t={tr.tranche_id}: ", exc)
+                tr.is_exit_placed = True
+                tr.exit_reason = reason
+                tr.exit_price = executed_price
+                pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
+                inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
+                    f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
+                self._risk.record_exit(pnl)
+                tr_exit_record = TradeAnalytics.build_tranche(
+                    underlying=underlying, pos=pos, tr=tr,
+                    paper_trade=cfg.broker.paper_trade,
+                )
+                self._journal.write(tr_exit_record)
+                return
+        # SELL submitted but fill unconfirmed — save for reconciliation, keep protection active
+        self._pending_tranche_exits[_tranche_key] = order_id
+        inf(f"[ORDER] Partial exit SELL unconfirmed for {underlying} t={tr.tranche_id} — saved for reconciliation")
 
     def place_exit(self, underlying: str, reason: str = "manual", slot_id: str | None = None) -> None:
         """Cancel broker orders first, then place SELL MARKET to exit position."""
@@ -6638,9 +6688,6 @@ class OrderManager:
                                         exit_price_source="broker_fill")
                     return
         else:
-            total_pnl = 0.0
-            total_weighted_price = 0.0
-            total_filled_qty = 0
             for attr_name, info in broker_filled.items():
                 if isinstance(info, dict) and info.get("tranche_id") is not None:
                     tr_id = info["tranche_id"]
@@ -6650,9 +6697,7 @@ class OrderManager:
                         tr.exit_reason = ExitReason.BROKER_FILLED
                         tr.exit_price = info.get("executed", 0)
                         tr_pnl = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price > 0 else 0.0
-                        total_pnl += tr_pnl
-                        total_weighted_price += tr.exit_price * tr.qty
-                        total_filled_qty += tr.qty
+                        self._risk.record_exit(tr_pnl)
                         tr_exit_record = TradeAnalytics.build_tranche(
                             underlying=underlying, pos=pos, tr=tr,
                             paper_trade=cfg.broker.paper_trade,
@@ -6660,9 +6705,19 @@ class OrderManager:
                         self._journal.write(tr_exit_record)
                         inf(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — P&L ₹{tr_pnl:.0f}")
             if pos.remaining_qty == 0:
-                avg_price = total_weighted_price / total_filled_qty if total_filled_qty else 0.0
-                self._finalize_exit(underlying, pos, avg_price, total_pnl, norm_reason,
-                                    exit_price_source="broker_fill")
+                # All tranches exited via broker fills — cleanup without _finalize_exit
+                # to avoid double-recording P&L and duplicate full-exit journal row
+                opt_sym = pos.symbol
+                self._ws.unsubscribe(self.config.market.fno_exchange, opt_sym)
+                if not self._state.positions.has_siblings(pos.slot_id):
+                    self._ws.unsubscribe_spot(pos.spot_symbol)
+                _advance_stage(pos, LifecycleStage.CLOSED)
+                inf(f"[TRAIL-EXIT] {underlying} {pos.symbol}: reason={norm_reason}, all-tranche-broker-fill")
+                with self._state.state_lock:
+                    self._state.positions.pop(pos.slot_id, None)
+                    self._state.pending_opposite_exit.discard(underlying)
+                with self._state.exit_lock:
+                    self._state.exit_queue.discard(pos.slot_id)
                 return
 
         executed_price = 0.0
@@ -6724,6 +6779,7 @@ class OrderManager:
                 order_id=order_id,
                 reason=norm_reason,
                 created_at=get_ist_now(),
+                exit_qty=pos.remaining_qty,
             )
         filled = self.poll_order_status(order_id)
         if not filled:
@@ -6887,14 +6943,43 @@ class OrderManager:
                     if exit_filled_qty > 0:
                         avg_price = float(data.get("average_price", 0) or 0)
                         if avg_price > 0:
-                            pnl = _calc_pnl(pos, avg_price)
-                            journal_reason = ExitReason.FORCE_UNTRACK_EST
-                            self._finalize_exit(underlying, pos, avg_price, pnl, journal_reason,
-                                                exit_price_source="estimated",
-                                                opt_symbol=opt_sym, pop_pending_exit=True)
+                            reduction = min(exit_filled_qty, pos.remaining_qty)
+                            tr_pnl = _calc_pnl(pos, avg_price, qty=reduction)
+                            self._risk.record_exit(tr_pnl)
+                            _pts_loss = max(0.0, pos.entry_premium - avg_price)
+                            self._state.record_strike_loss(opt_sym, pos.option_type, _pts_loss)
+                            # Reduce tracked qty
+                            if len(pos.tranches) <= 1:
+                                pos.core.qty = max(0, pos.core.qty - reduction)
+                            else:
+                                rem = reduction
+                                for tr in pos.tranches:
+                                    if rem <= 0:
+                                        break
+                                    if not tr.is_exit_placed:
+                                        reduce_by = min(rem, tr.qty)
+                                        tr.qty -= reduce_by
+                                        rem -= reduce_by
+                            # Re-place protection for residual (old orders were cancelled by place_exit)
+                            if pos.remaining_qty > 0:
+                                for tr in pos.tranches:
+                                    tr.sl_order_id = None
+                                    tr.tgt_order_id = None
+                                pos.sl_order_id = None
+                                pos.tgt_order_id = None
+                                self._place_protection_orders_sequential(
+                                    underlying, pos, opt_sym, pos.remaining_qty,
+                                    pos.sl, pos.tgt,
+                                )
+                            # Clean up pending exit
+                            with self._state.state_lock:
+                                self._state.pending_exits.pop(slot_id, None)
+                                pos.exit_pending = False
+                            with self._state.exit_lock:
+                                self._state.exit_queue.discard(pos.slot_id)
                             inf(
-                                f"[PENDING] EXIT {order_id} {status} — partial fill {exit_filled_qty} "
-                                f"@ \u20b9{avg_price:.2f} — finalized as estimated exit"
+                                f"[PENDING] EXIT {order_id} {status} — partial fill {reduction} "
+                                f"@ \u20b9{avg_price:.2f} — qty reduced, protection re-placed"
                             )
                             continue
 
