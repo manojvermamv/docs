@@ -6441,14 +6441,12 @@ class OrderManager:
                         order_id=order_id, strategy=self.config.broker.strategy_name
                     )
                     inf(f"[ORDER] Timed-out entry cancelled {order_id}: {cancel_resp}")
+                    with self._state.state_lock:
+                        self._state.pending_entries.pop(order_id, None)
                 except Exception as exc:
                     err(f"[ORDER] Cancel error for timed-out entry {order_id}: ", exc)
-                with self._state.state_lock:
-                    self._state.pending_entries.pop(order_id, None)
                 inf(f"[ORDER] Entry order {order_id} not filled within poll window — abandoning")
                 return False
-            with self._state.state_lock:
-                self._state.pending_entries.pop(order_id, None)
 
             data       = filled.get("data") or filled
             executed   = float(data.get("average_price", 0) or 0)
@@ -6460,18 +6458,22 @@ class OrderManager:
 
             filled_qty = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
             if filled_qty > 0 and filled_qty != qty:
-                inf(
-                    f"[ORDER] Partial fill accepted for {order_id}: requested {qty}, "
-                    f"filled {filled_qty}"
-                )
-                qty = filled_qty
                 try:
                     cancel_resp = self.client.cancelorder(
                         order_id=order_id, strategy=self.config.broker.strategy_name
                     )
                     inf(f"[ORDER] Residual entry cancelled for {order_id}: {cancel_resp}")
+                    qty = filled_qty
+                    inf(
+                        f"[ORDER] Partial fill accepted for {order_id}: requested {qty}, "
+                        f"filled {filled_qty}"
+                    )
                 except Exception as exc:
                     err(f"[ORDER] Cancel residual entry error for {order_id}: ", exc)
+                    inf(f"[ORDER] Cannot confirm residual cancel — keeping pending entry")
+                    return False
+            with self._state.state_lock:
+                self._state.pending_entries.pop(order_id, None)
 
             self._risk.record_entry(underlying)
             self.register_filled_entry(
@@ -6521,7 +6523,42 @@ class OrderManager:
             except Exception as exc:
                 err(f"[ORDER] Partial exit error for {underlying} t={tr.tranche_id}: ", exc)
             if order_id is None:
-                inf(f"[ORDER] Partial exit SELL failed for {underlying} t={tr.tranche_id} — aborting")
+                inf(f"[ORDER] Partial exit SELL failed for {underlying} t={tr.tranche_id} — re-placing protection")
+                try:
+                    sl_resp = self.client.placeorder(
+                        strategy=cfg.broker.strategy_name,
+                        symbol=pos.symbol,
+                        action="SELL",
+                        exchange=cfg.market.fno_exchange,
+                        price_type="SL-M",
+                        product="MIS",
+                        quantity=tr.qty,
+                        price=0,
+                        trigger_price=pos.sl,
+                    )
+                    if isinstance(sl_resp, dict) and sl_resp.get("status") == "success":
+                        tr.sl_order_id = sl_resp.get("orderid")
+                        inf(f"[ORDER] SL-M re-placed for {underlying} t={tr.tranche_id}: ₹{pos.sl:.2f}")
+                except Exception as exc:
+                    err(f"[ORDER] SL-M re-place error for {underlying} t={tr.tranche_id}: ", exc)
+                if not tr.is_runner:
+                    _tgt_price = tr.tp_pts if tr.tp_pts is not None else pos.tgt
+                    try:
+                        tgt_resp = self.client.placeorder(
+                            strategy=cfg.broker.strategy_name,
+                            symbol=pos.symbol,
+                            action="SELL",
+                            exchange=cfg.market.fno_exchange,
+                            price_type="LIMIT",
+                            product="MIS",
+                            quantity=tr.qty,
+                            price=_tgt_price,
+                        )
+                        if isinstance(tgt_resp, dict) and tgt_resp.get("status") == "success":
+                            tr.tgt_order_id = tgt_resp.get("orderid")
+                            inf(f"[ORDER] LIMIT re-placed for {underlying} t={tr.tranche_id}: ₹{_tgt_price:.2f}")
+                    except Exception as exc:
+                        err(f"[ORDER] LIMIT re-place error for {underlying} t={tr.tranche_id}: ", exc)
                 return
             filled = self.poll_order_status(order_id)
             if filled:
@@ -6601,6 +6638,9 @@ class OrderManager:
                                         exit_price_source="broker_fill")
                     return
         else:
+            total_pnl = 0.0
+            total_weighted_price = 0.0
+            total_filled_qty = 0
             for attr_name, info in broker_filled.items():
                 if isinstance(info, dict) and info.get("tranche_id") is not None:
                     tr_id = info["tranche_id"]
@@ -6609,11 +6649,19 @@ class OrderManager:
                         tr.is_exit_placed = True
                         tr.exit_reason = ExitReason.BROKER_FILLED
                         tr.exit_price = info.get("executed", 0)
-                        inf(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — marked as exited")
+                        tr_pnl = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price > 0 else 0.0
+                        total_pnl += tr_pnl
+                        total_weighted_price += tr.exit_price * tr.qty
+                        total_filled_qty += tr.qty
+                        tr_exit_record = TradeAnalytics.build_tranche(
+                            underlying=underlying, pos=pos, tr=tr,
+                            paper_trade=cfg.broker.paper_trade,
+                        )
+                        self._journal.write(tr_exit_record)
+                        inf(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — P&L ₹{tr_pnl:.0f}")
             if pos.remaining_qty == 0:
-                executed_price = max((t.exit_price or 0) for t in pos.tranches if t.is_exit_placed) or 0.0
-                pnl = _calc_pnl(pos, executed_price) if executed_price > 0 else 0.0
-                self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
+                avg_price = total_weighted_price / total_filled_qty if total_filled_qty else 0.0
+                self._finalize_exit(underlying, pos, avg_price, total_pnl, norm_reason,
                                     exit_price_source="broker_fill")
                 return
 
@@ -6834,6 +6882,21 @@ class OrderManager:
                 elif status in ("rejected", "cancelled", "canceled"):
                     now_hm = get_ist_now().strftime("%H:%M")
                     is_past_cutoff = bool(self.config.market.square_off_time and now_hm >= self.config.market.square_off_time)
+                    exit_filled_qty = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
+
+                    if exit_filled_qty > 0:
+                        avg_price = float(data.get("average_price", 0) or 0)
+                        if avg_price > 0:
+                            pnl = _calc_pnl(pos, avg_price)
+                            journal_reason = ExitReason.FORCE_UNTRACK_EST
+                            self._finalize_exit(underlying, pos, avg_price, pnl, journal_reason,
+                                                exit_price_source="estimated",
+                                                opt_symbol=opt_sym, pop_pending_exit=True)
+                            inf(
+                                f"[PENDING] EXIT {order_id} {status} — partial fill {exit_filled_qty} "
+                                f"@ \u20b9{avg_price:.2f} — finalized as estimated exit"
+                            )
+                            continue
 
                     if is_past_cutoff:
                         best_price = self._resolve_option_ltp(underlying, opt_sym)
