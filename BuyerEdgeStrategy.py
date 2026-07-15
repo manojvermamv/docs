@@ -3161,7 +3161,7 @@ class SignalEngine:
     """Computes composite directional score and trap score from market data."""
 
     def __init__(self, cfg: BotConfig):
-        self.config = cfg
+        self._config = cfg
 
     @staticmethod
     def iv_rank(
@@ -6873,7 +6873,7 @@ class OptionsBuyerEdgeBot:
           Open SL/TGT orders with no matching position → cancel.
         """
         try:
-            cfg = self.config
+        cfg = self._config
             resp = self.client.positionbook()
             if not isinstance(resp, dict) or resp.get("status") != "success":
                 return
