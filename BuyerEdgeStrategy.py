@@ -5658,15 +5658,16 @@ class OrderManager:
         filled_qty = min(filled_qty, tranche.qty)
         # Build a temporary Tranche for the filled slice (journal only, not persisted)
         filled_slice = Tranche(
-            tranche_id=tranche.tranche_id,
+            tranche_id=f"{tranche.tranche_id}:partial",
             qty=filled_qty,
-            tp_pts=tranche.tp_pts,
+            sl=tranche.sl,
+            initial_sl=tranche.initial_sl,
             is_runner=tranche.is_runner,
-            entry_time=tranche.entry_time,
+            tp_pts=tranche.tp_pts,
+            is_exit_placed=True,
+            exit_price=price,
+            exit_reason=reason.value if isinstance(reason, ExitReason) else str(reason),
         )
-        filled_slice.exit_price = price
-        filled_slice.exit_reason = str(reason) if isinstance(reason, ExitReason) else reason
-        filled_slice.is_exit_placed = True
         tr_pnl = _calc_pnl(pos, price, qty=filled_qty)
         self._risk.record_exit(tr_pnl)
         _pts_loss = max(0.0, pos.entry_premium - price)
@@ -5690,6 +5691,19 @@ class OrderManager:
             f"[PARTIAL] {underlying} {opt_sym}: filled {filled_qty} @ \u20b9{price:.2f} "
             f"P&L \u20b9{tr_pnl:.0f} | residual {tranche.qty}"
         )
+
+    def _raw_order_status(self, order_id: str) -> dict | None:
+        """One-shot orderstatus call. Returns the full response dict (data layer)
+        for any status — including rejected/cancelled. Returns None on error."""
+        try:
+            resp = self.client.orderstatus(order_id=order_id, strategy=self.config.broker.strategy_name)
+            if isinstance(resp, dict) and resp.get("status") == "success":
+                data = resp.get("data") or resp
+                if isinstance(data, dict) and data.get("order_status"):
+                    return data
+        except Exception as exc:
+            err(f"[ORDER] status error {order_id}: ", exc)
+        return None
 
     def poll_order_status(
         self,
@@ -6600,16 +6614,14 @@ class OrderManager:
         _tranche_key = f"{underlying}_{tr.tranche_id}"
         _pending_oid = self._pending_tranche_exits.get(_tranche_key)
         if _pending_oid:
-            filled = self.poll_order_status(_pending_oid, max_retries=1, sleep_secs=0)
-            if filled:
-                data = filled.get("data") or filled
-                bs = str(data.get("order_status", "")).lower() if isinstance(data, dict) else ""
-                ep = float(data.get("average_price", 0) or 0)
-                fq = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
+            raw = self._raw_order_status(_pending_oid)
+            if raw:
+                bs = str(raw.get("order_status", "")).lower()
+                ep = float(raw.get("average_price", 0) or 0)
+                fq = int(raw.get("filled_quantity", 0) or raw.get("filled_qty", 0) or 0)
                 if bs in ("complete", "filled", "executed") and ep > 0 and fq > 0:
                     self._pending_tranche_exits.pop(_tranche_key, None)
                     self.apply_confirmed_partial_exit(pos, tr, fq, ep, reason, underlying, pos.symbol)
-                    # Cancel the corresponding protection orders
                     for attr_name, oid in [("sl_order_id", tr.sl_order_id), ("tgt_order_id", tr.tgt_order_id)]:
                         if oid:
                             try:
@@ -6620,7 +6632,6 @@ class OrderManager:
                 elif bs in ("cancelled", "canceled", "rejected") and fq > 0 and ep > 0:
                     self._pending_tranche_exits.pop(_tranche_key, None)
                     self.apply_confirmed_partial_exit(pos, tr, fq, ep, reason, underlying, pos.symbol)
-                    # Reissue protection for residual
                     if pos.remaining_qty > 0:
                         for trr in pos.tranches:
                             trr.sl_order_id = None
@@ -6638,7 +6649,7 @@ class OrderManager:
                 else:
                     inf(f"[ORDER] Tranche exit SELL {_pending_oid} status {bs} — still pending")
             else:
-                inf(f"[ORDER] Tranche exit SELL {_pending_oid} still unconfirmed for {underlying} t={tr.tranche_id}")
+                inf(f"[ORDER] Tranche exit SELL {_pending_oid} status check failed — will retry")
             return
         if cfg.broker.paper_trade:
             executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
