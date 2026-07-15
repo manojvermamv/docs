@@ -456,6 +456,7 @@ class ExitReason:
     FORCE_UNTRACK_UNKNOWN = "FORCE_UNTRACK_UNKNOWN"
     MANUAL              = "MANUAL"
     SIGNAL_FLIP         = "SIGNAL_FLIP"
+    BROKER_FILLED       = "BROKER_FILLED"
     OTHER               = "OTHER"
     
     # Internal mapping from raw reason strings to normalized enum
@@ -2432,8 +2433,7 @@ class BotState:
             return float(self._strike_loss_pts.get(key, 0.0))
 
     def reset_strike_loss_pts(self) -> None:
-        with self.state_lock:
-            self._strike_loss_pts.clear()
+        self._strike_loss_pts.clear()
 
 
 def _smooth_greeks(history: deque, lookback: int | None = None,
@@ -6435,11 +6435,20 @@ class OrderManager:
                 )
 
             filled = self.poll_order_status(order_id)
-            with self._state.state_lock:
-                self._state.pending_entries.pop(order_id, None)
             if not filled:
+                try:
+                    cancel_resp = self.client.cancelorder(
+                        order_id=order_id, strategy=self.config.broker.strategy_name
+                    )
+                    inf(f"[ORDER] Timed-out entry cancelled {order_id}: {cancel_resp}")
+                except Exception as exc:
+                    err(f"[ORDER] Cancel error for timed-out entry {order_id}: ", exc)
+                with self._state.state_lock:
+                    self._state.pending_entries.pop(order_id, None)
                 inf(f"[ORDER] Entry order {order_id} not filled within poll window — abandoning")
                 return False
+            with self._state.state_lock:
+                self._state.pending_entries.pop(order_id, None)
 
             data       = filled.get("data") or filled
             executed   = float(data.get("average_price", 0) or 0)
@@ -6456,6 +6465,13 @@ class OrderManager:
                     f"filled {filled_qty}"
                 )
                 qty = filled_qty
+                try:
+                    cancel_resp = self.client.cancelorder(
+                        order_id=order_id, strategy=self.config.broker.strategy_name
+                    )
+                    inf(f"[ORDER] Residual entry cancelled for {order_id}: {cancel_resp}")
+                except Exception as exc:
+                    err(f"[ORDER] Cancel residual entry error for {order_id}: ", exc)
 
             self._risk.record_entry(underlying)
             self.register_filled_entry(
@@ -6476,8 +6492,6 @@ class OrderManager:
         cfg = self.config
         if tr.is_exit_placed or tr.is_runner:
             return
-        tr.is_exit_placed = True
-        tr.exit_reason = reason
         # Cancel the tranche's opposite order (if any)
         for attr_name, oid in [("sl_order_id", tr.sl_order_id), ("tgt_order_id", tr.tgt_order_id)]:
             if oid:
@@ -6488,6 +6502,7 @@ class OrderManager:
         if cfg.broker.paper_trade:
             executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
         else:
+            order_id = None
             try:
                 resp = self.client.placeorder(
                     strategy=cfg.broker.strategy_name,
@@ -6505,7 +6520,19 @@ class OrderManager:
                     inf(f"[ORDER] Partial exit order response: {resp}")
             except Exception as exc:
                 err(f"[ORDER] Partial exit error for {underlying} t={tr.tranche_id}: ", exc)
-            executed_price = tr.exit_price or pos.entry_premium
+            if order_id is None:
+                inf(f"[ORDER] Partial exit SELL failed for {underlying} t={tr.tranche_id} — aborting")
+                return
+            filled = self.poll_order_status(order_id)
+            if filled:
+                data = filled.get("data") or filled
+                executed_price = float(data.get("average_price", 0) or 0)
+            else:
+                executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
+                inf(f"[ORDER] Partial exit SELL unconfirmed {underlying} t={tr.tranche_id} "
+                    f"— using LTP \u20b9{executed_price:.2f}")
+        tr.is_exit_placed = True
+        tr.exit_reason = reason
         tr.exit_price = executed_price
         pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
         inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
@@ -6562,12 +6589,31 @@ class OrderManager:
         if cfg.broker.broker_sl_orders:
             broker_filled = self.cancel_broker_orders(underlying, slot_id=pos.slot_id)
 
-        for attr_name, info in broker_filled.items():
-            if isinstance(info, dict) and info.get("order_status") in ("complete", "filled", "executed"):
-                executed_price = info.get("executed", 0)
-                inf(f"[ORDER] Broker {attr_name} already filled at ₹{executed_price:.2f} — skipping SELL")
-                pnl = _calc_pnl(pos, float(executed_price))
-                self._finalize_exit(underlying, pos, float(executed_price), pnl, norm_reason,
+        is_multi_tranche = any("tranche_id" in v for v in broker_filled.values())
+
+        if not is_multi_tranche:
+            for attr_name, info in broker_filled.items():
+                if isinstance(info, dict) and info.get("order_status") in ("complete", "filled", "executed"):
+                    executed_price = info.get("executed", 0)
+                    inf(f"[ORDER] Broker {attr_name} already filled at ₹{executed_price:.2f} — skipping SELL")
+                    pnl = _calc_pnl(pos, float(executed_price))
+                    self._finalize_exit(underlying, pos, float(executed_price), pnl, norm_reason,
+                                        exit_price_source="broker_fill")
+                    return
+        else:
+            for attr_name, info in broker_filled.items():
+                if isinstance(info, dict) and info.get("tranche_id") is not None:
+                    tr_id = info["tranche_id"]
+                    tr = next((t for t in pos.tranches if t.tranche_id == tr_id), None)
+                    if tr and not tr.is_exit_placed:
+                        tr.is_exit_placed = True
+                        tr.exit_reason = ExitReason.BROKER_FILLED
+                        tr.exit_price = info.get("executed", 0)
+                        inf(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — marked as exited")
+            if pos.remaining_qty == 0:
+                executed_price = max((t.exit_price or 0) for t in pos.tranches if t.is_exit_placed) or 0.0
+                pnl = _calc_pnl(pos, executed_price) if executed_price > 0 else 0.0
+                self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
                                     exit_price_source="broker_fill")
                 return
 
@@ -6642,10 +6688,20 @@ class OrderManager:
             )
             return
 
-        with self._state.state_lock:
-            self._state.pending_exits.pop(pos.slot_id, None)
         data           = filled.get("data") or filled
         executed_price = float(data.get("average_price", 0) or 0)
+        filled_qty     = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
+        order_qty      = int(data.get("quantity", 0) or 0)
+
+        if filled_qty > 0 and order_qty > 0 and filled_qty < order_qty:
+            inf(
+                f"[ORDER] Exit partial fill for {underlying}: {filled_qty}/{order_qty} — "
+                f"leaving in pending_exits for full reconciliation"
+            )
+            return
+
+        with self._state.state_lock:
+            self._state.pending_exits.pop(pos.slot_id, None)
 
         pnl = _calc_pnl(pos, executed_price)
         self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
@@ -6696,6 +6752,7 @@ class OrderManager:
                     if filled_qty > 0 and filled_qty != pending_entry.qty:
                         inf(f"[PENDING] Partial fill: requested {pending_entry.qty}, filled {filled_qty}")
                     use_qty = filled_qty if filled_qty > 0 else pending_entry.qty
+                    self._risk.record_entry(underlying)
                     self.register_filled_entry(
                         underlying, pending_entry.symbol, use_qty,
                         pending_entry.spot, pending_entry.direction, price,
@@ -7532,12 +7589,15 @@ class OptionsBuyerEdgeBot:
             _log_greeks_perf(_guard_reason.replace(" ", "-"), sep_count=79)
             return
         if _guard_reason == "opposite_exit_pending":
+            _opp_slots: list[str] = []
             with state.state_lock:
                 for _opp in state.position_book.get_all(symbol):
                     if _opp.core.option_type != direction and not _opp.exit_pending:
                         _opp.exit_pending = True
-                        orders.place_exit(symbol, "opposite_side_signal", slot_id=_opp.slot_id)
+                        _opp_slots.append(_opp.slot_id)
             state.pending_opposite_exit.add(symbol)
+            for _sid in _opp_slots:
+                orders.place_exit(symbol, "opposite_side_signal", slot_id=_sid)
             inf(f"[SCAN] {symbol}: deferring entry — triggered opposite-side exit")
             _log_greeks_perf("opposite-exit-pending", sep_count=79)
             return
