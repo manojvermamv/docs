@@ -6662,6 +6662,8 @@ class OrderManager:
             inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
                 f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
             self._risk.record_exit(pnl)
+            _pts_loss = max(0.0, pos.entry_premium - executed_price)
+            self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
             tr_exit_record = TradeAnalytics.build_tranche(
                 underlying=underlying, pos=pos, tr=tr,
                 paper_trade=cfg.broker.paper_trade,
@@ -6709,6 +6711,8 @@ class OrderManager:
                 inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
                     f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
                 self._risk.record_exit(pnl)
+                _pts_loss = max(0.0, pos.entry_premium - executed_price)
+                self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
                 tr_exit_record = TradeAnalytics.build_tranche(
                     underlying=underlying, pos=pos, tr=tr,
                     paper_trade=cfg.broker.paper_trade,
