@@ -5685,8 +5685,11 @@ class OrderManager:
         else:
             tranche.sl_order_id = None
             tranche.tgt_order_id = None
-            pos.sl_order_id = None
-            pos.tgt_order_id = None
+            # NOT clearing pos.sl_order_id / pos.tgt_order_id here:
+            # they belong to the runner tranche; this call processes a
+            # non-runner (guarded by caller) but the else branch fires
+            # when residual remains — clearing the runner's IDs would
+            # cause duplicate reissue on the next verify pass.
         inf(
             f"[PARTIAL] {underlying} {opt_sym}: filled {filled_qty} @ \u20b9{price:.2f} "
             f"P&L \u20b9{tr_pnl:.0f} | residual {tranche.qty}"
