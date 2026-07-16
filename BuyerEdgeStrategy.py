@@ -6539,20 +6539,21 @@ class OrderManager:
             inf(f"[ORDER] Entry order {order_id} placed for {underlying} ({option_symbol} x{qty})")
 
             # Add to pending entries for reconciliation
+            pending_entry = PendingEntry(
+                underlying=underlying,
+                order_id=order_id,
+                symbol=option_symbol,
+                qty=qty,
+                spot=spot,
+                direction=direction,
+                sl_pts=resolved_sl_pts,
+                created_at=get_ist_now(),
+                entry_delta=entry_delta,
+                entry_conviction=entry_conviction,
+                entry_sl_source=entry_sl_source,
+            )
             with self._state.state_lock:
-                self._state.pending_entries[order_id] = PendingEntry(
-                    underlying=underlying,
-                    order_id=order_id,
-                    symbol=option_symbol,
-                    qty=qty,
-                    spot=spot,
-                    direction=direction,
-                    sl_pts=resolved_sl_pts,
-                    created_at=get_ist_now(),
-                    entry_delta=entry_delta,
-                    entry_conviction=entry_conviction,
-                    entry_sl_source=entry_sl_source,
-                )
+                self._state.pending_entries[order_id] = pending_entry
 
             filled = self.poll_order_status(order_id)
             if not filled:
