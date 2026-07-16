@@ -319,6 +319,7 @@ from enum import Enum
 from typing import ClassVar,  Any, Callable
 import numpy as np
 import pandas as pd
+import openalgo
 from openalgo import api, ta
 
 # Ensure UTF-8 output on Windows (cp1252 console cannot encode ₹ and other Unicode chars).
