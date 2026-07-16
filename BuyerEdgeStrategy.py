@@ -516,6 +516,7 @@ class BrokerConfig:
     quote_api_rps:        float = 30.0
     quote_api_burst:      int   = 10
     snapshot_stale_timeout: float = 30.0
+    broker_api_timeout:     float = 30.0
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -533,6 +534,7 @@ class BrokerConfig:
             quote_api_rps=float(os.getenv("QUOTE_API_RPS", str(cls.quote_api_rps))),
             quote_api_burst=int(os.getenv("QUOTE_API_BURST", str(cls.quote_api_burst))),
             snapshot_stale_timeout=float(os.getenv("SNAPSHOT_STALE_TIMEOUT", str(cls.snapshot_stale_timeout))),
+            broker_api_timeout=float(os.getenv("BROKER_API_TIMEOUT", str(cls.broker_api_timeout))),
         )
 
     def validate(self) -> list[str]:
@@ -549,6 +551,8 @@ class BrokerConfig:
             errs.append(f"QUOTE_API_BURST={self.quote_api_burst} must be > 0")
         if not self.strategy_name:
             errs.append("STRATEGY_NAME must not be empty")
+        if self.broker_api_timeout < 5:
+            errs.append(f"BROKER_API_TIMEOUT={self.broker_api_timeout} must be >= 5")
         return errs
 
 
@@ -7130,7 +7134,7 @@ class OptionsBuyerEdgeBot:
     def __init__(self, cfg: BotConfig):
         self.config = cfg
         # Verbosity: 0=False (errors only, default) | 1=True (connection/auth/subscription) | 2=Debug (LTP/Quote/Depth updates)
-        api_kwargs: dict = dict(api_key=cfg.broker.api_key, host=cfg.broker.api_host, verbose=2)
+        api_kwargs: dict = dict(api_key=cfg.broker.api_key, host=cfg.broker.api_host, verbose=2, timeout=cfg.broker.broker_api_timeout)
         if cfg.broker.ws_url:
             api_kwargs["ws_url"] = cfg.broker.ws_url   # explicit override; otherwise SDK derives from host
         self.client  = api(**api_kwargs)
@@ -7461,6 +7465,7 @@ class OptionsBuyerEdgeBot:
         cfg = self.config
         inf("=" * 70)
         inf(f"  {cfg.broker.strategy_name}{'  [PAPER TRADE]' if cfg.broker.paper_trade else ''}")
+        inf(f"  SDK version     : openalgo {api.__version__}")
         inf("=" * 70)
         inf(f"  API Host        : {cfg.broker.api_host}")
         inf(f"  WebSocket URL   : {cfg.broker.ws_url if cfg.broker.ws_url else '(SDK auto-derive from host)'}")
