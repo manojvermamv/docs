@@ -338,19 +338,19 @@ INFO_ENABLED  = True
 
 def dbg(*args, **kwargs):
     if DEBUG_ENABLED:
-        print(f"{get_ist_now():%H:%M:%S}", *args, **kwargs)
+        print(f"{get_ist_now():%H:%M:%S}", *args, **kwargs, flush=True)
 
 def inf(*args, **kwargs):
     if INFO_ENABLED:
-        print(f"{get_ist_now():%H:%M:%S}", *args, **kwargs)
+        print(f"{get_ist_now():%H:%M:%S}", *args, **kwargs, flush=True)
 
 def err(msg: str, exc: BaseException | None = None, *, always: bool = True):
     if always:
         ts = f"{get_ist_now():%H:%M:%S}"
         if exc is not None:
-            print(f"{ts} [ERROR] {msg}: {exc}")
+            print(f"{ts} [ERROR] {msg}: {exc}", flush=True)
         else:
-            print(f"{ts} [ERROR] {msg}")
+            print(f"{ts} [ERROR] {msg}", flush=True)
 
 
 # ===============================================================================
