@@ -7466,7 +7466,7 @@ class OptionsBuyerEdgeBot:
         cfg = self.config
         inf("=" * 70)
         inf(f"  {cfg.broker.strategy_name}{'  [PAPER TRADE]' if cfg.broker.paper_trade else ''}")
-        inf(f"  SDK version     : openalgo {api.__version__}")
+        inf(f"  SDK version     : openalgo {openalgo.__version__}")
         inf("=" * 70)
         inf(f"  API Host        : {cfg.broker.api_host}")
         inf(f"  WebSocket URL   : {cfg.broker.ws_url if cfg.broker.ws_url else '(SDK auto-derive from host)'}")
