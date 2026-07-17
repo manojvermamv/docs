@@ -135,8 +135,13 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F51 ✓ (reserved)
 # F52 ✓ Fixed: V2-A2 escalation violated monotonicity (min() could reduce SL) and bypassed broker confirm — removed entirely; V2-A6, opposite_side_exit_on_signal, V2-A1 handle same scenario.
 # F53 ◐ Pending: V2-A5 tranche signal-deterioration exit (L6937-6949) — code structure verified but awaiting live multi-position session; exits one non-runner tranche via _exit_non_runner_tranche on opposing signal.
+# F54 ✓ Fixed: modify_broker_sl sent pos.qty instead of remaining_qty — multi-tranche runner SL-M inflates to original qty after TP fill; fixed with quantity=pos.remaining_qty.
+# F55 ✓ Fixed: VWAP had 3 bugs — iloc[-5:] slice before ta.vwap destroyed Session anchor, ndarray .iloc[-1] raised AttributeError, zero-volume NSE_INDEX blocked all VWAP; fixed with full df_today, ta_value ndarray-safe indexing, np.ones volume fallback.
+# F56 ✓ Fixed: Unavailable specs inflated MAX_RAW_SCORE denominator — ScoreComponent gained available flag; IndicatorSpec/StatisticSpec set False on None returns; aggregator filters sum by c.available.
+# F57 ✓ Fixed: Missing PCR (None from _compute_pcr) false-triggered trap-score alarm at pcr=0 — _intermediates.get("pcr") with no default + is not None guard before threshold comparison.
 # F58 ✓ Fixed: _refresh_stale_snapshots write-gates skipped is_stale() check — fetched quote overwrote cache even when WS tick arrived during fetch; added or snap2.is_stale(timeout) to both write-gates.
 # F59 ✓ Fixed: Reentrant state_lock deadlock on strategy thread — not a slow API call. check_entry_gates() acquired state_lock then accessed daily_pnl, which called _maybe_reset_daily_state() which tried to acquire the same non-reentrant Lock — same thread blocked on itself. Fixed by reading daily_pnl before the lock block.
+# F60 ✓ Fixed: snapshot_stale_timeout=5s triggered Upstox UDAPI10005 rate limit on every scan — stale snapshot → DATA-MISS → trail blind; increased default to 30.0, overridable via SNAPSHOT_STALE_TIMEOUT env var.
 
 # ==============================================================================
 # CODING CONVENTIONS
