@@ -517,9 +517,7 @@ class BrokerConfig:
     order_status_poll_interval: float = 2.0
     quote_api_rps:        float = 30.0
     quote_api_burst:      int   = 10
-    snapshot_stale_timeout:         float = 30.0
-    broker_api_timeout:               float = 10.0
-    pending_entry_max_age_secs:       float = 300.0
+    snapshot_stale_timeout: float = 30.0
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -537,8 +535,6 @@ class BrokerConfig:
             quote_api_rps=float(os.getenv("QUOTE_API_RPS", str(cls.quote_api_rps))),
             quote_api_burst=int(os.getenv("QUOTE_API_BURST", str(cls.quote_api_burst))),
             snapshot_stale_timeout=float(os.getenv("SNAPSHOT_STALE_TIMEOUT", str(cls.snapshot_stale_timeout))),
-            broker_api_timeout=float(os.getenv("BROKER_API_TIMEOUT", str(cls.broker_api_timeout))),
-            pending_entry_max_age_secs=float(os.getenv("PENDING_ENTRY_MAX_AGE_SECS", str(cls.pending_entry_max_age_secs))),
         )
 
     def validate(self) -> list[str]:
@@ -555,20 +551,7 @@ class BrokerConfig:
             errs.append(f"QUOTE_API_BURST={self.quote_api_burst} must be > 0")
         if not self.strategy_name:
             errs.append("STRATEGY_NAME must not be empty")
-        if self.broker_api_timeout < 5:
-            errs.append(f"BROKER_API_TIMEOUT={self.broker_api_timeout} must be >= 5")
-        if self.pending_entry_max_age_secs < 30:
-            errs.append(f"PENDING_ENTRY_MAX_AGE_SECS={self.pending_entry_max_age_secs} must be >= 30")
         return errs
-
-    def warnings(self) -> list[str]:
-        warns: list[str] = []
-        if self.broker_api_timeout > 15:
-            warns.append(
-                f"BROKER_API_TIMEOUT={self.broker_api_timeout} is > 15s — high-latency path; "
-                f"each orderstatus call risks compounding cycle delays"
-            )
-        return warns
 
 
 # ── Strategy exchange map (OpenAlgo /python hosted mode) ──────────────
@@ -5763,13 +5746,12 @@ class OrderManager:
                 if order_status in _TERMINAL_FAIL:
                     inf(f"[ORDER] Order {order_id} {order_status}")
                     return None
-                # ORD-2: accept partial fill when retry budget is nearly exhausted
-                filled_qty = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
+                # ORD-2: detect partial fill near end of retry window
+                filled_qty = int(data.get("filled_quantity", 0) or 0)
                 if filled_qty > 0 and attempt >= int(max_r * 0.8):
                     inf(
-                        f"[ORDER] Accepting partial fill under retry-budget pressure: "
-                        f"{filled_qty} units for {order_id} "
-                        f"(attempt {attempt+1}/{max_r})"
+                        f"[ORDER] Partial fill detected: {filled_qty} units "
+                        f"for {order_id} (attempt {attempt+1}/{max_r}) — treating as fill"
                     )
                     return resp
             except Exception as exc: err(f"[ORDER] orderstatus error (attempt {attempt+1}): ", exc)
@@ -6968,17 +6950,6 @@ class OrderManager:
         square_off_hm = cfg.market.square_off_time
         for order_id, pending_entry in pending:
             underlying = pending_entry.underlying
-            # Age-based eviction: remove stale entries past max_age regardless of time-of-day
-            _age_secs = (get_ist_now() - pending_entry.created_at).total_seconds()
-            _max_age = cfg.broker.pending_entry_max_age_secs
-            if _age_secs > _max_age:
-                try:
-                    self.client.cancelorder(order_id=order_id, strategy=cfg.broker.strategy_name)
-                except Exception as _exc: err(f"[PENDING] Cancel error for aged entry {order_id}: ", _exc)
-                with self._state.state_lock:
-                    self._state.pending_entries.pop(order_id, None)
-                inf(f"[PENDING] Evicted aged entry {order_id} ({_age_secs:.0f}s > {_max_age:.0f}s max_age)")
-                continue
             filled = self.poll_order_status(order_id, max_retries=1, sleep_secs=0)
             if filled:
                 data     = filled.get("data") or filled
@@ -7042,7 +7013,7 @@ class OrderManager:
                     if cancel_status == "success" or "cancel" in str(cancel_resp).lower():
                         with self._state.state_lock:
                             self._state.pending_entries.pop(order_id, None)
-                        inf(f"[PENDING] Cancelled unfilled entry {order_id} after cutoff/age")
+                        inf(f"[PENDING] Cancelled unfilled entry {order_id} after cutoff")
                 except Exception as _exc: err(f"[PENDING] Cancel error for {order_id}: ", _exc)
 
     def check_pending_exits(self) -> None:
@@ -7176,7 +7147,7 @@ class OptionsBuyerEdgeBot:
     def __init__(self, cfg: BotConfig):
         self.config = cfg
         # Verbosity: 0=False (errors only, default) | 1=True (connection/auth/subscription) | 2=Debug (LTP/Quote/Depth updates)
-        api_kwargs: dict = dict(api_key=cfg.broker.api_key, host=cfg.broker.api_host, verbose=2, timeout=cfg.broker.broker_api_timeout)
+        api_kwargs: dict = dict(api_key=cfg.broker.api_key, host=cfg.broker.api_host, verbose=2)
         if cfg.broker.ws_url:
             api_kwargs["ws_url"] = cfg.broker.ws_url   # explicit override; otherwise SDK derives from host
         self.client  = api(**api_kwargs)
