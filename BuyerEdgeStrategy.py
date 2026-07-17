@@ -516,8 +516,9 @@ class BrokerConfig:
     order_status_poll_interval: float = 2.0
     quote_api_rps:        float = 30.0
     quote_api_burst:      int   = 10
-    snapshot_stale_timeout: float = 30.0
-    broker_api_timeout:     float = 30.0
+    snapshot_stale_timeout:         float = 30.0
+    broker_api_timeout:               float = 10.0
+    pending_entry_max_age_secs:       float = 300.0
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -536,6 +537,7 @@ class BrokerConfig:
             quote_api_burst=int(os.getenv("QUOTE_API_BURST", str(cls.quote_api_burst))),
             snapshot_stale_timeout=float(os.getenv("SNAPSHOT_STALE_TIMEOUT", str(cls.snapshot_stale_timeout))),
             broker_api_timeout=float(os.getenv("BROKER_API_TIMEOUT", str(cls.broker_api_timeout))),
+            pending_entry_max_age_secs=float(os.getenv("PENDING_ENTRY_MAX_AGE_SECS", str(cls.pending_entry_max_age_secs))),
         )
 
     def validate(self) -> list[str]:
@@ -554,7 +556,18 @@ class BrokerConfig:
             errs.append("STRATEGY_NAME must not be empty")
         if self.broker_api_timeout < 5:
             errs.append(f"BROKER_API_TIMEOUT={self.broker_api_timeout} must be >= 5")
+        if self.pending_entry_max_age_secs < 30:
+            errs.append(f"PENDING_ENTRY_MAX_AGE_SECS={self.pending_entry_max_age_secs} must be >= 30")
         return errs
+
+    def warnings(self) -> list[str]:
+        warns: list[str] = []
+        if self.broker_api_timeout > 15:
+            warns.append(
+                f"BROKER_API_TIMEOUT={self.broker_api_timeout} is > 15s — high-latency path; "
+                f"each orderstatus call risks compounding cycle delays"
+            )
+        return warns
 
 
 # ── Strategy exchange map (OpenAlgo /python hosted mode) ──────────────
@@ -1230,6 +1243,11 @@ class BotConfig:
                 "See env-var comments at the top of the file."
             )
         inf("[CONFIG] All configuration values validated OK")
+        for sc in (self.broker, self.market, self.entry, self.risk,
+                   self.trail, self.journal,
+                   self.position, self.tranche):
+            for w in (getattr(sc, "warnings", lambda: [])()):
+                inf(f"[CONFIG] WARNING: {w}")
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  SECTION 4 — POSITION STATE        ScoreComponent / SignalResult /   ║
@@ -5740,11 +5758,19 @@ class OrderManager:
                 data         = resp.get("data") or resp
                 order_status = str(data.get("order_status", "")).lower()
                 if order_status in _TERMINAL_FILL:
-                    # ORD-2: only return on a confirmed terminal fill state
                     return resp
                 if order_status in _TERMINAL_FAIL:
                     inf(f"[ORDER] Order {order_id} {order_status}")
                     return None
+                # ORD-2: accept partial fill when retry budget is nearly exhausted
+                filled_qty = int(data.get("filled_quantity", 0) or 0)
+                if filled_qty > 0 and attempt >= int(max_r * 0.8):
+                    inf(
+                        f"[ORDER] Accepting partial fill under retry-budget pressure: "
+                        f"{filled_qty} units for {order_id} "
+                        f"(attempt {attempt+1}/{max_r})"
+                    )
+                    return resp
             except Exception as exc: err(f"[ORDER] orderstatus error (attempt {attempt+1}): ", exc)
             time.sleep(slp)
         inf(f"[ORDER] Timed out polling order {order_id} after {max_r} attempts")
@@ -6932,12 +6958,24 @@ class OrderManager:
 
     def check_pending_entries(self) -> None:
         """Reconcile stale pending entry orders. Post-cutoff entries queue immediate exit."""
+        cfg = self.config
         with self._state.state_lock:
             pending = list(self._state.pending_entries.items())
         now_hm = get_ist_now().strftime("%H:%M")
-        square_off_hm = self.config.market.square_off_time
+        square_off_hm = cfg.market.square_off_time
         for order_id, pending_entry in pending:
             underlying = pending_entry.underlying
+            # Age-based eviction: remove stale entries past max_age regardless of time-of-day
+            _age_secs = (get_ist_now() - pending_entry.created_at).total_seconds()
+            _max_age = cfg.broker.pending_entry_max_age_secs
+            if _age_secs > _max_age:
+                try:
+                    self.client.cancelorder(order_id=order_id, strategy=cfg.broker.strategy_name)
+                except Exception as _exc: err(f"[PENDING] Cancel error for aged entry {order_id}: ", _exc)
+                with self._state.state_lock:
+                    self._state.pending_entries.pop(order_id, None)
+                inf(f"[PENDING] Evicted aged entry {order_id} ({_age_secs:.0f}s > {_max_age:.0f}s max_age)")
+                continue
             filled = self.poll_order_status(order_id, max_retries=1, sleep_secs=0)
             if filled:
                 data     = filled.get("data") or filled
@@ -6949,7 +6987,7 @@ class OrderManager:
                         already_open = any(p.symbol == pending_entry.symbol for p in self._state.positions.get_all(underlying))
                     if already_open:
                         self._notify(
-                            f"\u26a0\ufe0f {self.config.broker.strategy_name}: pending BUY {order_id} filled but "
+                            f"\u26a0\ufe0f {cfg.broker.strategy_name}: pending BUY {order_id} filled but "
                             f"{pending_entry.symbol} already has a tracked slot — duplicate. Reconcile manually.",
                             9,
                         )
@@ -6985,7 +7023,7 @@ class OrderManager:
                         if _cutoff_slot_id:
                             self.place_exit(underlying, "PostCutoffEntry", slot_id=_cutoff_slot_id)
                     self._notify(
-                        f"\u2705 {self.config.broker.strategy_name}: pending BUY {order_id} reconciled "
+                        f"\u2705 {cfg.broker.strategy_name}: pending BUY {order_id} reconciled "
                         f"for {underlying} @ \u20b9{price:.2f} (fill detected outside normal path)",
                         5,
                     )
@@ -6993,15 +7031,15 @@ class OrderManager:
                     with self._state.state_lock:
                         self._state.pending_entries.pop(order_id, None)
                     inf(f"[PENDING] BUY {order_id} {status}; removed from pending entries")
-            elif square_off_hm and now_hm >= square_off_hm:
-                # Cancel unfilled pending entry after square_off_time cutoff
+            elif (square_off_hm and now_hm >= square_off_hm) or _age_secs > _max_age:
+                # Cancel unfilled pending entry after square_off_time cutoff or age eviction
                 try:
-                    cancel_resp = self.client.cancelorder(order_id=order_id, strategy=self.config.broker.strategy_name)
+                    cancel_resp = self.client.cancelorder(order_id=order_id, strategy=cfg.broker.strategy_name)
                     cancel_status = cancel_resp.get("status") if isinstance(cancel_resp, dict) else None
                     if cancel_status == "success" or "cancel" in str(cancel_resp).lower():
                         with self._state.state_lock:
                             self._state.pending_entries.pop(order_id, None)
-                        inf(f"[PENDING] Cancelled unfilled entry {order_id} after {now_hm} cutoff")
+                        inf(f"[PENDING] Cancelled unfilled entry {order_id} after cutoff/age")
                 except Exception as _exc: err(f"[PENDING] Cancel error for {order_id}: ", _exc)
 
     def check_pending_exits(self) -> None:
