@@ -312,6 +312,7 @@ import signal
 import threading
 import time as _time_mod
 time = _time_mod   # single canonical alias — use time.sleep / time.time / _time_mod.mktime interchangeably
+import traceback
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -8136,6 +8137,43 @@ class OptionsBuyerEdgeBot:
             except Exception:
                 pass
 
+    def _start_strategy_watchdog(self) -> threading.Thread:
+        """Start a watchdog thread that dumps all thread stacks if the strategy thread
+        does not update its heartbeat within 2.5x the scan interval.
+        
+        This is a diagnostic tool for identifying the exact hang location when the
+        strategy thread stops producing output but the WS thread remains alive.
+        """
+        _interval = max(self.config.market.signal_check_interval, 1)
+        _timeout = _interval * 2.5
+        wd = threading.Thread(target=self._watchdog_loop, args=(_timeout,), name="strategy-watchdog", daemon=True)
+        wd.start()
+        return wd
+
+    def _watchdog_loop(self, timeout: float) -> None:
+        while True:
+            time.sleep(timeout)
+            elapsed = time.time() - getattr(self, "_last_strategy_heartbeat", 0.0)
+            if elapsed < timeout:
+                continue
+            ts = f"{get_ist_now():%H:%M:%S}"
+            stacks = []
+            for t in threading.enumerate():
+                frame = getattr(t, "_thread__target", None) or getattr(t, "_target", None)
+                ident = t.ident
+                try:
+                    _f = sys._current_frames().get(ident)
+                    if _f:
+                        stack = "".join(traceback.format_stack(_f))
+                        stacks.append(f"Thread[{t.name}](ident={ident}):\n{stack}")
+                except Exception:
+                    pass
+            stack_dump = "\n---\n".join(stacks) if stacks else "(no stack frames captured)"
+            err(
+                f"[WATCHDOG] Strategy heartbeat stale for {elapsed:.0f}s (> {timeout:.0f}s timeout)\n"
+                f"--- THREAD DUMP ---\n{stack_dump}\n--- END DUMP ---"
+            )
+
     def _strategy_thread(self) -> None:
         """Clock-anchored strategy scan loop."""
         cfg = self.config
@@ -8143,6 +8181,7 @@ class OptionsBuyerEdgeBot:
         _last_vals: dict[str, tuple[float, float]] = {}  # slot_id -> (sl, peak)
         inf("[STRATEGY] Strategy scan thread started")
         while True:
+            self._last_strategy_heartbeat = time.time()
             try:
                 self._cleanup_stale_positions()
                 self.orders.check_pending_entries()
@@ -8391,6 +8430,8 @@ class OptionsBuyerEdgeBot:
 
         st_thread = threading.Thread(target=self._strategy_thread, name="strategy-thread", daemon=True)
         st_thread.start()
+        self._last_strategy_heartbeat = time.time()
+        self._start_strategy_watchdog()
 
         inf(f"[BOT] {cfg.broker.strategy_name} running. Press Ctrl+C to stop.")
         try:
