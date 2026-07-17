@@ -4971,10 +4971,10 @@ class RiskManager:
         """Tier 1 + Tier 2: Full gate check before placing an entry order."""
         self._maybe_reset_daily_state()
         cfg = self.config
+        daily_pnl = self.daily_pnl  # Read BEFORE state_lock (daily_pnl calls _maybe_reset which acquires state_lock)
         with self._state.state_lock:
             trade_count        = self._session_trade_count
             consecutive_losses = self._session_consecutive_losses
-            daily_pnl          = self.daily_pnl
             last_entry_time    = self._last_entry_times.get(symbol)
             entry_in_flight    = self._state.entry_in_flight.get(symbol, 0)
 
