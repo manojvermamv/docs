@@ -136,6 +136,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F52 ✓ Fixed: V2-A2 escalation violated monotonicity (min() could reduce SL) and bypassed broker confirm — removed entirely; V2-A6, opposite_side_exit_on_signal, V2-A1 handle same scenario.
 # F53 ◐ Pending: V2-A5 tranche signal-deterioration exit (L6937-6949) — code structure verified but awaiting live multi-position session; exits one non-runner tranche via _exit_non_runner_tranche on opposing signal.
 # F58 ✓ Fixed: _refresh_stale_snapshots write-gates skipped is_stale() check — fetched quote overwrote cache even when WS tick arrived during fetch; added or snap2.is_stale(timeout) to both write-gates.
+# F59 ✓ Fixed: Reentrant state_lock deadlock on strategy thread — not a slow API call. check_entry_gates() acquired state_lock then accessed daily_pnl, which called _maybe_reset_daily_state() which tried to acquire the same non-reentrant Lock — same thread blocked on itself. Fixed by reading daily_pnl before the lock block.
 
 # ==============================================================================
 # CODING CONVENTIONS
