@@ -6552,6 +6552,7 @@ class OrderManager:
                             )
                             return False
 
+            inf(f"[ORDER] Calling placeorder for {underlying}...")
             resp = self.client.placeorder(
                 strategy=cfg.broker.strategy_name,
                 symbol=option_symbol,
@@ -6561,6 +6562,7 @@ class OrderManager:
                 product="MIS",
                 quantity=qty,
             )
+            inf(f"[ORDER] placeorder returned for {underlying}")
             if not isinstance(resp, dict) or resp.get("status") != "success":
                 inf(f"[ORDER] Entry order rejected for {underlying}: {resp}")
                 return False
