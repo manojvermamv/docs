@@ -5747,7 +5747,7 @@ class OrderManager:
                     inf(f"[ORDER] Order {order_id} {order_status}")
                     return None
                 # ORD-2: detect partial fill near end of retry window
-                filled_qty = int(data.get("filled_quantity", 0) or 0)
+                filled_qty = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
                 if filled_qty > 0 and attempt >= int(max_r * 0.8):
                     inf(
                         f"[ORDER] Partial fill detected: {filled_qty} units "
