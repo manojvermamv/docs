@@ -144,6 +144,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F60 ✓ Fixed: snapshot_stale_timeout=5s triggered Upstox UDAPI10005 rate limit on every scan — stale snapshot → DATA-MISS → trail blind; increased default to 30.0, overridable via SNAPSHOT_STALE_TIMEOUT env var.
 # F61 ✓ Fixed: check_pending_entries cancel-after-cutoff path used bare cancelorder instead of _cancel_three_outcome — cancel-race fill popped pending entry without orderstatus re-check, orphaned position. Swapped to _cancel_three_outcome.
 # F62 ✓ Fixed: _cancel_tranche_orders cleared per-tranche order IDs but not pos.sl_order_id flat alias — stale after restart for multi-tranche positions; modify_broker_sl proceeded on dead order ID. Added pos.sl_order_id = None after per-tranche clear loop.
+# F63 ✓ Fixed: _handle_broker_order_fill non-runner tranche path had no re-entry guard — check_broker_order_fills inner loop checked sl_order_id then tgt_order_id sequentially; if SL filled first and cancelled TGT but TGT's ID was never cleared, next iteration re-queried the (now-cancelled) TGT order and could fire duplicate exit if broker's fill raced the cancel. Added tr.is_exit_placed return guard + setattr(tr, other_name, None) in finally.
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -6054,6 +6055,8 @@ class OrderManager:
         is_multi = len(pos.tranches) > 1
 
         if is_multi and tr and not tr.is_runner:
+            if tr.is_exit_placed:
+                return
             # Partial exit: non-runner tranche filled — mark exited, cancel opposite
             tr.is_exit_placed = True
             tr.exit_price = executed_price
@@ -6065,6 +6068,8 @@ class OrderManager:
                     self.client.cancelorder(order_id=other_oid, strategy=self.config.broker.strategy_name)
                 except Exception as c_exc:
                     err(f"[ORDER] Cancel {other_name} error for {underlying} t={tr.tranche_id}: ", c_exc)
+                finally:
+                    setattr(tr, other_name, None)
             pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
             inf(
                 f"[ORDER] Partial exit {underlying} t={tr.tranche_id}: "
