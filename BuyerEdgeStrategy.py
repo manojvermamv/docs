@@ -7233,6 +7233,7 @@ class OptionsBuyerEdgeBot:
             f"{event.get('symbol', '')} qty={event.get('filled_quantity', 0)} "
             f"@ {event.get('average_price', 0)}"
         )
+        dbg(f"[ORDER-STREAM] raw event: {event}")
 
     def _send_alert(self, message: str, priority: int = 1) -> None:
         try:
