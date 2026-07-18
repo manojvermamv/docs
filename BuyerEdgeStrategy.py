@@ -142,6 +142,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F58 ✓ Fixed: _refresh_stale_snapshots write-gates skipped is_stale() check — fetched quote overwrote cache even when WS tick arrived during fetch; added or snap2.is_stale(timeout) to both write-gates.
 # F59 ✓ Fixed: Reentrant state_lock deadlock on strategy thread — not a slow API call. check_entry_gates() acquired state_lock then accessed daily_pnl, which called _maybe_reset_daily_state() which tried to acquire the same non-reentrant Lock — same thread blocked on itself. Fixed by reading daily_pnl before the lock block.
 # F60 ✓ Fixed: snapshot_stale_timeout=5s triggered Upstox UDAPI10005 rate limit on every scan — stale snapshot → DATA-MISS → trail blind; increased default to 30.0, overridable via SNAPSHOT_STALE_TIMEOUT env var.
+# F61 ○ Open: check_pending_entries cancel-after-cutoff path (L7048) uses bare cancelorder instead of _cancel_three_outcome — cancel-race fill pops pending entry without orderstatus re-check, orphaned position. Fix: swap to _cancel_three_outcome.
+# F62 ○ Open: _cancel_tranche_orders clears per-tranche order IDs but not pos.sl_order_id flat alias — stale after restart for multi-tranche positions; modify_broker_sl proceeds on dead order ID. Fix: pos.sl_order_id = None inside per-tranche clear loop.
 
 # ==============================================================================
 # CODING CONVENTIONS
