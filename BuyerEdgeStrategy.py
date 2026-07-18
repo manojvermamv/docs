@@ -319,6 +319,7 @@ import threading
 import time as _time_mod
 time = _time_mod   # single canonical alias — use time.sleep / time.time / _time_mod.mktime interchangeably
 import traceback
+import queue
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -524,6 +525,7 @@ class BrokerConfig:
     quote_api_rps:        float = 30.0
     quote_api_burst:      int   = 10
     snapshot_stale_timeout: float = 30.0
+    order_stream_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -541,6 +543,7 @@ class BrokerConfig:
             quote_api_rps=float(os.getenv("QUOTE_API_RPS", str(cls.quote_api_rps))),
             quote_api_burst=int(os.getenv("QUOTE_API_BURST", str(cls.quote_api_burst))),
             snapshot_stale_timeout=float(os.getenv("SNAPSHOT_STALE_TIMEOUT", str(cls.snapshot_stale_timeout))),
+            order_stream_enabled=os.getenv("ORDER_STREAM_ENABLED", "FALSE").upper() == "TRUE",
         )
 
     def validate(self) -> list[str]:
@@ -5116,6 +5119,7 @@ class WebSocketManager:
         self._raw_cb_count: int = 0
         self._tick_counts: dict[str, int] = {}
         self._spot_tick_counts: dict[str, int] = {}
+        self._order_event_queue: queue.Queue[dict] = queue.Queue()
 
     def set_fetcher(self, fetcher: DataFetcher) -> None:
         """Set DataFetcher reference to consolidate greeks API calls."""
@@ -5128,6 +5132,24 @@ class WebSocketManager:
     def is_connected(self) -> bool:
         """Returns True when the WebSocket is live and authenticated. Used by scan_underlying() entry guard."""
         return self._ws_connected
+
+    # ── Order-update stream (account-level push subscription) ─────────────────
+    def _on_order_event(self, data: dict) -> None:
+        """Callback for subscribe_orders — fires on SDK thread. Enqueue only."""
+        try:
+            self._order_event_queue.put_nowait(data)
+        except queue.Full:
+            err("[ORDER-STREAM] Event queue full — dropping event", None)
+
+    def drain_order_events(self) -> list[dict]:
+        """Called once per strategy-thread cycle. Never blocks."""
+        events = []
+        while True:
+            try:
+                events.append(self._order_event_queue.get_nowait())
+            except queue.Empty:
+                break
+        return events
 
     def _get_cached_delta(self, underlying: str, option_symbol: str, ttl: float = 30.0) -> float | None:
         """Return cached |delta| and refresh asynchronously when stale."""
@@ -5457,6 +5479,18 @@ class WebSocketManager:
                                 if (exch, sym) in self._desired:
                                     self._actual.add((exch, sym))
                         except Exception as _re_exc: err(f"[WS] Reconcile subscribe error {exch}:{sym}: ", _re_exc)
+
+                    # ── Order-update stream (account-level, one subscription covers everything) ──
+                    if self.config.broker.order_stream_enabled:
+                        try:
+                            sent = self.client.subscribe_orders(on_order_update=self._on_order_event)
+                            if sent:
+                                inf("[ORDER-STREAM] Subscribed to account-level order updates")
+                            else:
+                                err("[ORDER-STREAM] subscribe_orders() returned False — continuing on polling only", None)
+                        except Exception as _os_exc:
+                            err("[ORDER-STREAM] subscribe_orders failed — continuing on polling only", _os_exc)
+
                     while True:  # watchdog: graduated alerts then force-reconnect if feed silent
                         if self._ws_stop_event.wait(timeout=30):
                             inf("[WS] Stop event received during watchdog — exiting")
@@ -7174,6 +7208,26 @@ class OptionsBuyerEdgeBot:
         self._last_pnl_alert_time: float = 0.0
         self._last_quote_refresh_ts: dict[str, float] = {}
 
+    # ── Order-stream event dispatcher ────────────────────────────────────────
+    def _handle_order_stream_event(self, event: dict) -> None:
+        """Process a single order-update push event.
+        
+        Shadow-mode first: logs all events. Dispatch table commented out until
+        shadow observation confirms payload shape and noise ratio are acceptable.
+        
+        Plan: uncomment the dispatch and remove the blanket-log return when
+        ready to enable live acceleration.
+        """
+        order_id = event.get("orderid")
+        if not order_id:
+            return
+        os_status = str(event.get("order_status", "")).lower()
+        inf(
+            f"[ORDER-STREAM] {order_id}: {os_status} "
+            f"{event.get('symbol', '')} qty={event.get('filled_quantity', 0)} "
+            f"@ {event.get('average_price', 0)}"
+        )
+
     def _send_alert(self, message: str, priority: int = 1) -> None:
         try:
             # self.client.whatsapp(message=message)
@@ -8162,6 +8216,8 @@ class OptionsBuyerEdgeBot:
         while True:
             self._last_strategy_heartbeat = time.time()
             try:
+                for event in self.ws.drain_order_events():
+                    self._handle_order_stream_event(event)
                 self._cleanup_stale_positions()
                 self.orders.check_pending_entries()
                 self.orders.check_pending_exits()
