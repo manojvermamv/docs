@@ -38,7 +38,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
 # Closed Findings    : F1–F58 (F28, F49–F51 reserved)
-# Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
+# External Audit     : F-A1 ✓ Fixed, F-A2 ✓ Accepted, F-A3 ✓ Fixed
 #
 #
 # AUDIT SCOPE
@@ -69,6 +69,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # ------------------------------------------------------------------------------
 # Closed Findings:               F1–F58 (F28, F49–F51 reserved)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
+# External Audit Findings:       F-A1 ✓ Fixed, F-A2 ✓ Accepted, F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
 # Remaining Work:                Calibration + expectancy research only
