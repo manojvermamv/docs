@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F63 (F28, F49–F51 reserved) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64 (F28, F49–F51 reserved) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -67,7 +67,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F63 (F28, F49–F51 reserved)
+# Closed Findings:               F1–F64 (F28, F49–F51 reserved)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
@@ -152,6 +152,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F-A2 ⬇ Accepted: _exit_non_runner_tranche calls poll_order_status inline on the strategy thread, stalling the entire scan loop for up to 30s. The F-A1 fix removes the overselling risk from this window, reducing it to a performance/UX concern. Not patched — the stall is bounded, infrequent (signal-deterioration exits are rare), and the 60s scan interval absorbs one missed cycle gracefully.
 #
 # F-A3 ✓ Fixed: BotConfig.validate() warnings() hook (L1242-1246) was dead code — no sub-config defined a warnings() method, so the loop always fell through to lambda: [] with no output. Meanwhile EntryConfig.validate() appended a soft "If deliberate, this warning can be ignored" message to the fatal errs list, causing a false-positive SystemExit on the max_sl_pts < premium_stop_pts edge case. Fixed by adding warnings() to EntryConfig and moving that message out of errs.
+#
+# F64 ✓ Fixed: check_entry_gates() drawdown-rate check read self._pnl_history (len() then [0][1]) as two separate unlocked statements outside state_lock, while record_exit() and _maybe_reset_daily_state() — reachable cross-thread via place_exit()'s daily_pnl property read on the exit-executor pool, not just the direct call inside check_entry_gates() itself — mutate it under lock. A day-rollover .clear() or exit popleft() landing between the two statements raised IndexError, killing that scan cycle. Only reachable with DRAWDOWN_RATE_ENABLED=True (off by default). Fixed by snapshotting the guard condition inside the function's existing locked block.
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -4983,6 +4985,13 @@ class RiskManager:
             consecutive_losses = self._session_consecutive_losses
             last_entry_time    = self._last_entry_times.get(symbol)
             entry_in_flight    = self._state.entry_in_flight.get(symbol, 0)
+            # F64: snapshot drawdown-rate state under lock — record_exit() mutates
+            # _pnl_history under this same lock reachable cross-thread via place_exit()
+            drawdown_ok = True
+            window_pnl_change = 0.0
+            if cfg.risk.drawdown_rate_enabled and cfg.risk.drawdown_rate_max_loss > 0 and len(self._pnl_history) >= 2:
+                window_pnl_change = self._daily_pnl - self._pnl_history[0][1]
+                drawdown_ok = window_pnl_change > -cfg.risk.drawdown_rate_max_loss
 
         if entry_in_flight > 0:
             return False, f"Entry already in flight for {symbol} ({entry_in_flight})"
@@ -5016,13 +5025,11 @@ class RiskManager:
                 f"Daily loss limit hit (₹{cfg.risk.max_daily_loss_amount:.0f}) "
                 f"| current P&L ₹{daily_pnl:.0f}"
             )
-        if cfg.risk.drawdown_rate_enabled and cfg.risk.drawdown_rate_max_loss > 0 and len(self._pnl_history) >= 2:
-            window_pnl_change = self._daily_pnl - self._pnl_history[0][1]
-            if window_pnl_change <= -cfg.risk.drawdown_rate_max_loss:
-                return False, (
-                    f"Drawdown rate limit: ₹{abs(window_pnl_change):.0f} lost in last "
-                    f"{cfg.risk.drawdown_rate_window_mins}m (limit ₹{cfg.risk.drawdown_rate_max_loss:.0f})"
-                )
+        if not drawdown_ok:
+            return False, (
+                f"Drawdown rate limit: ₹{abs(window_pnl_change):.0f} lost in last "
+                f"{cfg.risk.drawdown_rate_window_mins}m (limit ₹{cfg.risk.drawdown_rate_max_loss:.0f})"
+            )
         if cfg.risk.max_daily_profit_amount > 0 and daily_pnl >= cfg.risk.max_daily_profit_amount:
             return False, (
                 f"Daily profit target reached ₹{daily_pnl:.0f} "
