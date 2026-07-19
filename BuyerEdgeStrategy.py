@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F58 (F28, F49–F51 reserved)
+# Closed Findings    : F1–F63 (F28, F49–F51 reserved) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -67,8 +67,9 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F58 (F28, F49–F51 reserved)
+# Closed Findings:               F1–F63 (F28, F49–F51 reserved)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
+# External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
 # Remaining Work:                Calibration + expectancy research only
@@ -145,6 +146,12 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F61 ✓ Fixed: check_pending_entries cancel-after-cutoff path used bare cancelorder instead of _cancel_three_outcome — cancel-race fill popped pending entry without orderstatus re-check, orphaned position. Swapped to _cancel_three_outcome.
 # F62 ✓ Fixed: _cancel_tranche_orders cleared per-tranche order IDs but not pos.sl_order_id flat alias — stale after restart for multi-tranche positions; modify_broker_sl proceeded on dead order ID. Added pos.sl_order_id = None after per-tranche clear loop.
 # F63 ✓ Fixed: _handle_broker_order_fill non-runner tranche path had no re-entry guard — check_broker_order_fills inner loop checked sl_order_id then tgt_order_id sequentially; if SL filled first and cancelled TGT but TGT's ID was never cleared, next iteration re-queried the (now-cancelled) TGT order and could fire duplicate exit if broker's fill raced the cancel. Added tr.is_exit_placed return guard + setattr(tr, other_name, None) in finally.
+#
+# F-A1 ✓ Fixed: _exit_non_runner_tranche placed SELL MARKET then blocked on poll_order_status (~30s) without registering the in-flight qty anywhere — during that window, a WS-triggered place_exit sized its own SELL from stale remaining_qty, overselling the position. Fixed by registering into _pending_tranche_exits before poll (under dedicated lock), removing on confirmed fill, and adding _sellable_qty() helper + 0-qty defer in place_exit.
+#
+# F-A2 ⬇ Accepted: _exit_non_runner_tranche calls poll_order_status inline on the strategy thread, stalling the entire scan loop for up to 30s. The F-A1 fix removes the overselling risk from this window, reducing it to a performance/UX concern. Not patched — the stall is bounded, infrequent (signal-deterioration exits are rare), and the 60s scan interval absorbs one missed cycle gracefully.
+#
+# F-A3 ✓ Fixed: BotConfig.validate() warnings() hook (L1242-1246) was dead code — no sub-config defined a warnings() method, so the loop always fell through to lambda: [] with no output. Meanwhile EntryConfig.validate() appended a soft "If deliberate, this warning can be ignored" message to the fatal errs list, causing a false-positive SystemExit on the max_sl_pts < premium_stop_pts edge case. Fixed by adding warnings() to EntryConfig and moving that message out of errs.
 
 # ==============================================================================
 # CODING CONVENTIONS
