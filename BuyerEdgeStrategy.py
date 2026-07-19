@@ -155,8 +155,6 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # F64 ✓ Fixed: check_entry_gates() drawdown-rate check read _pnl_history outside state_lock as two unlocked statements — concurrent record_exit() popleft() could raise IndexError. Fixed by snapshotting guard inside existing locked block.
 #
-# F71 ✓ Fixed: Inline comment at L7217 referenced F71 but no entry existed in CLOSED FINDINGS. Added to range: F1–F64, F71 (F28, F49–F51 reserved; F65–F70 unused).
-#
 # F72 ✓ Fixed: TrancheConfig.validate() checked sum == 100 but never that each field is within [0, 100] — out-of-range values summing to 100 passed validation and could cause >qty allocation in ladder mode. Fixed with per-field range check loop.
 
 # ==============================================================================
