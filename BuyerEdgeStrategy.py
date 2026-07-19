@@ -28,11 +28,17 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  PRODUCTION AUDIT STATUS  ·  BuyerEdgeStrategy.py                            ║
-# ║  V2 · Long Options · Multi-Position Ready · Production Stable                ║
-# ║  Structural Risk: None · Research: Active Calibration                        ║
+# ║  Architecture V2 · Long Options (Buyer Only) · Multi-Position Ready          ║
+# ║  Audit State: Production Stable · Structural Findings Closed                 ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 #
-# Findings: F1–F64 · External: F-A1 ✓ F-A2 ⬇ F-A3 ✓ · Pending: F53 ◐
+# Audit Version      : V2
+# Architecture       : Long Options (Buyer Only) · Multi-Layer Confirmation
+# Deployment State   : Production
+# Structural Risk    : None Known
+# Research Status    : Active Calibration
+# Closed Findings    : F1–F64 (F28, F49–F51 reserved) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
 # AUDIT SCOPE
