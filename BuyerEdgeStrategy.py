@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64 (F28, F49–F51 reserved) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64, F71 (F28, F49–F51 reserved; F65–F70 unused) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -67,7 +67,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64 (F28, F49–F51 reserved)
+# Closed Findings:               F1–F64, F71 (F28, F49–F51 reserved; F65–F70 unused)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
@@ -154,6 +154,10 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F-A3 ✓ Fixed: warnings() hook was dead code — no config class defined it. EntryConfig.validate() treated a soft warning as fatal SystemExit. Fixed by adding warnings() to EntryConfig.
 #
 # F64 ✓ Fixed: check_entry_gates() drawdown-rate check read _pnl_history outside state_lock as two unlocked statements — concurrent record_exit() popleft() could raise IndexError. Fixed by snapshotting guard inside existing locked block.
+#
+# F71 ✓ Fixed: Inline comment at L7217 referenced F71 but no entry existed in CLOSED FINDINGS. Added to range: F1–F64, F71 (F28, F49–F51 reserved; F65–F70 unused).
+#
+# F72 ✓ Fixed: TrancheConfig.validate() checked sum == 100 but never that each field is within [0, 100] — out-of-range values summing to 100 passed validation and could cause >qty allocation in ladder mode. Fixed with per-field range check loop.
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -1161,6 +1165,11 @@ class TrancheConfig:
         if self.tp_ceiling_pct < 50 or self.tp_ceiling_pct > 100:
             errs.append(f"TRANCHE_TP_CEILING_PCT={self.tp_ceiling_pct} must be in [50, 100]")
         if self.enabled:
+            for _name, _val in (("TRANCHE_TP1_PCT", self.tp1_pct),
+                                 ("TRANCHE_TP2_PCT", self.tp2_pct),
+                                 ("TRANCHE_RUNNER_PCT", self.runner_pct)):
+                if _val < 0 or _val > 100:
+                    errs.append(f"{_name}={_val} must be in [0, 100]")
             total = self.tp1_pct + self.tp2_pct + self.runner_pct
             if abs(total - 100.0) > 0.1:
                 errs.append(
