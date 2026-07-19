@@ -5633,6 +5633,7 @@ class OrderManager:
         self._notify = notify
         self._journal = JournalWriter(self.config.journal.trade_journal_path)
         self._pending_tranche_exits: dict[str, str] = {}  # key=f"{underlying}_{tr.tranche_id}" → order_id
+        self._pending_tranche_exits_lock = threading.Lock()
 
     def _cancel_three_outcome(self, order_id: str, pending: PendingEntry | None = None) -> str:
         """Cancel order_id and determine terminal disposition.
@@ -6682,7 +6683,8 @@ class OrderManager:
             return
         # Check if we already have a pending SELL for this tranche
         _tranche_key = f"{underlying}_{tr.tranche_id}"
-        _pending_oid = self._pending_tranche_exits.get(_tranche_key)
+        with self._pending_tranche_exits_lock:
+            _pending_oid = self._pending_tranche_exits.get(_tranche_key)
         if _pending_oid:
             raw = self._raw_order_status(_pending_oid)
             if raw:
@@ -6690,7 +6692,8 @@ class OrderManager:
                 ep = float(raw.get("average_price", 0) or 0)
                 fq = int(raw.get("filled_quantity", 0) or raw.get("filled_qty", 0) or 0)
                 if bs in ("complete", "filled", "executed") and ep > 0 and fq > 0:
-                    self._pending_tranche_exits.pop(_tranche_key, None)
+                    with self._pending_tranche_exits_lock:
+                        self._pending_tranche_exits.pop(_tranche_key, None)
                     self.apply_confirmed_partial_exit(pos, tr, fq, ep, reason, underlying, pos.symbol)
                     for attr_name, oid in [("sl_order_id", tr.sl_order_id), ("tgt_order_id", tr.tgt_order_id)]:
                         if oid:
@@ -6700,7 +6703,8 @@ class OrderManager:
                                 err(f"[ORDER] Cancel {attr_name} error for {underlying} t={tr.tranche_id}: ", exc)
                     inf(f"[ORDER] Tranche exit SELL {_pending_oid} complete for {underlying} t={tr.tranche_id}")
                 elif bs in ("cancelled", "canceled", "rejected") and fq > 0 and ep > 0:
-                    self._pending_tranche_exits.pop(_tranche_key, None)
+                    with self._pending_tranche_exits_lock:
+                        self._pending_tranche_exits.pop(_tranche_key, None)
                     self.apply_confirmed_partial_exit(pos, tr, fq, ep, reason, underlying, pos.symbol)
                     if pos.remaining_qty > 0:
                         for trr in pos.tranches:
@@ -6714,7 +6718,8 @@ class OrderManager:
                         )
                     inf(f"[ORDER] Tranche exit SELL {_pending_oid} partially filled {fq} — protection re-placed for residual")
                 elif bs in ("cancelled", "canceled", "rejected"):
-                    self._pending_tranche_exits.pop(_tranche_key, None)
+                    with self._pending_tranche_exits_lock:
+                        self._pending_tranche_exits.pop(_tranche_key, None)
                     inf(f"[ORDER] Tranche exit SELL {_pending_oid} unreported — protection left active")
                 else:
                     inf(f"[ORDER] Tranche exit SELL {_pending_oid} status {bs} — still pending")
@@ -6760,12 +6765,17 @@ class OrderManager:
         if order_id is None:
             inf(f"[ORDER] Partial exit SELL failed for {underlying} t={tr.tranche_id} — protection remains active")
             return
+        # Register in-flight before poll so place_exit sees it (F-A1)
+        with self._pending_tranche_exits_lock:
+            self._pending_tranche_exits[_tranche_key] = order_id
         filled = self.poll_order_status(order_id)
         if filled:
             data = filled.get("data") or filled
             executed_price = float(data.get("average_price", 0) or 0)
             if executed_price > 0:
-                # SELL confirmed — NOW cancel protection
+                # SELL confirmed — remove from in-flight tracker, cancel protection
+                with self._pending_tranche_exits_lock:
+                    self._pending_tranche_exits.pop(_tranche_key, None)
                 for attr_name, oid in [("sl_order_id", tr.sl_order_id), ("tgt_order_id", tr.tgt_order_id)]:
                     if oid:
                         try:
@@ -6787,9 +6797,19 @@ class OrderManager:
                 )
                 self._journal.write(tr_exit_record)
                 return
-        # SELL submitted but fill unconfirmed — save for reconciliation, keep protection active
-        self._pending_tranche_exits[_tranche_key] = order_id
+        # Fill unconfirmed — entry already in _pending_tranche_exits, stays for reconciliation
         inf(f"[ORDER] Partial exit SELL unconfirmed for {underlying} t={tr.tranche_id} — saved for reconciliation")
+
+    def _sellable_qty(self, pos: OptionPosition) -> int:
+        """remaining_qty minus any in-flight tranche exits for this position (F-A1)."""
+        in_flight = 0
+        for tr in pos.tranches:
+            if tr.is_exit_placed:
+                continue
+            with self._pending_tranche_exits_lock:
+                if f"{pos.underlying}_{tr.tranche_id}" in self._pending_tranche_exits:
+                    in_flight += tr.qty
+        return max(0, pos.remaining_qty - in_flight)
 
     def place_exit(self, underlying: str, reason: str = "manual", slot_id: str | None = None) -> None:
         """Cancel broker orders first, then place SELL MARKET to exit position."""
@@ -6805,7 +6825,7 @@ class OrderManager:
 
         if cfg.broker.paper_trade:
             executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
-            exit_qty = pos.remaining_qty
+            exit_qty = self._sellable_qty(pos)
             pnl = _calc_pnl(pos, executed_price, qty=exit_qty)
             inf(f"[PAPER] Simulated SELL {exit_qty}x {pos.symbol} @ ₹{executed_price:.2f} | P&L ₹{pnl:.2f}")
             self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
@@ -6882,6 +6902,15 @@ class OrderManager:
                     self._state.exit_queue.discard(pos.slot_id)
                 return
 
+        # F-A1: don't oversell — in-flight tranche exits may already be covering remaining qty
+        sellable_qty = self._sellable_qty(pos)
+        if sellable_qty <= 0:
+            inf(f"[ORDER] Exit skipped for {underlying} — all qty covered by in-flight tranche exits")
+            with self._state.exit_lock:
+                self._state.exit_queue.discard(pos.slot_id)
+            pos.exit_pending = False
+            return
+
         executed_price = 0.0
         order_id       = None
         try:
@@ -6892,7 +6921,7 @@ class OrderManager:
                 exchange=cfg.market.fno_exchange,
                 price_type="MARKET",
                 product="MIS",
-                quantity=pos.remaining_qty,
+                quantity=sellable_qty,
             )
             if isinstance(resp, dict) and resp.get("status") == "success":
                 order_id = resp.get("orderid")
