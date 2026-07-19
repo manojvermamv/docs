@@ -804,12 +804,6 @@ class EntryConfig:
             errs.append(f"PREMIUM_STOP_PTS={self.premium_stop_pts} must be > 0")
         if self.max_sl_pts < 0:
             errs.append(f"MAX_SL_PTS={self.max_sl_pts} must be >= 0 (0 = use PREMIUM_STOP_PTS)")
-        if self.max_sl_pts > 0 and self.max_sl_pts < self.premium_stop_pts:
-            errs.append(
-                f"MAX_SL_PTS={self.max_sl_pts} < PREMIUM_STOP_PTS={self.premium_stop_pts} — "
-                f"adaptive ceiling would be TIGHTER than the no-data fallback, which is almost "
-                f"certainly not intended. If deliberate, this warning can be ignored."
-            )
         if self.max_sl_premium_ratio < 0 or self.max_sl_premium_ratio >= 100:
             errs.append(f"MAX_SL_PREMIUM_RATIO={self.max_sl_premium_ratio} must be in [0, 100)")
         if self.risk_percent <= 0:
@@ -860,6 +854,16 @@ class EntryConfig:
 
         return errs
 
+    def warnings(self) -> list[str]:
+        """Soft warnings for non-fatal configuration edge cases."""
+        ws: list[str] = []
+        if self.max_sl_pts > 0 and self.max_sl_pts < self.premium_stop_pts:
+            ws.append(
+                f"MAX_SL_PTS={self.max_sl_pts} < PREMIUM_STOP_PTS={self.premium_stop_pts} — "
+                f"adaptive ceiling would be TIGHTER than the no-data fallback, which is almost "
+                f"certainly not intended. If deliberate, this warning can be ignored."
+            )
+        return ws
 
 # ── 3d — RiskConfig ────────────────────────────────────────────────────────
 @dataclass
