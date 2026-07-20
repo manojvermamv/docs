@@ -3416,8 +3416,8 @@ class DataFetcher:
                 parsed = {
                     "delta": float(greeks.get("delta", 0) or 0),
                     "gamma": float(greeks.get("gamma", 0) or 0),
-                    "theta": float(greeks.get("theta", 0) or 0),          # NEW — was missing despite update_from_greeks expecting it
-                    "iv": float(resp.get("implied_volatility", 0) or 0),   # FIX — top-level, not inside greeks
+                    "theta": float(greeks.get("theta", 0) or 0),
+                    "iv": float(resp.get("implied_volatility", 0) or 0),
                 }
                 while len(self._greeks_cache) >= self._greeks_cache_max_size:
                     self._greeks_cache.popitem(last=False)
