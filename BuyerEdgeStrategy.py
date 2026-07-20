@@ -159,7 +159,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # F73 ✓ Fixed: Basket-order leg identification used multi-key lookup (pricetype/price_type/ordertype) but response schema has none of these — only orderid, status, symbol per entry. Relied on positional fallback (i==0) by accident. Made positional assumption explicit with count-mismatch guard.
 #
-# F74 ✓ Fixed: poll_order_status partial-fill branch read filled_quantity/filled_qty from orderstatus() REST endpoint — confirmed against SDK source and server-side orderstatus_service.py that endpoint never populates these fields for 27+ of 32+ brokers; average_price is the only synthesized field (from tradebook). WebSocket order-update stream (subscribe_orders) is the only reliable path for filled_quantity. Fix: _handle_order_stream_event now completes pending entries directly when order_stream_complete_entries=True — guarded by order_stream_complete_entries flag (default False), requires both filled_qty>0 and avg_price>0, pops pending_entries only after register_filled_entry succeeds, and preserves check_pending_entries() polling fallback.
+# F74 ✓ Fixed: poll_order_status partial-fill branch reads filled_quantity from orderstatus() REST endpoint — confirmed endpoint never populates this for 27+ of 32+ brokers. Order-update stream completes pending entries via order_stream_complete_entries flag, preserving polling fallback.
 #
 # F75 ✓ Fixed: fetch_candles() type annotation claimed `-> pd.DataFrame | None` but SDK's history() returns dict on error (empty data, processing failure, API error) — len(dict) returns key count, passing length check by coincidence. Added isinstance(result, pd.DataFrame) guard.
 
