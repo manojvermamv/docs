@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71 (F28, F49–F51 reserved; F65–F70 unused) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64, F71–F75 (F28, F49–F51 reserved; F65–F70 unused) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -67,7 +67,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71 (F28, F49–F51 reserved; F65–F70 unused)
+# Closed Findings:               F1–F64, F71–F75 (F28, F49–F51 reserved; F65–F70 unused)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
@@ -156,6 +156,12 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F64 ✓ Fixed: check_entry_gates() drawdown-rate check read _pnl_history outside state_lock as two unlocked statements — concurrent record_exit() popleft() could raise IndexError. Fixed by snapshotting guard inside existing locked block.
 #
 # F72 ✓ Fixed: TrancheConfig.validate() checked sum == 100 but never that each field is within [0, 100] — out-of-range values summing to 100 passed validation and could cause >qty allocation in ladder mode. Fixed with per-field range check loop.
+#
+# F73 ✓ Fixed: Basket-order leg identification used multi-key lookup (pricetype/price_type/ordertype) but response schema has none of these — only orderid, status, symbol per entry. Relied on positional fallback (i==0) by accident. Made positional assumption explicit with count-mismatch guard.
+#
+# F74 ✓ Fixed: poll_order_status partial-fill branch read filled_quantity/filled_qty from orderstatus() REST endpoint — confirmed against SDK source and server-side orderstatus_service.py that endpoint never populates these fields for 27+ of 32+ brokers; average_price is the only synthesized field (from tradebook). WebSocket order-update stream (subscribe_orders) is the only reliable path for filled_quantity. Branch structurally unreachable via REST; Section-4 dispatch-table integration addresses this correctly.
+#
+# F75 ✓ Fixed: fetch_candles() type annotation claimed `-> pd.DataFrame | None` but SDK's history() returns dict on error (empty data, processing failure, API error) — len(dict) returns key count, passing length check by coincidence. Added isinstance(result, pd.DataFrame) guard.
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -3445,13 +3451,17 @@ class DataFetcher:
         try:
             end = get_ist_now()
             start = end - timedelta(days=self.config.market.lookback_days)
-            return self.client.history(
+            result = self.client.history(
                 symbol=symbol,
                 exchange=exchange,
                 interval=self.config.market.candle_interval,
                 start_date=start.strftime("%Y-%m-%d"),
                 end_date=end.strftime("%Y-%m-%d"),
             )
+            if not isinstance(result, pd.DataFrame):
+                dbg(f"[DATA] history() returned non-DataFrame for {symbol}@{exchange}: {result}")
+                return None
+            return result
         except Exception as exc:
             err(f"[DATA] Candle fetch error for {symbol}@{exchange}", exc)
             return None
@@ -6415,23 +6425,27 @@ class OrderManager:
             basket_resp = self.client.basketorder(strategy=cfg.broker.strategy_name, orders=basket_orders)
             if isinstance(basket_resp, dict) and basket_resp.get("status") == "success":
                 results = basket_resp.get("results", [])
-                for i, leg in enumerate(results):
-                    if leg.get("status") != "success" or not leg.get("orderid"):
-                        inf(f"[ORDER] Basket leg {i} rejected for {underlying}: {leg}")
-                        continue
-                    
-                    pt = str(leg.get("pricetype", leg.get("price_type", leg.get("ordertype", "")))).upper()
-                    is_sl = ("SL" in pt) if pt else (i == 0)
-                    
-                    if is_sl:
-                        pos.sl_order_id = leg.get("orderid")
-                        inf(f"[ORDER] Basket SL-M placed for {underlying}: trigger ₹{sl:.2f} (id:{pos.sl_order_id})")
-                    else:
-                        pos.tgt_order_id = leg.get("orderid")
-                        inf(f"[ORDER] Basket LIMIT placed for {underlying}: ₹{tgt:.2f} (id:{pos.tgt_order_id})")
+                if len(results) != len(basket_orders):
+                    inf(f"[ORDER] Basket result count mismatch for {underlying}: "
+                        f"sent {len(basket_orders)}, got {len(results)} — falling back to sequential")
+                else:
+                    for i, leg in enumerate(results):
+                        if leg.get("status") != "success" or not leg.get("orderid"):
+                            inf(f"[ORDER] Basket leg {i} rejected for {underlying}: {leg}")
+                            continue
+                        # NOTE: basketorder's response schema has no field identifying leg type
+                        # (confirmed against openalgo SDK source) — position in `results` is
+                        # assumed to match position in the submitted `orders` list.
+                        is_sl = (i == 0)
+                        if is_sl:
+                            pos.sl_order_id = leg.get("orderid")
+                            inf(f"[ORDER] Basket SL-M placed for {underlying}: trigger ₹{sl:.2f} (id:{pos.sl_order_id})")
+                        else:
+                            pos.tgt_order_id = leg.get("orderid")
+                            inf(f"[ORDER] Basket LIMIT placed for {underlying}: ₹{tgt:.2f} (id:{pos.tgt_order_id})")
 
-                if pos.sl_order_id and pos.tgt_order_id:
-                    return
+                    if pos.sl_order_id and pos.tgt_order_id:
+                        return
         except Exception as exc: err(f"[ORDER] Basket order error for {underlying}: ", exc)
 
         inf(f"[ORDER] Falling back to sequential protective orders for {underlying}...")
