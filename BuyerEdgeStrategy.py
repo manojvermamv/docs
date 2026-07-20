@@ -159,7 +159,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # F73 ✓ Fixed: Basket-order leg identification used multi-key lookup (pricetype/price_type/ordertype) but response schema has none of these — only orderid, status, symbol per entry. Relied on positional fallback (i==0) by accident. Made positional assumption explicit with count-mismatch guard.
 #
-# F74 ◐ Documented: poll_order_status partial-fill branch read filled_quantity/filled_qty from orderstatus() REST endpoint — confirmed against SDK source and server-side orderstatus_service.py that endpoint never populates these fields for 27+ of 32+ brokers; average_price is the only synthesized field (from tradebook). WebSocket order-update stream (subscribe_orders) is the only reliable path for filled_quantity. Branch structurally unreachable via REST; resolution pending Section-4 dispatch-table wiring (the capability does not exist in code yet — only the correct path has been identified).
+# F74 ✓ Fixed: poll_order_status partial-fill branch read filled_quantity/filled_qty from orderstatus() REST endpoint — confirmed against SDK source and server-side orderstatus_service.py that endpoint never populates these fields for 27+ of 32+ brokers; average_price is the only synthesized field (from tradebook). WebSocket order-update stream (subscribe_orders) is the only reliable path for filled_quantity. Fix: _handle_order_stream_event now completes pending entries directly when order_stream_complete_entries=True — guarded by order_stream_complete_entries flag (default False), requires both filled_qty>0 and avg_price>0, pops pending_entries only after register_filled_entry succeeds, and preserves check_pending_entries() polling fallback.
 #
 # F75 ✓ Fixed: fetch_candles() type annotation claimed `-> pd.DataFrame | None` but SDK's history() returns dict on error (empty data, processing failure, API error) — len(dict) returns key count, passing length check by coincidence. Added isinstance(result, pd.DataFrame) guard.
 
@@ -546,6 +546,7 @@ class BrokerConfig:
     quote_api_burst:      int   = 10
     snapshot_stale_timeout: float = 30.0
     order_stream_enabled: bool = False
+    order_stream_complete_entries: bool = False
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -564,6 +565,7 @@ class BrokerConfig:
             quote_api_burst=int(os.getenv("QUOTE_API_BURST", str(cls.quote_api_burst))),
             snapshot_stale_timeout=float(os.getenv("SNAPSHOT_STALE_TIMEOUT", str(cls.snapshot_stale_timeout))),
             order_stream_enabled=os.getenv("ORDER_STREAM_ENABLED", "FALSE").upper() == "TRUE",
+            order_stream_complete_entries=os.getenv("ORDER_STREAM_COMPLETE_ENTRIES", "FALSE").upper() == "TRUE",
         )
 
     def validate(self) -> list[str]:
@@ -7290,23 +7292,48 @@ class OptionsBuyerEdgeBot:
     # ── Order-stream event dispatcher ────────────────────────────────────────
     def _handle_order_stream_event(self, event: dict) -> None:
         """Process a single order-update push event.
-        
-        Shadow-mode first: logs all events. Dispatch table commented out until
-        shadow observation confirms payload shape and noise ratio are acceptable.
-        
-        Plan: uncomment the dispatch and remove the blanket-log return when
-        ready to enable live acceleration.
+
+        Completes pending entries directly from the stream when
+        order_stream_complete_entries is enabled. Falls through to shadow
+        logging otherwise. The check_pending_entries() polling safety net
+        remains as the fallback regardless of this path.
         """
         order_id = event.get("orderid")
         if not order_id:
             return
         os_status = str(event.get("order_status", "")).lower()
+        dbg(f"[ORDER-STREAM] raw event: {event}")
+
+        with self._state.state_lock:
+            pending = self._state.pending_entries.get(order_id)
+        if not pending:
+            return  # not one of ours — account-level stream, most events are
+
+        if (self.config.broker.order_stream_complete_entries
+                and os_status in ("complete", "filled", "executed")):
+            filled_qty = int(event.get("filled_quantity", 0) or 0)
+            avg_price  = float(event.get("average_price", 0) or 0)
+            if filled_qty > 0 and avg_price > 0:
+                inf(f"[ORDER-STREAM] Confirmed fill for {order_id}: "
+                    f"qty={filled_qty} @ {avg_price} — completing entry immediately")
+                self.orders.register_filled_entry(
+                    pending.underlying, pending.symbol, filled_qty,
+                    pending.spot, pending.direction, avg_price,
+                    sl_pts=pending.sl_pts,
+                    entry_delta=pending.entry_delta,
+                    entry_conviction=pending.entry_conviction,
+                    entry_sl_source=pending.entry_sl_source,
+                )
+                with self._state.state_lock:
+                    self._state.pending_entries.pop(order_id, None)
+                return
+
+        # Shadow logging: reports all events visible regardless of completion flag
         inf(
             f"[ORDER-STREAM] {order_id}: {os_status} "
             f"{event.get('symbol', '')} qty={event.get('filled_quantity', 0)} "
             f"@ {event.get('average_price', 0)}"
         )
-        dbg(f"[ORDER-STREAM] raw event: {event}")
 
     def _send_alert(self, message: str, priority: int = 1) -> None:
         try:
