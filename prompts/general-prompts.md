@@ -7,6 +7,22 @@ Now start a new finding loop (cross-check every traces/my-given-findings locally
 
 ---
 
+## Structural Analysis — Oh-My-Opencode / Codegraph
+```text
+Act as a compiler engineer. Run exhaustive multi-layer structural analysis on the given file/project via `codegraph_explore` + internal AST parser. Strict rules:
+
+1. **Truncate nothing.** Index every node — class, function, decorator, control-flow, assign, call, return, raise, await, yield, lambda, comprehension — all assigned sequential IDs (`Node000001…`).
+2. **Multi-representation parse:** AST (structure) + LibCST (comments/exact positions) + `symtable` (scope resolution). Never trust docstrings as ground truth.
+3. **Build layered graphs in order:** Call Graph → per-function CFG (execution paths, unreachable branches, exception flows) → DFG (variable definition / mutation / consumption chains, tainted-data propagation).
+4. **Typed knowledge graph:** entities — Module, Class, Function, Variable, Import, Decorator, Exception, AsyncTask, Thread; edges — `calls`, `imports`, `inherits`, `mutates`, `raises`, `returns`, `reads`, `writes`, `catches`.
+5. **Trace every call path** step-by-step including dynamic dispatch, callbacks, decorators, and monkey-patching.
+6. **Detect smells:** God Objects/Functions, cyclic imports, tight coupling, deep nesting, mutable globals, hidden side effects.
+7. **Security pass:** flag `eval`, `exec`, `pickle`, `yaml.load`, `subprocess(shell=True)`, `os.system`, SQL string concat, hardcoded secrets.
+8. **Map full structural blast radius** of any change — upstream + downstream through the complete dependency chain.
+```
+
+---
+
 ## New Online Auditing Pormpts
 
 ### A
