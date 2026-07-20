@@ -2,7 +2,7 @@
 
 ## OpenAlgo Source-Grounded Cross-Check Loop
 ```text
-Now start a new finding loop (cross-check every trace locally against the real-world OpenAlgo setup: the latest OpenAlgo infra from the GitHub-cloned (Offical Repo: https://github.com/marketcalls/openalgo) local repo at `/home/ubuntu/openalgo/` and the Python SDK — used together in combination; the Python SDK's source code calls into OpenAlgo infra via `{openalgo-infra-repo}/restx_api/`, or if validation fails within that directory alone, expand the search to `{openalgo-infra-repo}/...`; load both the infra and SDK source from GitHub into session memory and ground all findings in their source code as evidence — do not trust SDK or OpenAlgo infra internal code/function docstrings alone — then assess effects and patches strictly according to those sources) — starting from a clean slate.
+Now start a new finding loop (cross-check every traces/my-given-findings locally against the real-world OpenAlgo setup: the latest OpenAlgo infra from the GitHub-cloned [Official Repo: https://github.com/marketcalls/openalgo] local repo at `/home/ubuntu/openalgo/` and the Python SDK — used together in combination; the Python SDK's source code calls into OpenAlgo infra via `{openalgo-infra-repo}/restx_api/`, or if validation fails within that directory alone, expand the search to `{openalgo-infra-repo}/...`; load both the infra and SDK source from GitHub into session memory and ground all findings in their source code as evidence — do not trust SDK or OpenAlgo infra internal code/function docstrings alone — then assess effects and patches strictly according to those sources) — starting from a clean slate.
 ```
 
 ---
