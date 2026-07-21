@@ -547,14 +547,13 @@ class BrokerConfig:
     use_basket_protection: bool = True
     paper_trade:          bool  = False
     order_status_max_retries:   int   = 15
-    order_status_poll_interval: float = 2.0
+    order_poll_interval: float = 2.0
     quote_api_rps:        float = 30.0
     quote_api_burst:      int   = 10
     snapshot_stale_timeout: float = 30.0
     order_stream_enabled: bool = True
     order_stream_complete_entries: bool = True
     order_updates_enabled: bool = True
-    order_poll_interval: int = 5
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -568,22 +567,21 @@ class BrokerConfig:
             broker_sl_orders=os.getenv("BROKER_SL_ORDERS", str(cls.broker_sl_orders)).lower() in ("1", "true", "yes"),
             paper_trade=os.getenv("PAPER_TRADE", str(cls.paper_trade)).lower() in ("1", "true", "yes"),
             order_status_max_retries=int(os.getenv("ORDER_STATUS_MAX_RETRIES", str(cls.order_status_max_retries))),
-            order_status_poll_interval=float(os.getenv("ORDER_STATUS_POLL_INTERVAL", str(cls.order_status_poll_interval))),
+            order_poll_interval=float(os.getenv("ORDER_POLL_INTERVAL", str(cls.order_poll_interval))),
             quote_api_rps=float(os.getenv("QUOTE_API_RPS", str(cls.quote_api_rps))),
             quote_api_burst=int(os.getenv("QUOTE_API_BURST", str(cls.quote_api_burst))),
             snapshot_stale_timeout=float(os.getenv("SNAPSHOT_STALE_TIMEOUT", str(cls.snapshot_stale_timeout))),
             # ORDER_STREAM_ENABLED / ORDER_STREAM_COMPLETE_ENTRIES are script-config
             # values managed via defaults (not read from os.environ).
             order_updates_enabled=os.getenv("ORDER_UPDATES_ENABLED", "FALSE").upper() == "TRUE",
-            order_poll_interval=int(os.getenv("ORDER_POLL_INTERVAL", str(cls.order_poll_interval))),
         )
 
     def validate(self) -> list[str]:
         errs: list[str] = []
         if self.order_status_max_retries < 1:
             errs.append(f"ORDER_STATUS_MAX_RETRIES={self.order_status_max_retries} must be >= 1")
-        if self.order_status_poll_interval < 0:
-            errs.append(f"ORDER_STATUS_POLL_INTERVAL={self.order_status_poll_interval} must be >= 0")
+        if self.order_poll_interval < 0:
+            errs.append(f"ORDER_POLL_INTERVAL={self.order_poll_interval} must be >= 0")
         if not self.openalgo_username:
             errs.append("OPENALGO_USERNAME is still the empty string — set it to your own OpenAlgo username")
         if self.quote_api_rps <= 0:
@@ -5824,7 +5822,7 @@ class OrderManager:
     ) -> dict | None:
         cfg = self.config
         max_r = max_retries if max_retries is not None else cfg.broker.order_status_max_retries
-        slp   = sleep_secs  if sleep_secs  is not None else cfg.broker.order_status_poll_interval
+        slp   = sleep_secs  if sleep_secs  is not None else cfg.broker.order_poll_interval
         _TERMINAL_FILL    = ("complete", "filled", "executed")
         _TERMINAL_FAIL    = ("rejected", "cancelled")
         for attempt in range(max_r):
