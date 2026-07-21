@@ -82,7 +82,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # on orderbook/positionbook (returns account-wide data) or cancelorder (no ownership check before
 # cancel) — confirmed via server source, not SDK docs. On a shared multi-strategy account, this bot's
 # startup orphan-order cleanup (L7396) can see and cancel ANOTHER strategy's live orders. No client-side
-# fix possible; requires upstream OpenAlgo fix. Full trace: openalgo_strategy_isolation_gap.md.
+# fix possible; requires upstream OpenAlgo fix. Full trace: @strategies/docs/openalgo_strategy_orders_isolation_gap.md.
 #
 #
 # ==============================================================================
