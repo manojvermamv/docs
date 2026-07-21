@@ -551,9 +551,9 @@ class BrokerConfig:
     quote_api_rps:        float = 30.0
     quote_api_burst:      int   = 10
     snapshot_stale_timeout: float = 30.0
-    order_stream_enabled: bool = False
-    order_stream_complete_entries: bool = False
-    order_updates_enabled: bool = False
+    order_stream_enabled: bool = True
+    order_stream_complete_entries: bool = True
+    order_updates_enabled: bool = True
     order_poll_interval: int = 5
 
     @classmethod
