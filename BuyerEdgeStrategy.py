@@ -547,7 +547,7 @@ class BrokerConfig:
     use_basket_protection: bool = True
     paper_trade:          bool  = False
     order_status_max_retries:   int   = 15
-    order_poll_interval: float = 2.0
+    order_poll_interval: float = 5.0
     quote_api_rps:        float = 30.0
     quote_api_burst:      int   = 10
     snapshot_stale_timeout: float = 30.0
