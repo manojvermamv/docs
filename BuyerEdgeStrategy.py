@@ -553,6 +553,8 @@ class BrokerConfig:
     snapshot_stale_timeout: float = 30.0
     order_stream_enabled: bool = False
     order_stream_complete_entries: bool = False
+    order_updates_enabled: bool = False
+    order_poll_interval: int = 5
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -570,8 +572,10 @@ class BrokerConfig:
             quote_api_rps=float(os.getenv("QUOTE_API_RPS", str(cls.quote_api_rps))),
             quote_api_burst=int(os.getenv("QUOTE_API_BURST", str(cls.quote_api_burst))),
             snapshot_stale_timeout=float(os.getenv("SNAPSHOT_STALE_TIMEOUT", str(cls.snapshot_stale_timeout))),
-            order_stream_enabled=os.getenv("ORDER_STREAM_ENABLED", "FALSE").upper() == "TRUE",
-            order_stream_complete_entries=os.getenv("ORDER_STREAM_COMPLETE_ENTRIES", "FALSE").upper() == "TRUE",
+            # ORDER_STREAM_ENABLED / ORDER_STREAM_COMPLETE_ENTRIES are script-config
+            # values managed via defaults (not read from os.environ).
+            order_updates_enabled=os.getenv("ORDER_UPDATES_ENABLED", "FALSE").upper() == "TRUE",
+            order_poll_interval=int(os.getenv("ORDER_POLL_INTERVAL", str(cls.order_poll_interval))),
         )
 
     def validate(self) -> list[str]:
@@ -5459,7 +5463,8 @@ class WebSocketManager:
         inf("[WS] WebSocket thread starting...")
         _os = "ENABLED" if self.config.broker.order_stream_enabled else "disabled"
         _osc = "+auto-complete" if self.config.broker.order_stream_complete_entries else ""
-        dbg(f"[ORDER-STREAM] WS-thread config: order_stream={_os}{_osc}")
+        _up = "platform-ready" if self.config.broker.order_updates_enabled else "no-platform-support"
+        dbg(f"[ORDER-STREAM] WS-thread config: order_stream={_os}{_osc} ({_up})")
         self._ws_started.set()
         ws_url = self.config.broker.ws_url or "(SDK default)"
         backoff_secs = 5
@@ -5531,7 +5536,7 @@ class WebSocketManager:
                         except Exception as _re_exc: err(f"[WS] Reconcile subscribe error {exch}:{sym}: ", _re_exc)
 
                     # ── Order-update stream (account-level, one subscription covers everything) ──
-                    if self.config.broker.order_stream_enabled:
+                    if self.config.broker.order_updates_enabled and self.config.broker.order_stream_enabled:
                         inf("[ORDER-STREAM] Attempting to subscribe to account-level order updates via subscribe_orders()...")
                         try:
                             sent = self.client.subscribe_orders(on_order_update=self._on_order_event)
@@ -7701,7 +7706,8 @@ class OptionsBuyerEdgeBot:
         inf(f"  Candle Interval : {cfg.market.candle_interval}")
         inf(f"  Check Interval  : {cfg.market.signal_check_interval}s")
         _os_auto = " (auto-complete entries)" if cfg.broker.order_stream_complete_entries else ""
-        inf(f"  Order Stream    : {'ENABLED' if cfg.broker.order_stream_enabled else 'disabled'}{_os_auto}")
+        _os_plat = " [platform:READY]" if cfg.broker.order_updates_enabled else " [platform:UNAVAIL]"
+        inf(f"  Order Stream    : {'ENABLED' if cfg.broker.order_stream_enabled else 'disabled'}{_os_auto}{_os_plat}")
         inf("-" * 70)
         inf(f"  [RISK GATES]")
         inf(f"  Max Trades/Day  : {cfg.risk.max_trades_per_session or 'unlimited'}")
@@ -8576,16 +8582,21 @@ class OptionsBuyerEdgeBot:
         self._validate_thresholds()
         self._print_startup_info()
 
-        # ── Order-stream env var forwarding diagnostic (Fix 2 + Fix 4) ────────
-        _os_raw  = os.getenv("ORDER_STREAM_ENABLED", "NOT-SET")
-        _osc_raw = os.getenv("ORDER_STREAM_COMPLETE_ENTRIES", "NOT-SET")
-        inf(f"[CONFIG] ORDER_STREAM_ENABLED={_os_raw!r} → order_stream_enabled={cfg.broker.order_stream_enabled}")
-        inf(f"[CONFIG] ORDER_STREAM_COMPLETE_ENTRIES={_osc_raw!r} → order_stream_complete_entries={cfg.broker.order_stream_complete_entries}")
-        if cfg.broker.order_stream_enabled:
-            inf("[CONFIG] Order-stream feature ENABLED — will attempt subscribe_orders() on WS connect")
+        # ── Order-stream platform-infra diagnostic ────────────────────────────
+        _up_raw = os.getenv("ORDER_UPDATES_ENABLED", "NOT-SET")
+        _pi_raw = os.getenv("ORDER_POLL_INTERVAL", "NOT-SET")
+        inf(f"[CONFIG] Platform ORDER_UPDATES_ENABLED={_up_raw!r} → order_updates_enabled={cfg.broker.order_updates_enabled}")
+        inf(f"[CONFIG] Platform ORDER_POLL_INTERVAL={_pi_raw!r} → order_poll_interval={cfg.broker.order_poll_interval}")
+        inf(f"[CONFIG] Script order_stream_enabled={cfg.broker.order_stream_enabled} (config-managed, not from env)")
+        inf(f"[CONFIG] Script order_stream_complete_entries={cfg.broker.order_stream_complete_entries} (config-managed, not from env)")
+        if cfg.broker.order_updates_enabled and cfg.broker.order_stream_enabled:
+            inf("[CONFIG] Order-stream feature ENABLED (platform-ready + script-config) — will attempt subscribe_orders() on WS connect")
+        elif not cfg.broker.order_updates_enabled:
+            inf("[CONFIG] Order-stream DISABLED — platform ORDER_UPDATES_ENABLED is not TRUE."
+                " All order-status updates will use REST polling")
         else:
-            inf("[CONFIG] Order-stream feature DISABLED (env var not set or not forwarded by platform)" 
-                " — all order-status updates will use REST polling")
+            inf("[CONFIG] Order-stream DISABLED — script order_stream_enabled=False."
+                " All order-status updates will use REST polling")
 
         self._check_open_positions_on_startup()
 
