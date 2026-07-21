@@ -7218,7 +7218,7 @@ class OrderManager:
                                     pos.sl, pos.tgt,
                                 )
                             # Clean up pending exit
-                            with self._state.state_lock:
+        with self.state.state_lock:
                                 self._state.pending_exits.pop(slot_id, None)
                                 pos.exit_pending = False
                             with self._state.exit_lock:
@@ -7339,8 +7339,8 @@ class OptionsBuyerEdgeBot:
                     entry_conviction=pending.entry_conviction,
                     entry_sl_source=pending.entry_sl_source,
                 )
-                with self._state.state_lock:
-                    self._state.pending_entries.pop(order_id, None)
+                with self.state.state_lock:
+                    self.state.pending_entries.pop(order_id, None)
                 return
 
         # Shadow logging: reports all events visible regardless of completion flag
