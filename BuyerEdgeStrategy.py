@@ -7218,7 +7218,7 @@ class OrderManager:
                                     pos.sl, pos.tgt,
                                 )
                             # Clean up pending exit
-        with self.state.state_lock:
+                            with self._state.state_lock:
                                 self._state.pending_exits.pop(slot_id, None)
                                 pos.exit_pending = False
                             with self._state.exit_lock:
@@ -7319,8 +7319,8 @@ class OptionsBuyerEdgeBot:
         os_status = str(event.get("order_status", "")).lower()
         dbg(f"[ORDER-STREAM] raw event: {event}")
 
-        with self._state.state_lock:
-            pending = self._state.pending_entries.get(order_id)
+        with self.state.state_lock:
+            pending = self.state.pending_entries.get(order_id)
         if not pending:
             return  # not one of ours — account-level stream, most events are
 
