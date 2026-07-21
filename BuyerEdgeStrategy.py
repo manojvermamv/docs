@@ -5457,6 +5457,9 @@ class WebSocketManager:
 
     def _ws_thread(self) -> None:
         inf("[WS] WebSocket thread starting...")
+        _os = "ENABLED" if self.config.broker.order_stream_enabled else "disabled"
+        _osc = "+auto-complete" if self.config.broker.order_stream_complete_entries else ""
+        dbg(f"[ORDER-STREAM] WS-thread config: order_stream={_os}{_osc}")
         self._ws_started.set()
         ws_url = self.config.broker.ws_url or "(SDK default)"
         backoff_secs = 5
@@ -5529,14 +5532,19 @@ class WebSocketManager:
 
                     # ── Order-update stream (account-level, one subscription covers everything) ──
                     if self.config.broker.order_stream_enabled:
+                        inf("[ORDER-STREAM] Attempting to subscribe to account-level order updates via subscribe_orders()...")
                         try:
                             sent = self.client.subscribe_orders(on_order_update=self._on_order_event)
                             if sent:
-                                inf("[ORDER-STREAM] Subscribed to account-level order updates")
+                                inf("[ORDER-STREAM] Subscribed to account-level order updates — broker push events will be processed")
                             else:
-                                err("[ORDER-STREAM] subscribe_orders() returned False — continuing on polling only", None)
+                                err("[ORDER-STREAM] subscribe_orders() returned False — platform does not advertise 'orders' in supported_features. "
+                                    "Continuing on polling only.", None)
                         except Exception as _os_exc:
-                            err("[ORDER-STREAM] subscribe_orders failed — continuing on polling only", _os_exc)
+                            err("[ORDER-STREAM] subscribe_orders() raised exception — continuing on polling only", _os_exc)
+                    else:
+                        dbg("[ORDER-STREAM] order_stream_enabled=False — subscribe_orders() skipped. "
+                            "All order-status updates via REST polling.")
 
                     while True:  # watchdog: graduated alerts then force-reconnect if feed silent
                         if self._ws_stop_event.wait(timeout=30):
@@ -7692,6 +7700,8 @@ class OptionsBuyerEdgeBot:
         inf(f"  DTE Range       : {cfg.market.dte_min} – {cfg.market.dte_max} days")
         inf(f"  Candle Interval : {cfg.market.candle_interval}")
         inf(f"  Check Interval  : {cfg.market.signal_check_interval}s")
+        _os_auto = " (auto-complete entries)" if cfg.broker.order_stream_complete_entries else ""
+        inf(f"  Order Stream    : {'ENABLED' if cfg.broker.order_stream_enabled else 'disabled'}{_os_auto}")
         inf("-" * 70)
         inf(f"  [RISK GATES]")
         inf(f"  Max Trades/Day  : {cfg.risk.max_trades_per_session or 'unlimited'}")
@@ -8565,6 +8575,18 @@ class OptionsBuyerEdgeBot:
         self._verify_registration()
         self._validate_thresholds()
         self._print_startup_info()
+
+        # ── Order-stream env var forwarding diagnostic (Fix 2 + Fix 4) ────────
+        _os_raw  = os.getenv("ORDER_STREAM_ENABLED", "NOT-SET")
+        _osc_raw = os.getenv("ORDER_STREAM_COMPLETE_ENTRIES", "NOT-SET")
+        inf(f"[CONFIG] ORDER_STREAM_ENABLED={_os_raw!r} → order_stream_enabled={cfg.broker.order_stream_enabled}")
+        inf(f"[CONFIG] ORDER_STREAM_COMPLETE_ENTRIES={_osc_raw!r} → order_stream_complete_entries={cfg.broker.order_stream_complete_entries}")
+        if cfg.broker.order_stream_enabled:
+            inf("[CONFIG] Order-stream feature ENABLED — will attempt subscribe_orders() on WS connect")
+        else:
+            inf("[CONFIG] Order-stream feature DISABLED (env var not set or not forwarded by platform)" 
+                " — all order-status updates will use REST polling")
+
         self._check_open_positions_on_startup()
 
         self._send_alert(
