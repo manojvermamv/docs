@@ -78,6 +78,12 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # telegram() correctly omits strategy= (SDK has no such param).
 # basketorder() now passes strategy=cfg.broker.strategy_name.
 #
+# ⚠ KNOWN PLATFORM GAP (paused, not fixable here): OpenAlgo server does not enforce `strategy`
+# on orderbook/positionbook (returns account-wide data) or cancelorder (no ownership check before
+# cancel) — confirmed via server source, not SDK docs. On a shared multi-strategy account, this bot's
+# startup orphan-order cleanup (L7396) can see and cancel ANOTHER strategy's live orders. No client-side
+# fix possible; requires upstream OpenAlgo fix. Full trace: openalgo_strategy_isolation_gap.md.
+#
 #
 # ==============================================================================
 # CLOSED FINDINGS
