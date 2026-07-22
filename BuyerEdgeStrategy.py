@@ -5709,33 +5709,37 @@ class OrderManager:
                 data = confirm.get("data") or confirm
                 bs = str(data.get("order_status", "")).lower()
                 ep = float(data.get("average_price", 0) or data.get("price", 0) or 0)
-                fq = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
-                if bs in ("complete", "filled", "executed") and ep > 0 and fq > 0:
+                fq_raw = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
+                # F76: REST API never populates filled_quantity/filled_qty for 27+/32+ brokers.
+                # Use fq_raw as primary signal, fall back to pending.qty when absent.
+                if bs in ("complete", "filled", "executed") and ep > 0:
                     if pending:
+                        use_qty = fq_raw if fq_raw > 0 else pending.qty
                         self._risk.record_entry(pending.underlying)
                         self.register_filled_entry(
-                            pending.underlying, pending.symbol, fq,
+                            pending.underlying, pending.symbol, use_qty,
                             pending.spot, pending.direction, ep,
                             sl_pts=pending.sl_pts, entry_delta=pending.entry_delta,
                             entry_conviction=pending.entry_conviction,
                             entry_sl_source=pending.entry_sl_source,
                         )
-                        inf(f"[ORDER] Cancel-race {order_id}: reconciled {fq} @ \u20b9{ep:.2f}")
+                        inf(f"[ORDER] Cancel-race {order_id}: reconciled {use_qty} @ \u20b9{ep:.2f}")
                     return "reconciled"
-                if bs in ("cancelled", "canceled", "rejected") and fq == 0:
+                if bs in ("cancelled", "canceled", "rejected") and fq_raw == 0:
                     inf(f"[ORDER] Cancel confirmed for {order_id}: {bs}")
                     return "cancelled"
-                if bs in ("cancelled", "canceled", "rejected") and fq > 0 and ep > 0:
+                if bs in ("cancelled", "canceled", "rejected") and ep > 0:
                     if pending:
+                        use_qty = fq_raw if fq_raw > 0 else pending.qty
                         self._risk.record_entry(pending.underlying)
                         self.register_filled_entry(
-                            pending.underlying, pending.symbol, fq,
+                            pending.underlying, pending.symbol, use_qty,
                             pending.spot, pending.direction, ep,
                             sl_pts=pending.sl_pts, entry_delta=pending.entry_delta,
                             entry_conviction=pending.entry_conviction,
                             entry_sl_source=pending.entry_sl_source,
                         )
-                        inf(f"[ORDER] Cancel-race {order_id}: partial {fq} @ \u20b9{ep:.2f} — reconciled")
+                        inf(f"[ORDER] Cancel-race {order_id}: partial {use_qty} @ \u20b9{ep:.2f} — reconciled")
                     return "reconciled"
                 inf(f"[ORDER] Cancel-confirm status {bs} for {order_id}: fq={fq} ep={ep}")
         except Exception as exc:
@@ -6749,11 +6753,12 @@ class OrderManager:
             if raw:
                 bs = str(raw.get("order_status", "")).lower()
                 ep = float(raw.get("average_price", 0) or 0)
-                fq = int(raw.get("filled_quantity", 0) or raw.get("filled_qty", 0) or 0)
-                if bs in ("complete", "filled", "executed") and ep > 0 and fq > 0:
+                fq_raw = int(raw.get("filled_quantity", 0) or raw.get("filled_qty", 0) or 0)
+                if bs in ("complete", "filled", "executed") and ep > 0:
+                    use_qty = fq_raw if fq_raw > 0 else tr.qty
                     with self._pending_tranche_exits_lock:
                         self._pending_tranche_exits.pop(_tranche_key, None)
-                    self.apply_confirmed_partial_exit(pos, tr, fq, ep, reason, underlying, pos.symbol)
+                    self.apply_confirmed_partial_exit(pos, tr, use_qty, ep, reason, underlying, pos.symbol)
                     for attr_name, oid in [("sl_order_id", tr.sl_order_id), ("tgt_order_id", tr.tgt_order_id)]:
                         if oid:
                             try:
@@ -6761,10 +6766,11 @@ class OrderManager:
                             except Exception as exc:
                                 err(f"[ORDER] Cancel {attr_name} error for {underlying} t={tr.tranche_id}: ", exc)
                     inf(f"[ORDER] Tranche exit SELL {_pending_oid} complete for {underlying} t={tr.tranche_id}")
-                elif bs in ("cancelled", "canceled", "rejected") and fq > 0 and ep > 0:
+                elif bs in ("cancelled", "canceled", "rejected") and ep > 0:
+                    use_qty = fq_raw if fq_raw > 0 else tr.qty
                     with self._pending_tranche_exits_lock:
                         self._pending_tranche_exits.pop(_tranche_key, None)
-                    self.apply_confirmed_partial_exit(pos, tr, fq, ep, reason, underlying, pos.symbol)
+                    self.apply_confirmed_partial_exit(pos, tr, use_qty, ep, reason, underlying, pos.symbol)
                     if pos.remaining_qty > 0:
                         for trr in pos.tranches:
                             trr.sl_order_id = None
@@ -7047,6 +7053,7 @@ class OrderManager:
         filled_qty     = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
         order_qty      = int(data.get("quantity", 0) or 0)
 
+        # F76: REST API never populates filled_qty — treat 0 as fully filled when ep>0
         if filled_qty > 0 and order_qty > 0 and filled_qty < order_qty:
             inf(
                 f"[ORDER] Exit partial fill for {underlying}: {filled_qty}/{order_qty} — "
@@ -7192,10 +7199,10 @@ class OrderManager:
                     now_hm = get_ist_now().strftime("%H:%M")
                     is_past_cutoff = bool(self.config.market.square_off_time and now_hm >= self.config.market.square_off_time)
                     exit_filled_qty = int(raw.get("filled_quantity", 0) or raw.get("filled_qty", 0) or 0)
+                    avg_price = float(raw.get("average_price", 0) or 0)
 
-                    if exit_filled_qty > 0:
-                        avg_price = float(raw.get("average_price", 0) or 0)
-                        if avg_price > 0:
+                    # F76: REST API never populates filled_qty — use avg_price as the fill signal
+                    if avg_price > 0:
                             reduction = min(exit_filled_qty, pos.remaining_qty)
                             rem = reduction
                             for tr in pos.tranches:
