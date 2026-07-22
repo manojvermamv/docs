@@ -3379,6 +3379,8 @@ class DataFetcher:
         self._quote_tokens: float = float(self._quote_burst)
         self._quote_last_refill: float = time.time()
         self._quote_lock = threading.Lock()
+        # Per-symbol expiry list cache (called at most once per symbol per strategy lifecycle).
+        self._expiry_list_cache: dict[str, list[str] | None] = {}
 
     def clear_greeks_cache(self, symbol: str | None = None) -> None:
         """Clear cached option greeks. Called once per scan to avoid stale reads."""
@@ -3802,8 +3804,12 @@ class DataFetcher:
         
         return result
 
-    def fetch_target_expiry(self, symbol: str) -> str | None:
+    def _expiry_list(self, symbol: str) -> list[str] | None:
+        """Fetch and cache the raw expiry list. Called at most once per symbol per strategy lifecycle."""
+        if symbol in self._expiry_list_cache:
+            return self._expiry_list_cache[symbol]
         if not hasattr(self.client, "expiry"):
+            self._expiry_list_cache[symbol] = None
             return None
         try:
             resp = self.client.expiry(
@@ -3812,65 +3818,56 @@ class DataFetcher:
                 instrumenttype="options",
             )
             if not resp:
+                self._expiry_list_cache[symbol] = None
                 return None
             if isinstance(resp, list):
-                expiry_list: list[str] = resp
+                parsed: list[str] = resp
             elif isinstance(resp, dict):
-                expiry_list = resp.get("data", resp.get("expiries", []))
+                parsed = resp.get("data", resp.get("expiries", []))
             else:
+                self._expiry_list_cache[symbol] = None
                 return None
-
-            now = get_ist_now().date()
-            for exp in expiry_list:
-                exp_text = str(exp).strip().upper()
-                exp_date = None
-                for fmt in ("%d%b%y", "%d-%b-%y", "%d%b%Y", "%d-%b-%Y"):
-                    try:
-                        exp_date = datetime.strptime(exp_text, fmt).date()
-                        break
-                    except ValueError:
-                        pass
-                if exp_date is None:
-                    continue
-                dte = (exp_date - now).days
-                if self.config.market.dte_min <= dte <= self.config.market.dte_max:
-                    return exp_date.strftime("%d%b%y").upper()
-            return None
+            self._expiry_list_cache[symbol] = parsed
+            return parsed
         except Exception as exc:
-            err(f"[DATA] expiry fetch error for {symbol}", exc)
+            err(f"[DATA] expiry list fetch error for {symbol}", exc)
+            self._expiry_list_cache[symbol] = None
             return None
 
-    def pick_nearest_expiry(self, symbol: str) -> str | None:
-        """Return the nearest available expiry when none is in DTE range (checkpoint fallback)."""
-        if not hasattr(self.client, "expiry"):
+    def fetch_target_expiry(self, symbol: str) -> str | None:
+        expiry_list = self._expiry_list(symbol)
+        if not expiry_list:
             return None
-        try:
-            resp = self.client.expiry(
-                symbol=symbol,
-                exchange=self.config.market.fno_exchange,
-                instrumenttype="options",
-            )
-            if not resp:
-                return None
-            if isinstance(resp, list):
-                expiry_list = resp
-            elif isinstance(resp, dict):
-                expiry_list = resp.get("data", resp.get("expiries", []))
-            else:
-                return None
-            if not expiry_list:
-                return None
-            first = str(expiry_list[0]).strip().upper()
+        now = get_ist_now().date()
+        for exp in expiry_list:
+            exp_text = str(exp).strip().upper()
+            exp_date = None
             for fmt in ("%d%b%y", "%d-%b-%y", "%d%b%Y", "%d-%b-%Y"):
                 try:
-                    exp_date = datetime.strptime(first, fmt).date()
-                    return exp_date.strftime("%d%b%y").upper()
+                    exp_date = datetime.strptime(exp_text, fmt).date()
+                    break
                 except ValueError:
-                    continue
+                    pass
+            if exp_date is None:
+                continue
+            dte = (exp_date - now).days
+            if self.config.market.dte_min <= dte <= self.config.market.dte_max:
+                return exp_date.strftime("%d%b%y").upper()
+        return None
+
+    def pick_nearest_expiry(self, symbol: str) -> str | None:
+        """Return the nearest available expiry when none is in DTE range."""
+        expiry_list = self._expiry_list(symbol)
+        if not expiry_list:
             return None
-        except Exception as exc:
-            err(f"[DATA] nearest expiry error for {symbol}", exc)
-            return None
+        first = str(expiry_list[0]).strip().upper()
+        for fmt in ("%d%b%y", "%d-%b-%y", "%d%b%Y", "%d-%b-%Y"):
+            try:
+                exp_date = datetime.strptime(first, fmt).date()
+                return exp_date.strftime("%d%b%y").upper()
+            except ValueError:
+                continue
+        return None
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
