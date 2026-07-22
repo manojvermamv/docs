@@ -709,7 +709,6 @@ class EntryConfig:
     power_hour_score_factor:      float = 0.80
     morning_score_factor:         float = 1.50
     asym_score_threshold:         float = 0.35
-    allow_checkpoint_fallback:    bool  = True
 
     # ── Direction ──
     long_only_mode:               bool  = True
@@ -796,7 +795,6 @@ class EntryConfig:
             min_oi_filter=float(os.getenv("MIN_OI_FILTER", str(defaults.min_oi_filter))),
             min_vol_filter=float(os.getenv("MIN_VOL_FILTER", str(defaults.min_vol_filter))),
             asym_score_threshold=float(os.getenv("ASYM_SCORE_THRESHOLD", str(defaults.asym_score_threshold))),
-            allow_checkpoint_fallback=os.getenv("ALLOW_CHECKPOINT_FALLBACK", str(defaults.allow_checkpoint_fallback)).lower() in ("1", "true", "yes"),
             delta_target_low=float(os.getenv("DELTA_TARGET_LOW", str(defaults.delta_target_low))),
             delta_target_high=float(os.getenv("DELTA_TARGET_HIGH", str(defaults.delta_target_high))),
             delta_exit_threshold=float(os.getenv("DELTA_EXIT_THRESHOLD", str(defaults.delta_exit_threshold))),
@@ -7834,15 +7832,11 @@ class OptionsBuyerEdgeBot:
 
         expiry = self.fetcher.fetch_target_expiry(symbol)
         if not expiry:
-            if cfg.entry.allow_checkpoint_fallback:
-                expiry = self.fetcher.pick_nearest_expiry(symbol)
-                if expiry:
-                    dbg(f"[SCAN] {symbol}: checkpoint-fallback expiry {expiry}")
-                else:
-                    inf(f"[SCAN] {symbol}: no expiry available — skip")
-                    return
+            expiry = self.fetcher.pick_nearest_expiry(symbol)
+            if expiry:
+                dbg(f"[SCAN] {symbol}: nearest expiry {expiry} (outside DTE range)")
             else:
-                inf(f"[SCAN] {symbol}: no expiry in DTE range {cfg.market.dte_min}–{cfg.market.dte_max} — skip")
+                inf(f"[SCAN] {symbol}: no expiry available — skip")
                 return
 
         # Fetch option chain
@@ -8127,11 +8121,10 @@ class OptionsBuyerEdgeBot:
             gex_levels=gex_levels,
         )
         if best is None:
-            if cfg.entry.allow_checkpoint_fallback:
-                best = StrikeSelector.simple_otm(smoothed, spot, direction, cfg.market.otm_offset)
-                if best:
-                    inf(f"[SCAN] {symbol}: using simple OTM fallback strike {best.get('strike')}")
-            if best is None:
+            best = StrikeSelector.simple_otm(smoothed, spot, direction, cfg.market.otm_offset)
+            if best:
+                inf(f"[SCAN] {symbol}: using simple OTM fallback strike {best.get('strike')}")
+            else:
                 inf(f"[SCAN] {symbol}: no qualifying strike found — skip")
                 _log_greeks_perf("no-strike", sep_count=79)
                 return
