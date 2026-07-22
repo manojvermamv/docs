@@ -7348,49 +7348,103 @@ class OptionsBuyerEdgeBot:
 
     # ── Order-stream event dispatcher ────────────────────────────────────────
     def _handle_order_stream_event(self, event: dict) -> None:
-        """Process a single order-update push event.
+        """Universal order-update event dispatcher.
 
-        Completes pending entries directly from the stream when
-        order_stream_complete_entries is enabled. Falls through to shadow
-        logging otherwise. The check_pending_entries() polling safety net
-        remains as the fallback regardless of this path.
+        Three dispatch targets in priority order, then shadow log fallback:
+          1. Entry completion  — match against pending_entries (existing)
+          2. Exit completion   — match against pending_exits (stream-accelerated)
+          3. Protection fill   — match sl_order_id / tgt_order_id against active
+                                 positions (bypasses next polling cycle)
+          4. Shadow log        — inf() for every unmatched event (replaces silent drop)
+
+        The polling safety net (check_pending_entries / check_pending_exits /
+        check_broker_order_fills) runs AFTER this in the same cycle and is
+        idempotent — each _handle_broker_order_fill call exits cleanly if
+        exit_pending / is_exit_placed is already set.
         """
         order_id = event.get("orderid")
         if not order_id:
             return
         os_status = str(event.get("order_status", "")).lower()
         dbg(f"[ORDER-STREAM] raw event: {event}")
+        handled = False
 
+        # ── 1. Entry completion (existing) ────────────────────────────
         with self.state.state_lock:
             pending = self.state.pending_entries.get(order_id)
-        if not pending:
-            return  # not one of ours — account-level stream, most events are
+        if pending:
+            handled = True
+            if (self.config.broker.order_stream_complete_entries
+                    and os_status in ("complete", "filled", "executed")):
+                filled_qty = int(event.get("filled_quantity", 0) or 0)
+                avg_price  = float(event.get("average_price", 0) or 0)
+                if filled_qty > 0 and avg_price > 0:
+                    inf(f"[ORDER-STREAM] Confirmed fill for {order_id}: "
+                        f"qty={filled_qty} @ {avg_price} — completing entry immediately")
+                    self.orders.register_filled_entry(
+                        pending.underlying, pending.symbol, filled_qty,
+                        pending.spot, pending.direction, avg_price,
+                        sl_pts=pending.sl_pts,
+                        entry_delta=pending.entry_delta,
+                        entry_conviction=pending.entry_conviction,
+                        entry_sl_source=pending.entry_sl_source,
+                    )
+                    with self.state.state_lock:
+                        self.state.pending_entries.pop(order_id, None)
+                    return
+            inf(
+                f"[ORDER-STREAM] {order_id}: {os_status} "
+                f"{event.get('symbol', '')} (entry)"
+            )
 
-        if (self.config.broker.order_stream_complete_entries
-                and os_status in ("complete", "filled", "executed")):
-            filled_qty = int(event.get("filled_quantity", 0) or 0)
-            avg_price  = float(event.get("average_price", 0) or 0)
-            if filled_qty > 0 and avg_price > 0:
-                inf(f"[ORDER-STREAM] Confirmed fill for {order_id}: "
-                    f"qty={filled_qty} @ {avg_price} — completing entry immediately")
-                self.orders.register_filled_entry(
-                    pending.underlying, pending.symbol, filled_qty,
-                    pending.spot, pending.direction, avg_price,
-                    sl_pts=pending.sl_pts,
-                    entry_delta=pending.entry_delta,
-                    entry_conviction=pending.entry_conviction,
-                    entry_sl_source=pending.entry_sl_source,
-                )
-                with self.state.state_lock:
-                    self.state.pending_entries.pop(order_id, None)
-                return
+        # ── 2. Exit completion (NEW) ──────────────────────────────────
+        if not handled:
+            with self.state.state_lock:
+                pending_exit = self.state.pending_exits.get(order_id)
+            if pending_exit:
+                handled = True
+                if os_status in ("complete", "filled", "executed"):
+                    inf(f"[ORDER-STREAM] Exit confirmed: {order_id} "
+                        f"{event.get('symbol', '')}")
 
-        # Shadow logging: reports all events visible regardless of completion flag
-        inf(
-            f"[ORDER-STREAM] {order_id}: {os_status} "
-            f"{event.get('symbol', '')} qty={event.get('filled_quantity', 0)} "
-            f"@ {event.get('average_price', 0)}"
-        )
+        # ── 3. Protection order fill (NEW — LIMIT / SL-M matched to positions) ──
+        if not handled and os_status in ("complete", "filled", "executed"):
+            executed_price = float(event.get("average_price", 0) or 0)
+            if executed_price > 0:
+                for underlying, pos in self.state.positions.all_items():
+                    if pos.exit_pending:
+                        continue
+                    for attr_name, raw_reason in (
+                        ("sl_order_id",  "broker_sl_filled"),
+                        ("tgt_order_id", "broker_target_filled"),
+                    ):
+                        # Position-level match (single-tranche path)
+                        if getattr(pos, attr_name, None) == order_id:
+                            inf(f"[ORDER-STREAM] Protection fill detected: "
+                                f"{attr_name} {order_id} → handling immediately")
+                            self.orders._handle_broker_order_fill(
+                                underlying, pos, attr_name, order_id,
+                                raw_reason, executed_price,
+                            )
+                            return
+                        # Tranche-level match (multi-tranche path)
+                        for tr in (pos.tranches or []):
+                            if getattr(tr, attr_name, None) == order_id:
+                                inf(f"[ORDER-STREAM] Protection fill detected: "
+                                    f"{attr_name} t={tr.tranche_id} {order_id} → handling immediately")
+                                self.orders._handle_broker_order_fill(
+                                    underlying, pos, attr_name, order_id,
+                                    raw_reason, executed_price, tr=tr,
+                                )
+                                return
+
+        # ── 4. Shadow log for all unmatched events (NEW — replaces silent return) ──
+        if not handled:
+            inf(
+                f"[ORDER-STREAM] {order_id}: {os_status} "
+                f"{event.get('symbol', '')} qty={event.get('filled_quantity', 0)} "
+                f"@ {event.get('average_price', 0)}"
+            )
 
     def _send_alert(self, message: str, priority: int = 1) -> None:
         try:
