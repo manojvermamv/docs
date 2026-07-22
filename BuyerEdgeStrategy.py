@@ -168,6 +168,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F74 ✓ Fixed: poll_order_status partial-fill branch reads filled_quantity from orderstatus() REST endpoint — confirmed endpoint never populates this for 27+ of 32+ brokers. Order-update stream completes pending entries via order_stream_complete_entries flag, preserving polling fallback.
 #
 # F75 ✓ Fixed: fetch_candles() type annotation claimed `-> pd.DataFrame | None` but SDK's history() returns dict on error (empty data, processing failure, API error) — len(dict) returns key count, passing length check by coincidence. Added isinstance(result, pd.DataFrame) guard.
+#
+# F76 ✓ Fixed: REST API orderstatus() never populates filled_quantity/filled_qty for 27+ of 32+ brokers (all except Zerodha/Shoonya). Six call sites with `fq > 0` guards silently skipped order confirmation and position registration — entries never tracked, exits never confirmed, partial-exit fill signals invisible. Grid: (1) _cancel_three_outcome() complete+fail paths — removed fq guard, substituted pending.qty; (2) _exit_non_runner_tranche() complete+fail paths — same fix; (3) check_pending_exits partial-fill — documented gap (optimization only, fall-through is correct); (4) exit polling — restructured to use avg_price > 0 as primary fill signal. Remaining sites with existing fallback (check_pending_entries stream path) or unaffected by 0 qty (ORD-2 early-return, place_entry partial-fill) left as-is.
 
 # ==============================================================================
 # CODING CONVENTIONS
