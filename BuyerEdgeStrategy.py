@@ -3499,6 +3499,9 @@ class DataFetcher:
             raw = self.client.optionchain(**kwargs)
             if not raw:
                 return [], None
+            if isinstance(raw, dict) and raw.get("status") == "error":
+                err(f"[DATA] Option chain API error for {symbol}: {raw.get('message', str(raw))}")
+                return [], None
             if isinstance(raw, dict):
                 expiry_date = raw.get("expiry_date")
                 nested = raw.get("chain", raw.get("data", []))
@@ -3837,6 +3840,38 @@ class DataFetcher:
             return None
         except Exception as exc:
             err(f"[DATA] expiry fetch error for {symbol}", exc)
+            return None
+
+    def pick_nearest_expiry(self, symbol: str) -> str | None:
+        """Return the nearest available expiry when none is in DTE range (checkpoint fallback)."""
+        if not hasattr(self.client, "expiry"):
+            return None
+        try:
+            resp = self.client.expiry(
+                symbol=symbol,
+                exchange=self.config.market.fno_exchange,
+                instrumenttype="options",
+            )
+            if not resp:
+                return None
+            if isinstance(resp, list):
+                expiry_list = resp
+            elif isinstance(resp, dict):
+                expiry_list = resp.get("data", resp.get("expiries", []))
+            else:
+                return None
+            if not expiry_list:
+                return None
+            first = str(expiry_list[0]).strip().upper()
+            for fmt in ("%d%b%y", "%d-%b-%y", "%d%b%Y", "%d-%b-%Y"):
+                try:
+                    exp_date = datetime.strptime(first, fmt).date()
+                    return exp_date.strftime("%d%b%y").upper()
+                except ValueError:
+                    continue
+            return None
+        except Exception as exc:
+            err(f"[DATA] nearest expiry error for {symbol}", exc)
             return None
 
 
@@ -7798,9 +7833,17 @@ class OptionsBuyerEdgeBot:
             return
 
         expiry = self.fetcher.fetch_target_expiry(symbol)
-        if not expiry and not cfg.entry.allow_checkpoint_fallback:
-            inf(f"[SCAN] {symbol}: no expiry in DTE range {cfg.market.dte_min}–{cfg.market.dte_max} — skip")
-            return
+        if not expiry:
+            if cfg.entry.allow_checkpoint_fallback:
+                expiry = self.fetcher.pick_nearest_expiry(symbol)
+                if expiry:
+                    dbg(f"[SCAN] {symbol}: checkpoint-fallback expiry {expiry}")
+                else:
+                    inf(f"[SCAN] {symbol}: no expiry available — skip")
+                    return
+            else:
+                inf(f"[SCAN] {symbol}: no expiry in DTE range {cfg.market.dte_min}–{cfg.market.dte_max} — skip")
+                return
 
         # Fetch option chain
         chain_rows, expiry_used = self.fetcher.fetch_option_chain(symbol, expiry)
