@@ -62,12 +62,13 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #   ✓ Restart flow (broker position reconstruction, protection reconciliation)
 #   ✓ Exit flow (WS tick trigger → place_exit → poll → _finalize_exit cleanup)
 #   ✓ Reconciliation flow (check_pending_entries/exits, stale position cleanup)
+#   ✓ Order-stream flow (event dispatcher → polling safety net; 4-priority dispatch)
 #   ✓ Concurrency (state_lock → exit_lock hierarchy, thread pool bounds)
 #
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F75 (F28, F49–F51 reserved; F65–F70 unused)
+# Closed Findings:               F1–F64, F71–F77 (F28, F49–F51 reserved; F65–F70 unused)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
@@ -170,6 +171,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F75 ✓ Fixed: fetch_candles() type annotation claimed `-> pd.DataFrame | None` but SDK's history() returns dict on error (empty data, processing failure, API error) — len(dict) returns key count, passing length check by coincidence. Added isinstance(result, pd.DataFrame) guard.
 #
 # F76 ✓ Fixed: REST API orderstatus() never populates filled_quantity/filled_qty for 27+ of 32+ brokers (all except Zerodha/Shoonya). Six call sites with `fq > 0` guards silently skipped order confirmation and position registration — entries never tracked, exits never confirmed, partial-exit fill signals invisible. Grid: (1) _cancel_three_outcome() complete+fail paths — removed fq guard, substituted pending.qty; (2) _exit_non_runner_tranche() complete+fail paths — same fix; (3) check_pending_exits partial-fill — documented gap (optimization only, fall-through is correct); (4) exit polling — restructured to use avg_price > 0 as primary fill signal. Remaining sites with existing fallback (check_pending_entries stream path) or unaffected by 0 qty (ORD-2 early-return, place_entry partial-fill) left as-is.
+#
+# F77 ✓ Fixed: Order-stream event dispatcher silently dropped 22 of 23 events — _handle_order_stream_event only handled entry completions; LIMIT fills, SL-M triggers, and exit completions were logged at dbg() (invisible when DEBUG_ENABLED=False) or silently returned. Fixed with 4-priority universal dispatcher: (1) entry completion via pending_entries, (2) exit completion via pending_exits, (3) protection-fill detection with immediate _handle_broker_order_fill for sl_order_id/tgt_order_id matches at position and per-tranche level, (4) shadow inf() log for every unmatched event.
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -229,8 +232,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #    Verified: Circuit-breaker alerting, subscription drift detection, thread-leak visibility, auth notification deduplication.
 #
 # 8. Recovery & Reconciliation
-#    Current: Startup broker position reconstruction, orphan-order cancellation, tranche rebuild. Broker SL-M independent of WS.
-#    Verified: Pending dicts keyed by slot_id/order_id. Multi-slot stale-snapshot quote-fallback. Symbol-level already_open guard.
+#    Current: Startup broker position reconstruction, orphan-order cancellation, tranche rebuild. Broker SL-M independent of WS. Order-stream event dispatcher runs before polling safety net in every cycle.
+#    Verified: Pending dicts keyed by slot_id/order_id. Multi-slot stale-snapshot quote-fallback. Symbol-level already_open guard. Stream dispatcher handles entry completions, exit completions, protection-fill immediate action (sl_order_id/tgt_order_id), and shadow logging for all unmatched events.
 #
 # 9. Exit Attribution & Journal
 #    Current: 33-column CSV with record_type discriminator (full_exit / partial_exit). SlotId + tranche_id tracking.
