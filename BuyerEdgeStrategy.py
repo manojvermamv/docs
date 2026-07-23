@@ -2989,6 +2989,7 @@ INDICATOR_REGISTRY: list[IndicatorSpec] = [
     EMA_TREND,
     RSI_MOMENTUM,
     SPOT_VS_VWAP,
+    RVOL_SIMPLE,
 ]
 
 
@@ -3301,6 +3302,101 @@ def _compute_synthetic_futures(ctx, cfg, intermediates):
 SYNTHETIC_FUTURES = StatisticSpec(name="Synthetic Futures", compute=_compute_synthetic_futures)
 
 
+# ── OI Z-Score ─────────────────────────────────────────────────────────
+def _compute_oi_zscore(ctx, cfg, intermediates):
+    chain_rows = ctx.get("chain_rows")
+    oi_z_buffers: dict[str, RollingZ] | None = ctx.get("oi_z_buffers")
+    symbol = ctx.get("symbol", "")
+    if not chain_rows or not oi_z_buffers or not symbol:
+        return None
+    if symbol not in oi_z_buffers:
+        return None
+    net_oi = sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) + \
+             sum(float(r.get("pe_oi_chg", 0) or 0) for r in chain_rows)
+    buf = oi_z_buffers[symbol]
+    buf.add(net_oi)
+    z = buf.z_score(net_oi)
+    if z is None:
+        return 0, f"OI Z-score priming ({len(buf)}/{buf._maxlen} samples)"
+    if z > 2.0:
+        return -1, f"OI Z-score {z:.2f} — extreme net OI build, climax bias (bearish)"
+    if z > 1.0:
+        return -0.5, f"OI Z-score {z:.2f} — elevated net OI build (mild bearish)"
+    if z < -2.0:
+        return 1, f"OI Z-score {z:.2f} — extreme net OI unwind, reversal (bullish)"
+    if z < -1.0:
+        return 0.5, f"OI Z-score {z:.2f} — net OI unwind (mild bullish)"
+    return 0, f"OI Z-score {z:.2f} — neutral range"
+
+OI_ZSCORE = StatisticSpec(name="OI Z-Score", compute=_compute_oi_zscore, score_max=1)
+
+# ── OI Rejection Zone ──────────────────────────────────────────────────
+def _compute_oi_rejection_zone(ctx, cfg, intermediates):
+    chain_rows = ctx.get("chain_rows")
+    spot = ctx.get("spot")
+    oi_zone_state: dict | None = ctx.get("oi_zone_state")
+    if not chain_rows or not spot or not oi_zone_state:
+        return None
+    sig = cfg.signal
+    cw = float(OIFlowAnalyzer.call_wall(chain_rows) or 0)
+    pw = float(OIFlowAnalyzer.put_wall(chain_rows) or 0)
+    if not cw and not pw:
+        return None
+    symbol = ctx.get("symbol", "")
+    touch_key = f"{symbol}_touches"
+    last_key = f"{symbol}_last_wall"
+    touches = oi_zone_state.get(touch_key, {"call": 0, "put": 0, "count": 0})
+    scans = oi_zone_state.get(last_key, {})
+    prox = sig.oi_zone_wall_proximity_pts
+
+    # Layer 1 — structural: did price touch a wall this scan?
+    near_call = cw and abs(spot - cw) <= prox
+    near_put = pw and abs(spot - pw) <= prox
+    if near_call:
+        touches["call"] += 1
+    if near_put:
+        touches["put"] += 1
+    if near_call or near_put:
+        touches["count"] += 1
+    oi_zone_state[touch_key] = touches
+    oi_zone_state[last_key] = {"cw": cw, "pw": pw}
+
+    # Layer 2 — statistical: OI Z-score at wall strikes
+    oi_z_buffers: dict[str, RollingZ] | None = ctx.get("oi_z_buffers")
+    wall_z = 0.0
+    if oi_z_buffers and symbol in oi_z_buffers:
+        z = oi_z_buffers[symbol].z_score(
+            sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) +
+            sum(float(r.get("pe_oi_chg", 0) or 0) for r in chain_rows)
+        )
+        wall_z = z if z is not None else 0.0
+
+    # Layer 3 — touch persistence
+    touches_needed = sig.oi_zone_min_touch
+    z_threshold = sig.oi_zone_z_threshold
+    z_climax = sig.oi_zone_z_climax
+    reject_ratio = sig.wall_reject_pct
+
+    if touches["count"] < touches_needed:
+        return 0, f"OI Rejection priming ({touches['count']}/{touches_needed} touches)"
+
+    # Score: combine Z-layer and touch-layer
+    near_wall = "call" if near_call else "put" if near_put else "none"
+    z_layer = 0.5 if abs(wall_z) >= z_climax else (0.25 if abs(wall_z) >= z_threshold else 0)
+    touch_layer = min(0.5, touches["count"] * reject_ratio)
+    s = min(1.0, z_layer + touch_layer)
+    if near_wall == "call":
+        s = -s  # near call wall = bearish
+    dir_label = "bearish" if s < 0 else "bullish" if s > 0 else "neutral"
+    return s, f"OI Rejection Zone {'→ '.join(filter(None, [
+        f"wall={near_wall}" if near_wall != 'none' else '',
+        f"z={wall_z:.2f}" if abs(wall_z) >= z_threshold else '',
+        f"touches={touches['count']}",
+    ]))} ({dir_label})"
+
+OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=1)
+
+
 STATISTIC_REGISTRY: list[StatisticSpec] = [
     PCR_LEVEL,
     CALL_OI_FLOW,
@@ -3309,6 +3405,8 @@ STATISTIC_REGISTRY: list[StatisticSpec] = [
     DELTA_BIAS,
     GAMMA_REGIME,
     OI_VELOCITY,
+    OI_ZSCORE,
+    OI_REJECTION_ZONE,
     IV_REGIME,
     STRADDLE_VELOCITY,
     SYNTHETIC_FUTURES,
