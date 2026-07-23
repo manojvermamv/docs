@@ -1973,6 +1973,7 @@ class TradeAnalytics:
         sl_method: str,
         activation_lock_pct: float,
         tranche: Tranche | None = None,
+        record_type: str | None = None,
     ) -> "TradeRecord":
         pnl_pts = exit_price - pos.entry_premium
         risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
@@ -1989,7 +1990,7 @@ class TradeAnalytics:
             underlying=underlying,
             option_symbol=pos.symbol,
             direction=pos.option_type,
-            qty=pos.qty,
+            qty=pos.remaining_qty,
             entry=pos.entry_premium,
             exit=exit_price,
             pnl_pts=pnl_pts,
@@ -2015,7 +2016,7 @@ class TradeAnalytics:
             bars_after_activation=str(pos.exit_bucket - pos.activation_bucket) if (pos.activation_bucket is not None and pos.exit_bucket is not None) else None,
             max_favorable_excursion=pos.mfe,
             max_adverse_excursion_after_activation=pos.mae_after_activation,
-            record_type="partial_exit" if tranche else "full_exit",
+            record_type=record_type or ("partial_exit" if tranche else "full_exit"),
             slot_id=pos.slot_id,
             tranche_id=tranche.tranche_id if tranche else "",
             entry_sl_source=pos.entry_sl_source,
@@ -6585,6 +6586,7 @@ class OrderManager:
         pnl_abs: float,
         exit_reason: str,
         exit_price_source: str = "broker_fill",
+        record_type: str | None = None,
     ) -> None:
         """Append one row to the CSV trade journal via JournalWriter / TradeAnalytics."""
         record = TradeAnalytics.build(
@@ -6594,6 +6596,7 @@ class OrderManager:
             paper_trade=self.config.broker.paper_trade,
             sl_method=self.config.trail.sl_method,
             activation_lock_pct=self.config.trail.activation_lock_pct,
+            record_type=record_type,
         )
         self._journal.write(record)
 
