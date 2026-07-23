@@ -134,7 +134,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F42 ✓ Fixed: Startup restore skipped _build_tranches, leaving pos.tranches=[] and TGT order ID silently dropped — _build_tranches(pos, qty, cfg) inserted before protection-order reconciliation.
 # F43 ✓ Fixed: Post-cutoff entry exit marked wrong slot as exit_pending in CE+PE mode — now resolves by exact symbol match instead of get_one(underlying).
 # F44 ✓ Fixed: Fast-path entry gate made V2 signal-management unreachable for position lifetime — _needs_signal_for_management flag bypasses the gate when any management feature is enabled.
-# F45 ✓ Fixed: Spot unsubscribe killed sibling's spot feed in CE+PE mode — has_siblings() guard added at all 8 exit-cleanup paths.
+# F45 ✓ Fixed: Spot unsubscribe killed sibling's spot feed in CE+PE mode — has_siblings() guard added at all exit-cleanup paths.
 # F46 ✓ Fixed: Tranche collapse threshold hardcoded ×2 regardless of number_of_tranches, producing 0-qty runner — equal-split now uses min_qty × n, ladder uses min_qty × 3; tq ≤ 0 guard added.
 # F47 ✓ Fixed: Multi-tranche order loop had no qty > 0 guard — zero-qty tranche would attempt quantity=0 broker order; added tr.qty <= 0: continue.
 # F48 ✓ Fixed: verify_sl_orders_active never checked LIMIT orders — externally cancelled TP1/TP2 targets went unreissued; refactored into _verify_one_order helper that checks both SL and LIMIT at position and per-tranche level.
@@ -5885,7 +5885,7 @@ class OrderManager:
         opt_symbol: str | None = None,
         pop_pending_exit: bool = False,
     ) -> None:
-        """Shared exit-finalize sequence used by all 7 full-exit sites.
+        """Shared exit-finalize sequence used by all full-exit sites.
 
         Records PnL, writes journal, unsubscribes WS (with has_siblings guard),
         transitions lifecycle to CLOSED (fixes 3 sites that were missing it),
