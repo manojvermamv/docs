@@ -207,8 +207,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # 3. Premium Trail (Confirmed-Close)
 #    Current: Fixed/ATR/delta-step sizing. ATR activation gated by atr_activation_buffer_pts; first SL at confirmed_close - step_pts (no breakeven floor). Non-ATR uses profit-lock breakeven floor at activation. Monotonic max-based ratchet applies to all methods.
-#            atr_min_ratchet_improvement_pct (default 0.5) requires SL to improve by at least N% of peak premium — not just any positive amount — at both activation and subsequent ratchets. Prevents marginal/whipsaw-prone SL from being locked in when premium has only barely moved.
-#    Verified: Gamma speed tiers at 50/100/150% ROI. Step cap at ep × 0.50. ATR first SL constrained by monotonic new_sl > pos.sl + atr_min_ratchet_improvement_pct × peak/100 guard. atr_activation_buffer_pts and atr_min_ratchet_improvement_pct are orthogonal: buffer defers first consideration, improvement gates whether the resulting SL is good enough.
+#            atr_min_ratchet_improvement_pct (default 0.5) requires SL to improve by at least N% of the current confirmed close — at ratchet time this is equivalent to N% of peak, since ratchets only fire on new confirmed-close highs where confirmed_close == pos.trail_peak_close that cycle. At activation (ungated, runs every tick pre-activation) it's deliberately anchored to live price rather than a stale peak, so a spike-and-fade doesn't delay arming the trail.
+#    Verified: Gamma speed tiers at 50/100/150% ROI. Step cap at ep × 0.50. ATR first SL constrained by monotonic new_sl > pos.sl + atr_min_ratchet_improvement_pct × peak/100 guard. atr_activation_buffer_pts and atr_min_ratchet_improvement_pct are orthogonal: buffer defers first consideration, improvement gates whether the resulting SL is good enough (== peak/100 at ratchet time by construction; activation intentionally uses live price, not peak).
 #    Policy:
 #        non-ATR activation: new_sl = max(confirmed_close - step_pts, lock_floor)
 #        ATR activation:     new_sl = confirmed_close - step_pts          (no floor, but gate requires > pos.sl + peak × pct/100)
