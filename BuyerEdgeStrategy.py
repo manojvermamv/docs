@@ -3310,7 +3310,7 @@ def _compute_oi_zscore(ctx, cfg, intermediates):
     if not chain_rows or not oi_z_buffers or not symbol:
         return None
     if symbol not in oi_z_buffers:
-        return None
+        oi_z_buffers[symbol] = RollingZ(maxlen=cfg.signal.oi_z_buffer_maxlen)
     net_oi = sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) + \
              sum(float(r.get("pe_oi_chg", 0) or 0) for r in chain_rows)
     buf = oi_z_buffers[symbol]
