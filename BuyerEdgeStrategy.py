@@ -73,7 +73,24 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
-# Remaining Work:                Calibration + expectancy research only
+# Remaining Work:                Signal architecture steps 2-6 (see OPEN OBSERVATIONS) + calibration
+#
+# OPEN OBSERVATIONS
+# ------------------------------------------------------------------------------
+# Six design items identified during signal-layer V2 enhancement (shadow-mode specs live,
+# but integration architecture incomplete — all items below are open):
+#
+#   @ MACD replacement: MACD deleted without substitution — Layer 1 runs 3 live components
+#     (EMA, RSI, VWAP) instead of planned 4; MAX_RAW_SCORE comment still lists MACD(1).
+#   @ Tier field: IndicatorSpec/StatisticSpec have no fast/slow tag — Step 2 of the plan.
+#   @ Two-stage combine: flat-sum raw_score aggregation still in place — Step 3 (the core
+#     architectural gap that requires shadow-mode quarantine; not implementable without tier field).
+#   @ Layer-1 persistence buffer: SignalEngine holds only OI-Z/zone state for new specs —
+#     no trend-hold confirmation accumulator for technical indicators (Step 4).
+#   @ Recalibration: PRACTICAL_ALIGNMENT_FACTOR / thresholds need review after MACD removal
+#     and before shadow specs activate (Step 5).
+#   @ clear_oi_state() unused: method defined on SignalEngine but never called —
+#     cross-session OI buffer carry-over depends on daily process restart.
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
 # telegram() correctly omits strategy= (SDK has no such param).
@@ -1201,10 +1218,69 @@ class TrancheConfig:
         return errs
 
 
+# ── 3j — SignalConfig ──────────────────────────────────────────────────────
+@dataclass
+class SignalConfig:
+    """Controls signal-layer features: rolling buffers, shadow-mode specs, and
+    OI Rejection Zone thresholds. All fields have backward-compatible defaults."""
+
+    # ── RVOL ──
+    rvol_lookback:          int   = 20
+
+    # ── OI Z-Score ──
+    oi_z_buffer_maxlen:     int   = 30
+
+    # ── OI Rejection Zone ──
+    oi_zone_z_threshold:    float = 2.0
+    oi_zone_z_climax:       float = 3.0
+    oi_zone_min_touch:      int   = 2
+    wall_reject_pct:        float = 0.15
+    oi_zone_wall_proximity_pts: float = 50.0
+    oi_zone_lookback_scans: int   = 10
+
+    # ── Shadow Mode ──
+    shadow_mode_enabled:    bool  = True
+
+    @classmethod
+    def from_env(cls) -> "SignalConfig":
+        defaults = cls()
+        return cls(
+            rvol_lookback=int(os.getenv("RVOL_LOOKBACK", str(defaults.rvol_lookback))),
+            oi_z_buffer_maxlen=int(os.getenv("OI_Z_BUFFER_MAXLEN", str(defaults.oi_z_buffer_maxlen))),
+            oi_zone_z_threshold=float(os.getenv("OI_ZONE_Z_THRESHOLD", str(defaults.oi_zone_z_threshold))),
+            oi_zone_z_climax=float(os.getenv("OI_ZONE_Z_CLIMAX", str(defaults.oi_zone_z_climax))),
+            oi_zone_min_touch=int(os.getenv("OI_ZONE_MIN_TOUCH", str(defaults.oi_zone_min_touch))),
+            wall_reject_pct=float(os.getenv("WALL_REJECT_PCT", str(defaults.wall_reject_pct))),
+            oi_zone_wall_proximity_pts=float(os.getenv("OI_ZONE_WALL_PROXIMITY_PTS", str(defaults.oi_zone_wall_proximity_pts))),
+            oi_zone_lookback_scans=int(os.getenv("OI_ZONE_LOOKBACK_SCANS", str(defaults.oi_zone_lookback_scans))),
+            shadow_mode_enabled=os.getenv("SHADOW_MODE_ENABLED", str(defaults.shadow_mode_enabled)).lower() in ("1", "true", "yes"),
+        )
+
+    def validate(self) -> list[str]:
+        errs: list[str] = []
+        if self.rvol_lookback < 2:
+            errs.append(f"RVOL_LOOKBACK={self.rvol_lookback} must be >= 2")
+        if self.oi_z_buffer_maxlen < 5:
+            errs.append(f"OI_Z_BUFFER_MAXLEN={self.oi_z_buffer_maxlen} must be >= 5")
+        if self.oi_zone_z_threshold < 0.5:
+            errs.append(f"OI_ZONE_Z_THRESHOLD={self.oi_zone_z_threshold} must be >= 0.5")
+        if self.oi_zone_z_climax < self.oi_zone_z_threshold:
+            errs.append(f"OI_ZONE_Z_CLIMAX={self.oi_zone_z_climax} must be >= OI_ZONE_Z_THRESHOLD={self.oi_zone_z_threshold}")
+        if self.oi_zone_min_touch < 1:
+            errs.append(f"OI_ZONE_MIN_TOUCH={self.oi_zone_min_touch} must be >= 1")
+        if self.wall_reject_pct < 0 or self.wall_reject_pct > 1:
+            errs.append(f"WALL_REJECT_PCT={self.wall_reject_pct} must be in [0, 1]")
+        if self.oi_zone_wall_proximity_pts < 10:
+            errs.append(f"OI_ZONE_WALL_PROXIMITY_PTS={self.oi_zone_wall_proximity_pts} must be >= 10")
+        if self.oi_zone_lookback_scans < 2:
+            errs.append(f"OI_ZONE_LOOKBACK_SCANS={self.oi_zone_lookback_scans} must be >= 2")
+        return errs
+
+
 # ── BotConfig (thin container — no __getattr__, explicit accessors) ────────
 @dataclass
 class BotConfig:
-    """Thin container holding the 8 sub-config dataclasses.
+    """Thin container holding the 9 sub-config dataclasses.
     Access fields via cfg.broker.xxx, cfg.market.xxx, cfg.entry.xxx, etc."""
     broker:   BrokerConfig   = field(default_factory=BrokerConfig)
     market:   MarketConfig   = field(default_factory=MarketConfig)
@@ -1214,6 +1290,7 @@ class BotConfig:
     journal:  JournalConfig  = field(default_factory=JournalConfig)
     position: PositionConfig = field(default_factory=PositionConfig)
     tranche:  TrancheConfig  = field(default_factory=TrancheConfig)
+    signal:   SignalConfig   = field(default_factory=SignalConfig)
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -1225,6 +1302,7 @@ class BotConfig:
         journal  = JournalConfig.from_env()
         position = PositionConfig.from_env()
         tranche  = TrancheConfig.from_env()
+        signal   = SignalConfig.from_env()
 
         # ── Cross-config: WebSocket URL auto-correction ──────────────────────
         _ws_domain = broker.api_host[8:].split("/")[0] if broker.api_host.startswith("https://") else ""
@@ -1258,14 +1336,14 @@ class BotConfig:
 
         return cls(broker=broker, market=market, entry=entry, risk=risk,
                    trail=trail, journal=journal,
-                   position=position, tranche=tranche)
+                   position=position, tranche=tranche, signal=signal)
 
     def validate(self) -> None:
         """Aggregate validation from all sub-configs. Raises SystemExit on errors."""
         errors: list[str] = []
         for sc in (self.broker, self.market, self.entry, self.risk,
                    self.trail, self.journal,
-                   self.position, self.tranche):
+                   self.position, self.tranche, self.signal):
             try:
                 errors.extend(sc.validate())
             except Exception as e:
@@ -1281,7 +1359,7 @@ class BotConfig:
         inf("[CONFIG] All configuration values validated OK")
         for sc in (self.broker, self.market, self.entry, self.risk,
                    self.trail, self.journal,
-                   self.position, self.tranche):
+                   self.position, self.tranche, self.signal):
             for w in (getattr(sc, "warnings", lambda: [])()):
                 inf(f"[CONFIG] WARNING: {w}")
 
@@ -1299,6 +1377,13 @@ class ScoreComponent:
     direction: str
     note:      str
     available: bool = True
+    # "fast" = options-statistical (Layers 2-5: OI/Greeks/IV/straddle/synthetic-futures) —
+    # responsive, point-in-time, can react to a single scan's chain snapshot.
+    # "slow" = technical-trend on spot candles (Layer 1: EMA/RSI/VWAP) — deliberately
+    # less noisy, meant to confirm/dampen rather than chase every tick.
+    # Carried through from IndicatorSpec/StatisticSpec so SignalEngine.score() can combine
+    # the two groups differently instead of flat-summing them (Step 3).
+    tier:      str = "fast"
 
 
 @dataclass
@@ -1309,17 +1394,18 @@ class IndicatorSpec:
     compute:   Callable[[pd.DataFrame, Any], dict[str, Any] | None] = lambda df, cfg: None
     score:     Callable[[dict[str, Any], Any], tuple[float, str]] = lambda raw, cfg: (0, "")
     score_max: float = 1.0
+    tier:      str = "slow"   # see ScoreComponent.tier — default matches Layer 1's usual role
 
     def evaluate(self, df_spot: pd.DataFrame, cfg: Any) -> ScoreComponent:
         n_bars = self.min_bars(cfg) if callable(self.min_bars) else self.min_bars
         if df_spot is None or len(df_spot) < n_bars:
-            return ScoreComponent(self.name, 0, self.score_max, "neutral", f"{self.name} unavailable", available=False)
+            return ScoreComponent(self.name, 0, self.score_max, "neutral", f"{self.name} unavailable", available=False, tier=self.tier)
         raw = self.compute(df_spot, cfg)
         if raw is None:
-            return ScoreComponent(self.name, 0, self.score_max, "neutral", f"{self.name} unavailable", available=False)
+            return ScoreComponent(self.name, 0, self.score_max, "neutral", f"{self.name} unavailable", available=False, tier=self.tier)
         s, note = self.score(raw, cfg)
         direction = "bullish" if s > 0 else "bearish" if s < 0 else "neutral"
-        return ScoreComponent(self.name, s, self.score_max, direction, note)
+        return ScoreComponent(self.name, s, self.score_max, direction, note, tier=self.tier)
 
 
 @dataclass
@@ -1332,14 +1418,15 @@ class StatisticSpec:
     name:      str
     compute:   Callable[[dict, Any, dict], tuple[float, str] | None]
     score_max: float = 1.0
+    tier:      str = "fast"   # see ScoreComponent.tier — default matches Layers 2-5's usual role
 
     def evaluate(self, ctx: dict, cfg: Any, intermediates: dict) -> ScoreComponent:
         result = self.compute(ctx, cfg, intermediates)
         if result is None:
-            return ScoreComponent(self.name, 0, self.score_max, "neutral", f"{self.name} unavailable", available=False)
+            return ScoreComponent(self.name, 0, self.score_max, "neutral", f"{self.name} unavailable", available=False, tier=self.tier)
         s, note = result
         direction = "bullish" if s > 0 else "bearish" if s < 0 else "neutral"
-        return ScoreComponent(self.name, s, self.score_max, direction, note)
+        return ScoreComponent(self.name, s, self.score_max, direction, note, tier=self.tier)
 
 
 @dataclass
@@ -1352,6 +1439,36 @@ class SignalResult:
     trap_reasons: list[str]
     reasons:      list[str]
     components:   list[ScoreComponent]
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  RollingZ — robust rolling Z-score via IQR (AVRZ-derived pattern)       ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+class RollingZ:
+    """Deque-backed rolling buffer that computes an IQR-based robust z-score
+    (AVRZ-derived). Warms up after _min_samples (partial fill, not full buffer)."""
+    __slots__ = ("_buf", "_maxlen", "_min_samples")
+    def __init__(self, maxlen: int = 30, min_samples: int | None = None):
+        self._buf: deque = deque(maxlen=maxlen)
+        self._maxlen = maxlen
+        self._min_samples = min_samples if min_samples is not None else max(5, maxlen // 3)
+    def add(self, v: float) -> None:
+        self._buf.append(v)
+    def z_score(self, v: float) -> float | None:
+        if len(self._buf) < self._min_samples:
+            return None
+        s = sorted(self._buf)
+        n = len(s)
+        q25, q75 = s[n // 4], s[(3 * n) // 4]
+        iqr = q75 - q25
+        mh = (q25 + q75) / 2.0
+        if iqr < 1e-12:
+            sigma = ((sum((x - mh) ** 2 for x in s) / (n - 1)) ** 0.5) if n > 1 else 0.0
+        else:
+            sigma = iqr / 1.349
+        return (v - mh) / sigma if sigma > 1e-12 else 0.0
+    def __len__(self):
+        return len(self._buf)
 
 
 def get_ist_now() -> datetime:
@@ -2795,7 +2912,7 @@ def _score_ema_trend(raw, cfg):
         return -0.5, "Fast EMA below Slow EMA (bearish)"
     return 0, "Insufficient candles"
 
-EMA_TREND = IndicatorSpec(name="EMA Trend", min_bars=lambda cfg: cfg.entry.slow_ema_period + 3, compute=_compute_ema_trend, score=_score_ema_trend)
+EMA_TREND = IndicatorSpec(name="EMA Trend", min_bars=lambda cfg: cfg.entry.slow_ema_period + 3, compute=_compute_ema_trend, score=_score_ema_trend, tier="slow")
 
 
 # ── RSI Momentum ──────────────────────────────────────────────────────
@@ -2818,7 +2935,7 @@ def _score_rsi_momentum(raw, cfg):
         return -0.5, f"RSI {rv:.1f} — mild bearish tilt"
     return 0, f"RSI {rv:.1f} — exactly neutral (50)"
 
-RSI_MOMENTUM = IndicatorSpec(name="RSI Momentum", min_bars=lambda cfg: cfg.entry.rsi_period + 2, compute=_compute_rsi_momentum, score=_score_rsi_momentum)
+RSI_MOMENTUM = IndicatorSpec(name="RSI Momentum", min_bars=lambda cfg: cfg.entry.rsi_period + 2, compute=_compute_rsi_momentum, score=_score_rsi_momentum, tier="slow")
 
 
 
@@ -2857,13 +2974,36 @@ def _score_spot_vs_vwap(raw, cfg):
         return 1, f"Spot {spot_val:.1f} above VWAP {vv:.1f} ({source}, {n} bars)"
     return -1, f"Spot {spot_val:.1f} below VWAP {vv:.1f} ({source}, {n} bars)"
 
-SPOT_VS_VWAP = IndicatorSpec(name="Spot vs VWAP", min_bars=5, compute=_compute_spot_vs_vwap, score=_score_spot_vs_vwap)
+SPOT_VS_VWAP = IndicatorSpec(name="Spot vs VWAP", min_bars=5, compute=_compute_spot_vs_vwap, score=_score_spot_vs_vwap, tier="slow")
+
+
+# ── RVOL-Simple ────────────────────────────────────────────────────────
+def _compute_rvol_simple(df_spot, cfg):
+    vol_series = pd.to_numeric(df_spot["volume"], errors='coerce')
+    if len(vol_series) < cfg.signal.rvol_lookback + 1:
+        return None
+    current_vol = float(vol_series.iloc[-1])
+    avg_vol = float(vol_series.iloc[-(cfg.signal.rvol_lookback + 1):-1].mean())
+    if avg_vol <= 0 or current_vol < 0:
+        return None
+    return {"rvol": current_vol / avg_vol}
+
+def _score_rvol_simple(raw, cfg):
+    r = raw["rvol"]
+    if r >= 2.0:   return 1,   f"RVOL {r:.2f}x — heavy volume surge (bullish)"
+    if r >= 1.5:   return 0.5, f"RVOL {r:.2f}x — above-average volume"
+    if r >= 1.0:   return 0,   f"RVOL {r:.2f}x — normal volume range"
+    if r >= 0.5:   return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
+    return 0, f"RVOL {r:.2f}x — neutral volume"
+
+RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0)
 
 
 INDICATOR_REGISTRY: list[IndicatorSpec] = [
     EMA_TREND,
     RSI_MOMENTUM,
     SPOT_VS_VWAP,
+    RVOL_SIMPLE,
 ]
 
 
@@ -2880,7 +3020,7 @@ def _compute_pcr(ctx, cfg, intermediates):
     if pcr <= 1.3:   return -0.5, f"PCR OI {pcr:.2f}"
     return -1, f"PCR OI {pcr:.2f}"
 
-PCR_LEVEL = StatisticSpec(name="PCR OI Level", compute=_compute_pcr)
+PCR_LEVEL = StatisticSpec(name="PCR OI Level", compute=_compute_pcr, tier="fast")
 
 
 # ── Call OI Flow ───────────────────────────────────────────────────────
@@ -2892,7 +3032,7 @@ def _compute_call_flow(ctx, cfg, intermediates):
     intermediates["call_flow_score"] = s
     return s, label
 
-CALL_OI_FLOW = StatisticSpec(name="Call OI Flow", compute=_compute_call_flow, score_max=2)
+CALL_OI_FLOW = StatisticSpec(name="Call OI Flow", compute=_compute_call_flow, score_max=2, tier="fast")
 
 
 # ── Put OI Flow ────────────────────────────────────────────────────────
@@ -2904,7 +3044,7 @@ def _compute_put_flow(ctx, cfg, intermediates):
     intermediates["put_flow_score"] = s
     return s, label
 
-PUT_OI_FLOW = StatisticSpec(name="Put OI Flow", compute=_compute_put_flow, score_max=2)
+PUT_OI_FLOW = StatisticSpec(name="Put OI Flow", compute=_compute_put_flow, score_max=2, tier="fast")
 
 
 # ── OI Wall Position ──────────────────────────────────────────────────
@@ -2927,7 +3067,7 @@ def _compute_oi_wall(ctx, cfg, intermediates):
         return -1, f"Spot {spot:.0f} below put wall {pw:.0f} — support broken, put writers hedging (bearish)"
     return 0, "OI walls unavailable"
 
-OI_WALL = StatisticSpec(name="OI Wall Position", compute=_compute_oi_wall)
+OI_WALL = StatisticSpec(name="OI Wall Position", compute=_compute_oi_wall, tier="fast")
 
 
 # ── Greeks Bias (Delta) ───────────────────────────────────────────────
@@ -2961,7 +3101,7 @@ def _compute_delta_bias(ctx, cfg, intermediates):
         return 0, f"LTP proxy Δ {di:+.3f} — balanced"
     return None
 
-DELTA_BIAS = StatisticSpec(name="Greeks Bias (Δ)", compute=_compute_delta_bias)
+DELTA_BIAS = StatisticSpec(name="Greeks Bias (Δ)", compute=_compute_delta_bias, tier="fast")
 
 
 # ── Gamma Regime ──────────────────────────────────────────────────────
@@ -3028,7 +3168,7 @@ def _compute_gamma_regime(ctx, cfg, intermediates):
 
     return s10, gamma_note
 
-GAMMA_REGIME = StatisticSpec(name="Gamma Regime", compute=_compute_gamma_regime, score_max=2)
+GAMMA_REGIME = StatisticSpec(name="Gamma Regime", compute=_compute_gamma_regime, score_max=2, tier="fast")
 
 
 # ── OI Velocity ───────────────────────────────────────────────────────
@@ -3070,7 +3210,7 @@ def _compute_oi_velocity(ctx, cfg, intermediates):
         return -0.5, f"PE OI unwinding {pe_vel:+.2%} — put covering"
     return 0, f"OI velocity below threshold (CE {ce_vel:+.2%}, PE {pe_vel:+.2%})"
 
-OI_VELOCITY = StatisticSpec(name="OI Velocity", compute=_compute_oi_velocity, score_max=1)
+OI_VELOCITY = StatisticSpec(name="OI Velocity", compute=_compute_oi_velocity, score_max=1, tier="fast")
 
 
 # ── IV Regime ─────────────────────────────────────────────────────────
@@ -3109,7 +3249,7 @@ def _compute_iv_regime(ctx, cfg, intermediates):
         return -0.5, iv_note + " — elevated, mild seller edge"
     return 0, iv_note + " — neutral zone (40–50%)"
 
-IV_REGIME = StatisticSpec(name="IV Regime (IVR)", compute=_compute_iv_regime)
+IV_REGIME = StatisticSpec(name="IV Regime (IVR)", compute=_compute_iv_regime, tier="fast")
 
 
 # ── Straddle Velocity ─────────────────────────────────────────────────
@@ -3139,7 +3279,7 @@ def _compute_straddle_velocity(ctx, cfg, intermediates):
     intermediates["straddle_vel"] = "Flat"
     return 0, f"Straddle flat ({chg_pct:+.1f}%)"
 
-STRADDLE_VELOCITY = StatisticSpec(name="Straddle Velocity", compute=_compute_straddle_velocity, score_max=2)
+STRADDLE_VELOCITY = StatisticSpec(name="Straddle Velocity", compute=_compute_straddle_velocity, score_max=2, tier="fast")
 
 
 # ── Synthetic Futures ─────────────────────────────────────────────────
@@ -3173,7 +3313,100 @@ def _compute_synthetic_futures(ctx, cfg, intermediates):
     carry = "normal" if basis >= -(spot * 0.001) else "backwardation"
     return 0, f"SF snapshot only (no prior bar): basis {basis:+.1f} ({carry}) — score 0"
 
-SYNTHETIC_FUTURES = StatisticSpec(name="Synthetic Futures", compute=_compute_synthetic_futures)
+SYNTHETIC_FUTURES = StatisticSpec(name="Synthetic Futures", compute=_compute_synthetic_futures, tier="fast")
+
+
+# ── OI Z-Score ─────────────────────────────────────────────────────────
+def _compute_oi_zscore(ctx, cfg, intermediates):
+    chain_rows = ctx.get("chain_rows")
+    oi_z_buffers: dict[str, RollingZ] | None = ctx.get("oi_z_buffers")
+    symbol = ctx.get("symbol", "")
+    if not chain_rows or oi_z_buffers is None or not symbol:
+        return None
+    net_oi = sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) + \
+             sum(float(r.get("pe_oi_chg", 0) or 0) for r in chain_rows)
+    buf = oi_z_buffers[symbol]
+    z = buf.z_score(net_oi)
+    buf.add(net_oi)
+    intermediates["oi_net_zscore"] = z
+    if z is None:
+        return 0, f"OI Z-score priming ({len(buf)}/{buf._min_samples} samples)"
+    if z > 2.0:
+        return 1.5, f"OI Z-score {z:.2f} — extreme OI build (bullish)"
+    if z > 1.5:
+        return 1,   f"OI Z-score {z:.2f} — strong OI build (bullish)"
+    if z > 1.0:
+        return 0.5, f"OI Z-score {z:.2f} — mild OI build (bullish)"
+    if z < -2.0:
+        return -1.5, f"OI Z-score {z:.2f} — extreme OI unwind (bearish)"
+    if z < -1.5:
+        return -1,   f"OI Z-score {z:.2f} — strong OI unwind (bearish)"
+    if z < -1.0:
+        return -0.5, f"OI Z-score {z:.2f} — mild OI unwind (bearish)"
+    return 0, f"OI Z-score {z:.2f} — neutral range"
+
+OI_ZSCORE = StatisticSpec(name="OI Z-Score", compute=_compute_oi_zscore, score_max=0)
+
+# ── OI Rejection Zone ──────────────────────────────────────────────────
+def _compute_oi_rejection_zone(ctx, cfg, intermediates):
+    chain_rows = ctx.get("chain_rows")
+    spot = ctx.get("spot")
+    oi_zone_state: dict | None = ctx.get("oi_zone_state")
+    symbol = ctx.get("symbol", "")
+    if not chain_rows or spot is None or oi_zone_state is None or not symbol:
+        return None
+    cw = OIFlowAnalyzer.find_call_wall(chain_rows)
+    pw = OIFlowAnalyzer.find_put_wall(chain_rows)
+    if not cw and not pw:
+        return None
+    sig = cfg.signal
+    prox = sig.oi_zone_wall_proximity_pts
+    lookback = sig.oi_zone_lookback_scans
+
+    scan_key = f"{symbol}_scan_idx"
+    scan_idx = oi_zone_state.get(scan_key, 0) + 1
+    oi_zone_state[scan_key] = scan_idx
+
+    call_touches: deque = oi_zone_state.setdefault(f"{symbol}_call_touches", deque(maxlen=lookback * 2))
+    put_touches:  deque = oi_zone_state.setdefault(f"{symbol}_put_touches",  deque(maxlen=lookback * 2))
+
+    near_call = bool(cw) and abs(spot - cw) <= prox
+    near_put  = bool(pw) and abs(spot - pw) <= prox
+    if near_call:
+        call_touches.append((scan_idx, cw))
+    if near_put:
+        put_touches.append((scan_idx, pw))
+
+    def _recent_count(touches: deque, current_strike: float) -> int:
+        return sum(1 for idx, strike in touches
+                   if (scan_idx - idx) <= lookback and strike == current_strike)
+
+    call_count = _recent_count(call_touches, cw)
+    put_count  = _recent_count(put_touches, pw)
+
+    wall_z = intermediates.get("oi_net_zscore") or 0.0
+
+    touches_needed = sig.oi_zone_min_touch
+    z_threshold = sig.oi_zone_z_threshold
+    z_climax = sig.oi_zone_z_climax
+    reject_ratio = sig.wall_reject_pct
+
+    near_wall = "call" if near_call else "put" if near_put else "none"
+    active_count = call_count if near_wall == "call" else put_count if near_wall == "put" else 0
+
+    if near_wall == "none" or active_count < touches_needed:
+        return 0, f"OI Rejection priming ({active_count}/{touches_needed} recent touches, wall={near_wall})"
+
+    z_layer = 0.5 if abs(wall_z) >= z_climax else (0.25 if abs(wall_z) >= z_threshold else 0)
+    touch_layer = min(0.5, active_count * reject_ratio)
+    s = min(1.0, z_layer + touch_layer)
+    if near_wall == "call":
+        s = -s
+    dir_label = "bearish" if s < 0 else "bullish" if s > 0 else "neutral"
+    return s, (f"OI Rejection Zone wall={near_wall} z={wall_z:.2f} "
+               f"touches={active_count}/{lookback}scans ({dir_label})")
+
+OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=0)
 
 
 STATISTIC_REGISTRY: list[StatisticSpec] = [
@@ -3187,6 +3420,8 @@ STATISTIC_REGISTRY: list[StatisticSpec] = [
     IV_REGIME,
     STRADDLE_VELOCITY,
     SYNTHETIC_FUTURES,
+    OI_ZSCORE,
+    OI_REJECTION_ZONE,
 ]
 
 
@@ -3199,6 +3434,21 @@ class SignalEngine:
 
     def __init__(self, cfg: BotConfig):
         self._config = cfg
+        # Stateful buffers for cross-scan signal specs (OI Z-score, Rejection Zone).
+        self._oi_z_buffers: dict[str, RollingZ] = {}
+        self._oi_zone_state: dict = {}
+
+    def clear_oi_state(self, symbol: str | None = None) -> None:
+        """Reset OI buffers. Call once per day if the process runs across sessions
+        without restarting, to prevent stale cross-day data."""
+        if symbol:
+            self._oi_z_buffers.pop(symbol, None)
+            oi_zone_state_keys = [k for k in self._oi_zone_state if k.startswith(f"{symbol}_")]
+            for k in oi_zone_state_keys:
+                self._oi_zone_state.pop(k, None)
+        else:
+            self._oi_z_buffers.clear()
+            self._oi_zone_state.clear()
 
     @staticmethod
     def iv_rank(
@@ -3236,6 +3486,7 @@ class SignalEngine:
         ce_iv_rank: float | None = None,
         pe_iv_rank: float | None = None,
         best_fit_iv_side: str | None = None,
+        symbol: str = "",
     ) -> SignalResult:
         """Compute composite directional score (−100 → +100) and trap_score (0 → 100)."""
         cfg = self._config
@@ -3247,6 +3498,9 @@ class SignalEngine:
             components.append(ind_spec.evaluate(df_spot, cfg))
 
         # ── LAYERS 2-5: Market Statistics (from STATISTIC_REGISTRY) ────────────
+        # Ensure per-symbol OI buffers exist (lazy init on first scan).
+        if symbol and symbol not in self._oi_z_buffers:
+            self._oi_z_buffers[symbol] = RollingZ(maxlen=self._config.signal.oi_z_buffer_maxlen)
         _ctx = dict(
             spot=spot, chain_rows=chain_rows,
             atm_ce_ltp=atm_ce_ltp, atm_pe_ltp=atm_pe_ltp,
@@ -3259,6 +3513,9 @@ class SignalEngine:
             prev_spot=prev_spot, prev_sf_ltp=prev_sf_ltp,
             ce_iv_rank=ce_iv_rank, pe_iv_rank=pe_iv_rank,
             best_fit_iv_side=best_fit_iv_side,
+            oi_z_buffers=self._oi_z_buffers,
+            oi_zone_state=self._oi_zone_state,
+            symbol=symbol,
         )
         _intermediates: dict[str, Any] = {}
         for stat_spec in STATISTIC_REGISTRY:
@@ -3292,11 +3549,13 @@ class SignalEngine:
         trap_score = min(100, trap_score)
 
         # ── Final Score ──────────────────────────────────────────────────────
-        # Active score_max sum includes Gamma Regime now.
-        # Current total: EMA(1)+RSI(1)+MACD(1)+VWAP(1)+PCR(1)+CE-flow(2)+PE-flow(2)
-        # +Wall(1)+Delta(1)+Gamma(2)+OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 16
-        MAX_RAW_SCORE = sum(c.score_max for c in components if c.available)
-        raw_score  = sum(c.score for c in components if c.available)
+        # Active (available + score_max > 0) score_max sum. Shadow-mode specs
+        # (score_max=0) log in the component list but are excluded from both
+        # numerator and denominator, preventing systematic score deflation.
+        # Current total: EMA(1)+RSI(1)+VWAP(1)+PCR(1)+CE-flow(2)+PE-flow(2)
+        # +Wall(1)+Delta(1)+Gamma(2)+OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 15
+        MAX_RAW_SCORE = sum(c.score_max for c in components if c.available and c.score_max > 0)
+        raw_score  = sum(c.score for c in components if c.available and c.score_max > 0)
         
         # We cap expected alignment to PRACTICAL_ALIGNMENT_FACTOR, so achieving this threshold yields a 100 score.
         effective_max = MAX_RAW_SCORE * PRACTICAL_ALIGNMENT_FACTOR
