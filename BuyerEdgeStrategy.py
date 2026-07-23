@@ -1363,6 +1363,30 @@ class BotConfig:
 # ║    OptionPosition / PendingEntry / PendingExit / TradeRecord         ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
+class RollingZ:
+    __slots__ = ("_buf", "_maxlen")
+    def __init__(self, maxlen: int = 30):
+        self._buf: deque = deque(maxlen=maxlen)
+        self._maxlen = maxlen
+    def add(self, v: float) -> None:
+        self._buf.append(v)
+    def z_score(self, v: float) -> float | None:
+        if len(self._buf) < self._maxlen:
+            return None
+        s = sorted(self._buf)
+        n = len(s)
+        q25, q75 = s[n // 4], s[n * 3 // 4]
+        iqr = q75 - q25
+        mh = (q25 + q75) / 2.0
+        if iqr < 1e-12:
+            sigma = (sum((x - mh) ** 2 for x in s) / (n - 1)) ** 0.5
+        else:
+            sigma = iqr / 1.349
+        return (v - mh) / sigma if sigma > 1e-12 else 0.0
+    def __len__(self) -> int:
+        return len(self._buf)
+
+
 @dataclass
 class ScoreComponent:
     label:     str
