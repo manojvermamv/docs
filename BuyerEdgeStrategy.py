@@ -1972,11 +1972,12 @@ class TradeAnalytics:
         paper_trade: bool,
         sl_method: str,
         activation_lock_pct: float,
+        tranche: Tranche | None = None,
         record_type: str | None = None,
     ) -> "TradeRecord":
         pnl_pts = exit_price - pos.entry_premium
         risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
-        _risk_qty = pos.remaining_qty
+        _risk_qty = tranche.qty if tranche else pos.remaining_qty
         risk_amt = risk_pts * _risk_qty
         r_multiple = pnl_abs / risk_amt if risk_amt > 0 else 0.0
         _peak = pos.trail_peak_close or pos.entry_premium
@@ -2015,9 +2016,9 @@ class TradeAnalytics:
             bars_after_activation=str(pos.exit_bucket - pos.activation_bucket) if (pos.activation_bucket is not None and pos.exit_bucket is not None) else None,
             max_favorable_excursion=pos.mfe,
             max_adverse_excursion_after_activation=pos.mae_after_activation,
-            record_type=record_type or "full_exit",
+            record_type=record_type or ("partial_exit" if tranche else "full_exit"),
             slot_id=pos.slot_id,
-            tranche_id="",
+            tranche_id=tranche.tranche_id if tranche else "",
             entry_sl_source=pos.entry_sl_source,
         )
 
