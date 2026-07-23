@@ -5752,7 +5752,7 @@ class OrderManager:
                         )
                         inf(f"[ORDER] Cancel-race {order_id}: partial {use_qty} @ \u20b9{ep:.2f} — reconciled")
                     return "reconciled"
-                inf(f"[ORDER] Cancel-confirm status {bs} for {order_id}: fq={fq} ep={ep}")
+                inf(f"[ORDER] Cancel-confirm status {bs} for {order_id}: fq_raw={fq_raw} ep={ep}")
         except Exception as exc:
             err(f"[ORDER] Cancel-confirm error {order_id}: ", exc)
         return "still_open"
@@ -6792,7 +6792,7 @@ class OrderManager:
                             underlying, pos, pos.symbol, pos.remaining_qty,
                             pos.sl, pos.tgt,
                         )
-                    inf(f"[ORDER] Tranche exit SELL {_pending_oid} partially filled {fq} — protection re-placed for residual")
+                    inf(f"[ORDER] Tranche exit SELL {_pending_oid} partially filled {fq_raw} — protection re-placed for residual")
                 elif bs in ("cancelled", "canceled", "rejected"):
                     with self._pending_tranche_exits_lock:
                         self._pending_tranche_exits.pop(_tranche_key, None)
@@ -7214,7 +7214,8 @@ class OrderManager:
 
                     # F76: REST API never populates filled_qty — use avg_price as the fill signal
                     if avg_price > 0:
-                            reduction = min(exit_filled_qty, pos.remaining_qty)
+                            fill_qty = exit_filled_qty if exit_filled_qty > 0 else pos.remaining_qty
+                            reduction = min(fill_qty, pos.remaining_qty)
                             rem = reduction
                             for tr in pos.tranches:
                                 if rem <= 0:
