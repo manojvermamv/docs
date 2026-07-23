@@ -134,7 +134,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F42 ✓ Fixed: Startup restore skipped _build_tranches, leaving pos.tranches=[] and TGT order ID silently dropped — _build_tranches(pos, qty, cfg) inserted before protection-order reconciliation.
 # F43 ✓ Fixed: Post-cutoff entry exit marked wrong slot as exit_pending in CE+PE mode — now resolves by exact symbol match instead of get_one(underlying).
 # F44 ✓ Fixed: Fast-path entry gate made V2 signal-management unreachable for position lifetime — _needs_signal_for_management flag bypasses the gate when any management feature is enabled.
-# F45 ✓ Fixed: Spot unsubscribe killed sibling's spot feed in CE+PE mode — has_siblings() guard added at all 7 exit-cleanup paths.
+# F45 ✓ Fixed: Spot unsubscribe killed sibling's spot feed in CE+PE mode — has_siblings() guard added at all 8 exit-cleanup paths.
 # F46 ✓ Fixed: Tranche collapse threshold hardcoded ×2 regardless of number_of_tranches, producing 0-qty runner — equal-split now uses min_qty × n, ladder uses min_qty × 3; tq ≤ 0 guard added.
 # F47 ✓ Fixed: Multi-tranche order loop had no qty > 0 guard — zero-qty tranche would attempt quantity=0 broker order; added tr.qty <= 0: continue.
 # F48 ✓ Fixed: verify_sl_orders_active never checked LIMIT orders — externally cancelled TP1/TP2 targets went unreissued; refactored into _verify_one_order helper that checks both SL and LIMIT at position and per-tranche level.
@@ -237,7 +237,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #    Verified: Pending dicts keyed by slot_id/order_id. Multi-slot stale-snapshot quote-fallback. Symbol-level already_open guard. Stream dispatcher handles entry completions, exit completions, protection-fill immediate action (sl_order_id/tgt_order_id), and shadow logging for all unmatched events.
 #
 # 9. Exit Attribution & Journal
-#    Current: 33-column CSV with record_type discriminator (full_exit / partial_exit). SlotId + tranche_id tracking.
+#    Current: 34-column CSV with record_type discriminator (full_exit / partial_exit). SlotId + tranche_id tracking.
 #    Verified: Exit-type normalization (BROKER_SL, TARGET, PREMIUM_TRAIL, SPOT_TRAIL, MAX_HOLD, EOD, etc.). R-multiple journaling. Schema migration auto-archives on column mismatch.
 #
 # 10. Broker Integration
@@ -1972,12 +1972,11 @@ class TradeAnalytics:
         paper_trade: bool,
         sl_method: str,
         activation_lock_pct: float,
-        tranche: Tranche | None = None,
         record_type: str | None = None,
     ) -> "TradeRecord":
         pnl_pts = exit_price - pos.entry_premium
         risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
-        _risk_qty = tranche.qty if tranche else pos.remaining_qty
+        _risk_qty = pos.remaining_qty
         risk_amt = risk_pts * _risk_qty
         r_multiple = pnl_abs / risk_amt if risk_amt > 0 else 0.0
         _peak = pos.trail_peak_close or pos.entry_premium
@@ -2016,9 +2015,9 @@ class TradeAnalytics:
             bars_after_activation=str(pos.exit_bucket - pos.activation_bucket) if (pos.activation_bucket is not None and pos.exit_bucket is not None) else None,
             max_favorable_excursion=pos.mfe,
             max_adverse_excursion_after_activation=pos.mae_after_activation,
-            record_type=record_type or ("partial_exit" if tranche else "full_exit"),
+            record_type=record_type or "full_exit",
             slot_id=pos.slot_id,
-            tranche_id=tranche.tranche_id if tranche else "",
+            tranche_id="",
             entry_sl_source=pos.entry_sl_source,
         )
 
