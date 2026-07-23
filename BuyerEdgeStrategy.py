@@ -2982,7 +2982,7 @@ def _score_rvol_simple(raw, cfg):
         return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
     return 0, f"RVOL {r:.2f}x — neutral volume"
 
-RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple)
+RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0)
 
 
 INDICATOR_REGISTRY: list[IndicatorSpec] = [
@@ -3328,7 +3328,7 @@ def _compute_oi_zscore(ctx, cfg, intermediates):
         return 0.5, f"OI Z-score {z:.2f} — net OI unwind (mild bullish)"
     return 0, f"OI Z-score {z:.2f} — neutral range"
 
-OI_ZSCORE = StatisticSpec(name="OI Z-Score", compute=_compute_oi_zscore, score_max=1)
+OI_ZSCORE = StatisticSpec(name="OI Z-Score", compute=_compute_oi_zscore, score_max=0)
 
 # ── OI Rejection Zone ──────────────────────────────────────────────────
 def _compute_oi_rejection_zone(ctx, cfg, intermediates):
@@ -3394,7 +3394,7 @@ def _compute_oi_rejection_zone(ctx, cfg, intermediates):
         f"touches={touches['count']}",
     ]))} ({dir_label})"
 
-OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=1)
+OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=0)
 
 
 STATISTIC_REGISTRY: list[StatisticSpec] = [
@@ -3534,8 +3534,8 @@ class SignalEngine:
         # Active score_max sum includes Gamma Regime now.
         # Current total: EMA(1)+RSI(1)+MACD(1)+VWAP(1)+PCR(1)+CE-flow(2)+PE-flow(2)
         # +Wall(1)+Delta(1)+Gamma(2)+OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 16
-        MAX_RAW_SCORE = sum(c.score_max for c in components if c.available)
-        raw_score  = sum(c.score for c in components if c.available)
+        MAX_RAW_SCORE = sum(c.score_max for c in components if c.available and c.score_max > 0)
+        raw_score  = sum(c.score for c in components if c.available and c.score_max > 0)
         
         # We cap expected alignment to PRACTICAL_ALIGNMENT_FACTOR, so achieving this threshold yields a 100 score.
         effective_max = MAX_RAW_SCORE * PRACTICAL_ALIGNMENT_FACTOR
