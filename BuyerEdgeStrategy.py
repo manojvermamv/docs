@@ -73,7 +73,25 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
-# Remaining Work:                Calibration + expectancy research only
+# Remaining Work:                Signal architecture steps 2–6 (see OPEN OBSERVATIONS) + calibration
+#
+# OPEN OBSERVATIONS
+# ------------------------------------------------------------------------------
+# Six design items identified during signal-layer V2 enhancement (shadow-mode specs live,
+# but integration architecture incomplete — all items below are open):
+#
+#   ⬢ MACD replacement: MACD deleted without substitution — Layer 1 runs 3 live components
+#     (EMA, RSI, VWAP) instead of planned 4; MAX_RAW_SCORE comment still lists MACD(1).
+#   ⬢ Tier field: IndicatorSpec/StatisticSpec have no fast/slow tag — Step 2 of the plan.
+#   ⬢ Two-stage combine: flat-sum raw_score aggregation still in place — Step 3 (the core
+#     architectural gap that requires shadow-mode quarantine; not implementable without tier field).
+#   ⬢ Layer-1 persistence buffer: SignalEngine holds only OI-Z/zone state for new specs —
+#     no trend-hold confirmation accumulator for technical indicators (Step 4).
+#   ⬢ Recalibration: PRACTICAL_ALIGNMENT_FACTOR / thresholds need review after MACD removal
+#     and before shadow specs activate (Step 5).
+#   ⬢ clear_oi_state() unused: method defined on SignalEngine (line ~3448) but never called —
+#     cross-session OI buffer carry-over depends on daily process restart.
+#
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
 # telegram() correctly omits strategy= (SDK has no such param).
