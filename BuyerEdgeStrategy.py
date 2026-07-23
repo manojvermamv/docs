@@ -237,7 +237,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #    Verified: Pending dicts keyed by slot_id/order_id. Multi-slot stale-snapshot quote-fallback. Symbol-level already_open guard. Stream dispatcher handles entry completions, exit completions, protection-fill immediate action (sl_order_id/tgt_order_id), and shadow logging for all unmatched events.
 #
 # 9. Exit Attribution & Journal
-#    Current: 34-column CSV with record_type discriminator (full_exit / partial_exit). SlotId + tranche_id tracking.
+#    Current: N-column CSV with record_type discriminator (full_exit / partial_exit). SlotId + tranche_id tracking.
 #    Verified: Exit-type normalization (BROKER_SL, TARGET, PREMIUM_TRAIL, SPOT_TRAIL, MAX_HOLD, EOD, etc.). R-multiple journaling. Schema migration auto-archives on column mismatch.
 #
 # 10. Broker Integration
