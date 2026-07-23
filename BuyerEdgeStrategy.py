@@ -8307,6 +8307,7 @@ class OptionsBuyerEdgeBot:
             ce_iv_rank=ce_iv_rank,
             pe_iv_rank=pe_iv_rank,
             best_fit_iv_side=best_fit_iv_side,
+            symbol=symbol,
         )
         state.latest_signals[symbol] = (result, time.time())
 
