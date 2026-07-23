@@ -240,6 +240,29 @@ scp -i C:\Users\Manoj\.ssh\DebianPairKey.pem admin@100.52.17.180:/opt/openalgo-l
 
 # Download specific log file
 scp -i C:\Users\Manoj\.ssh\DebianPairKey.pem admin@100.52.17.180:/opt/openalgo-logs/strategies/BuyerEdgeStrategy_2_20260629115530_20260630_091500_IST.log .
+
+### Download Latest Active Log
+
+Downloads the most recent strategy log from the Debian server and renames it to a standardized local path:
+
+**Target format:** `/home/ubuntu/OA/strategies/docs/logs_raw/Logs-{DDMMMYYYY}.txt`
+
+**Linux:**
+```bash
+# 1. Find the latest log on server
+LATEST_LOG=$(ssh -i /home/ubuntu/docs/keys/DebianPairKey.pem admin@100.52.17.180 "ls -t /opt/openalgo-logs/strategies/ | head -1")
+
+# 2. Download and rename to standardized format
+scp -i /home/ubuntu/docs/keys/DebianPairKey.pem admin@100.52.17.180:"/opt/openalgo-logs/strategies/$LATEST_LOG" /home/ubuntu/OA/strategies/docs/logs_raw/Logs-$(date +%d%b%Y | tr '[:lower:]' '[:upper:]').txt
+```
+
+**Windows (PowerShell):**
+```powershell
+# 1. Find the latest log on server
+$latestLog = ssh -i "C:\Users\Manoj\.ssh\DebianPairKey.pem" admin@100.52.17.180 "ls -t /opt/openalgo-logs/strategies/ | head -1"
+
+# 2. Download and rename
+scp -i "C:\Users\Manoj\.ssh\DebianPairKey.pem" admin@100.52.17.180:"/opt/openalgo-logs/strategies/$latestLog" "C:\Users\Manoj\OA\strategies\docs\logs_raw\Logs-$((Get-Date).ToString('ddMMMyyyy').ToUpper()).txt"
 ```
 
 ---
@@ -667,5 +690,373 @@ The configuration lives in the Coolify service docker-compose:
 
 ---
 
-> **Last updated:** 2026-07-19
+---
+
+## 13. BuyerEdgeStrategy — Server Operations Reference
+
+# Infrastructure Handbook
+
+Server deployment and maintenance procedures for the BuyerEdgeStrategy production environment.
+
+## Server Inventory
+
+| Property | Value |
+|---|---|
+| Host | `100.52.17.180` |
+| User | `admin` |
+| SSH Key | `~/.ssh/DebianPairKey.pem` (Linux) / `C:\Users\Manoj\.ssh\DebianPairKey.pem` (Windows) |
+| OpenAlgo Root | `/opt/openalgo/` |
+| Strategy | `/opt/openalgo/strategies/examples/BuyerEdgeStrategy.py` |
+| Docker Compose | `/opt/openalgo/docker-compose.yml` |
+| Strategy PID (in container) | Exposed via strategy host UI — strategy runs as PID 1 inside the python-runner container |
+
+---
+
+## .env Management
+
+### Linux
+
+```bash
+# Download current .env from server to local for editing
+scp -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180:/opt/openalgo/.env .
+
+# Edit locally
+vim .env
+
+# Upload modified .env back to server
+scp -i ~/.ssh/DebianPairKey.pem .env admin@100.52.17.180:/opt/openalgo/.env
+```
+
+After uploading, restart the OpenAlgo container for changes to take effect:
+
+```bash
+# SSH into the server
+ssh -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180
+
+# Restart the stack
+cd /opt/openalgo && docker compose down && docker compose up -d
+
+# Verify all containers are running
+docker ps
+```
+
+### Windows
+
+```powershell
+# Download current .env from server
+scp -i C:\Users\Manoj\.ssh\DebianPairKey.pem admin@100.52.17.180:/opt/openalgo/.env .
+
+# Modify locally (use Notepad, VS Code, etc.)
+
+# Upload modified .env back to server
+scp -i C:\Users\Manoj\.ssh\DebianPairKey.pem .env admin@100.52.17.180:/opt/openalgo/.env
+```
+
+---
+
+## Strategy Deployment
+
+### Linux
+
+```bash
+# Copy the strategy file to the server
+scp -i ~/.ssh/DebianPairKey.pem BuyerEdgeStrategy.py admin@100.52.17.180:/opt/openalgo/strategies/examples/BuyerEdgeStrategy.py
+
+# SSH in and restart the strategy container
+ssh -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180
+cd /opt/openalgo && docker compose restart python-runner
+# Or if the strategy is managed via the UI: restart from the Python Strategy Host page
+```
+
+### Windows
+
+```powershell
+scp -i C:\Users\Manoj\.ssh\DebianPairKey.pem BuyerEdgeStrategy.py admin@100.52.17.180:/opt/openalgo/strategies/examples/BuyerEdgeStrategy.py
+```
+
+After uploading, restart the python-runner container from the server.
+
+---
+
+## Log Download Pattern
+
+The strategy outputs log files to the OpenAlgo container's working directory. These are persistent across container restarts via the volume mount at `/opt/openalgo/`.
+
+### Common Log File Name Patterns
+
+| Pattern | Example | Source |
+|---|---|---|
+| `Logs-{DDMMMYYYY}-{N}.txt` | `Logs-21JUL2026-3.txt` | Strategy stdout capture (splits on restart) |
+| `Logs-{DDMMMYYYY}.txt` | `Logs-24JUN2026.txt` | Single-run session |
+| `trades.csv` | `trades.csv` | Trade journal |
+| `options_chain_cache_*.json` | `options_chain_cache_20260721.json` | Cached OI/chain data |
+
+### Download
+
+```bash
+# List available log files on the server
+ssh -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180 "ls -la /opt/openalgo/Logs-*"
+
+# Download a specific log file (Linux)
+scp -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180:/opt/openalgo/Logs-21JUL2026-3.txt .
+
+# Download all logs for a specific date
+scp -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180:/opt/openalgo/Logs-21JUL2026-*.txt .
+
+# Download trade journal
+scp -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180:/opt/openalgo/trades.csv .
+```
+
+```powershell
+# Windows PowerShell
+scp -i C:\Users\Manoj\.ssh\DebianPairKey.pem admin@100.52.17.180:/opt/openalgo/Logs-21JUL2026-3.txt .
+```
+
+### Batch Download for Analysis
+
+When pulling logs for deep analysis sessions:
+
+```bash
+# Download today's logs + trade journal + chain cache in one pass
+TODAY=$(date +%d%b%Y | tr '[:lower:]' '[:upper:]')
+mkdir -p logs_raw/$TODAY
+scp -i ~/.ssh/DebianPairKey.pem "admin@100.52.17.180:/opt/openalgo/Logs-${TODAY}*.txt" logs_raw/$TODAY/
+scp -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180:/opt/openalgo/trades.csv logs_raw/$TODAY/
+
+# Verify download
+ls -la logs_raw/$TODAY/
+```
+
+### Windows Equivalent
+
+```powershell
+$today = (Get-Date).ToString("ddMMMyyyy").ToUpper()
+New-Item -ItemType Directory -Force -Path "logs_raw\$today"
+scp -i C:\Users\Manoj\.ssh\DebianPairKey.pem "admin@100.52.17.180:/opt/openalgo/Logs-$today*.txt" "logs_raw\$today\"
+scp -i C:\Users\Manoj\.ssh\DebianPairKey.pem admin@100.52.17.180:/opt/openalgo/trades.csv "logs_raw\$today\"
+```
+
+---
+
+## Container Restart (Docker)
+
+```bash
+# SSH and restart the entire OpenAlgo stack
+ssh -i ~/.ssh/DebianPairKey.pem admin@100.52.17.180
+cd /opt/openalgo
+
+# Full restart (all containers)
+docker compose down && docker compose up -d
+
+# Restart only the python-runner container (faster if only strategy changed)
+docker compose restart python-runner
+
+# View logs for the python-runner container
+docker compose logs -f --tail=100 python-runner
+
+# View all containers' status
+docker ps -a
+```
+
+---
+
+## Environment Variable Reference
+
+Key env vars used by the strategy, with typical values for this deployment:
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `OPENALGO_API_KEY` | *redacted* | API auth key |
+| `OPENALGO_USERNAME` | `manojv097` | OpenAlgo username |
+| `BROKER_SL_ORDERS` | `True` | Broker-managed stop-loss |
+| `ORDER_UPDATES_ENABLED` | `TRUE` | Platform infra order-stream availability |
+| `ORDER_POLL_INTERVAL` | `5` | Platform order-poll interval (seconds) |
+| `ORDER_STATUS_MAX_RETRIES` | `15` | Strategy-level REST poll retries |
+| `ORDER_STATUS_POLL_INTERVAL` | `2.0` | Strategy-level poll interval (seconds) |
+
+> `ORDER_STREAM_ENABLED` and `ORDER_STREAM_COMPLETE_ENTRIES` are **not** server-level env vars — they are script-config values managed inside `BuyerEdgeStrategy.py`'s `BrokerConfig` defaults.
+
+---
+
+---
+
+## 14. Destructive Git Mistake — Recovery Playbook
+
+### The Setup (how it happens)
+
+You have TWO independent sets of uncommitted changes in one file:
+
+| Set | Content | State |
+|-----|---------|-------|
+| **Set A (old)** | Committed in HEAD, then further modified unstaged | WIP — uncommitted |
+| **Set B (newer)** | Never committed — added after Set A | Uncommitted |
+
+You want to **undo only Set B** (or only part of it) without touching Set A.
+
+### The Wrong Move (what I did)
+
+```bash
+# ❌ DESTRUCTIVE — nukes BOTH sets
+git checkout HEAD~1 -- path/to/file.py
+```
+
+`HEAD~1` is the commit **before any of this work started**. This replaces the entire file with the old version — Set A disappears even though it was ready to commit, because it never existed in HEAD~1. Set B disappears for the same reason.
+
+### The Right Move (what to do instead)
+
+**Option A — Save first, then revert safely:**
+
+```bash
+# 1. Save current state (working tree vs HEAD) as a patch
+git diff HEAD -- path/to/file.py > /tmp/backup.diff
+
+# 2. Now do whatever you need (revert, checkout old version, etc.)
+git checkout HEAD~1 -- path/to/file.py
+
+# 3. If it went wrong — restore from backup
+git checkout HEAD -- path/to/file.py      # back to HEAD
+patch -p1 < /tmp/backup.diff              # restore everything
+```
+
+**Option B — Interactive partial revert (no backup needed):**
+
+```bash
+# Walk through each hunk and choose which to revert
+git checkout -p HEAD~1 -- path/to/file.py
+# Press y/n/split per hunk — only revert what you mean to
+```
+
+**Option C — Stash (changes staged or unstaged):**
+
+```bash
+git stash push -m "snap before revert" -- path/to/file.py
+# ... do destructive thing ...
+git stash pop   # if you need it back
+```
+
+### Recovery When You Already Broke It
+
+#### Git-based project (patch file saved)
+
+You need two things:
+1. A saved patch/diff of the lost changes (from an earlier `git diff`, a PR, or a stash)
+2. Knowledge of what WAS there that is now gone
+
+**Case 1 — Patch file exists** (e.g. `/tmp/step2-tier-tagging.patch`):
+
+```bash
+# Try applying it back
+patch -p1 < /tmp/saved.patch
+
+# Some hunks may fail (offsets — lines moved since the patch was made)
+# Check which failed:
+patch -p1 --dry-run < /tmp/saved.patch 2>&1 | grep "Hunk.*FAILED"
+
+# Failed hunks need manual reconstruction — patch has the old context,
+# so you know what the code SHOULD look like. Rebuild from memory + knowledge.
+```
+
+**Case 2 — No patch file, no stash, no backup** (real loss):
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ You are here: full manual reconstruction from memory.       │
+│ Recovery cost = 100% of original implementation effort.     │
+│ This is why step 1 (save backup) is not optional.           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Case 3 — Changes were committed but then `git reset --hard` wiped them:**
+
+```bash
+# Find the commit(s) you lost
+git reflog                        # shows EVERYTHING that was HEAD at any point
+git log --all --oneline --graph   # dangling commits not in any branch
+
+# Recover a specific commit
+git cherry-pick <lost-commit-hash>
+
+# Recover a branch
+git branch recovered <lost-commit-hash>
+```
+
+#### Non-git project (no version control)
+
+Your only safety net is prior backups:
+
+```bash
+# Recover from backup
+cp path/to/file.py.bak path/to/file.py
+
+# Or from timestamped backup
+cp backups/20260723_file.py.bak path/to/file.py
+
+# System snapshots (if enabled)
+# Windows: Previous Versions (right-click → Restore previous versions)
+# macOS: Time Machine
+# Linux: Snapper / rsync snapshots / LVM snapshots
+```
+
+If no backup exists, it's the same as Case 2 above — manual reconstruction.
+
+### Root Cause Analysis
+
+| Factor | Why it happened | Prevention |
+|--------|----------------|------------|
+| **Two independent change sets in one file** | Set A (signal-layer) and Set B (tier-tagging) were logically separate but physically co-located. No intermediate commit. | Commit after each logical unit, even if WIP. `git add -p` to stage only what's ready. |
+| **`HEAD~1` ambiguity** | Assumed `HEAD~1` only affected Step 2, but it predated ALL work. | Check what you're reverting first: `git diff HEAD~1 HEAD -- file` to see what `HEAD~1` would change vs current HEAD. |
+| **No backup before destructive op** | The one line that would have made recovery trivial. | **Always** `git diff HEAD > /tmp/pre-op.diff` before any `git checkout <old> --` or `git reset` on a file. |
+| **No git stash** | `git stash` exists exactly for this scenario (save working tree, do dangerous thing, restore). | `git stash push -m "note" -- <files>` before risky operations. |
+| **`git checkout` is destructive** | Unlike `git revert` (safe commit-based undo), `git checkout <old> -- <file>` silently overwrites. | Prefer `git revert <commit>` for committed changes. For uncommitted, use `git checkout -p`. |
+
+### Workflow Rules
+
+1. **Backup before any destructive operation on a dirty file:**
+   ```bash
+   git diff HEAD -- <file> > /tmp/backup-$(date +%Y%m%d-%H%M%S).diff
+   ```
+   This is automatic reflex, not optional deliberation.
+
+2. **Commit early, commit often — then `git revert` is safe:**
+   - If Set A was committed before starting Set B, `git revert <set-a-commit>` would have cleanly rolled back Set B's changes while keeping Set A.
+   - `git checkout HEAD~1 -- file` was the wrong tool for the job.
+
+3. **When you need to undo changes to a file, check your options in order:**
+   ```
+   1. git revert <commit>   # safest — only for committed changes
+   2. git checkout -p       # interactive per-hunk — safe for 1-10 hunks
+   3. git diff > backup && git checkout HEAD -- file  # full revert with safety net
+   4. git stash push        # saves + reverts working tree
+   ❌ git checkout <old> -- file  # last resort only — wipes everything silently
+   ```
+
+4. **Keep patch files of significant changes:**
+   Before applying a large patch or doing risky work, save a standalone copy:
+   ```bash
+   git diff HEAD -- <file> > /tmp/work-$(date +%Y%m%d).patch
+   ```
+   These files are your insurance — they survive `git checkout <old> --`.
+
+5. **For non-git projects, the backup IS the safety net:**
+   ```bash
+   cp file.py file.py.$(date +%Y%m%d-%H%M%S).bak   # before every edit
+   ```
+   Automate it with `inotifywait` + a backup script if working on important files.
+
+### Summary
+
+```
+Before touching a file that has changes you care about:
+
+  git diff HEAD > /tmp/save.diff          ← ONE LINE. ALWAYS.
+
+Then do what you need. If it breaks:
+
+  git checkout HEAD -- file               ← back to clean state
+  patch -p1 < /tmp/save.diff              ← restore everything
+
+Takes 5 seconds, zero risk, undo button for any mistake.
+```
+
+> **Last updated:** 2026-07-23
 > **Maintained by:** Infrastructure Handbook at `/host/home/ubuntu/INFRASTRUCTURE-HANDBOOK.md`
