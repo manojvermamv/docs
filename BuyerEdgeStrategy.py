@@ -1364,14 +1364,19 @@ class BotConfig:
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 class RollingZ:
-    __slots__ = ("_buf", "_maxlen")
-    def __init__(self, maxlen: int = 30):
+    __slots__ = ("_buf", "_maxlen", "_min_samples")
+    def __init__(self, maxlen: int = 30, min_samples: int | None = None):
         self._buf: deque = deque(maxlen=maxlen)
         self._maxlen = maxlen
+        # BUGFIX: previously required the buffer completely full (len < maxlen) before
+        # returning any z-score, which is a full-`maxlen`-scans blackout every session
+        # start (~30 min at maxlen=30 / 60s scans). Warm up on a partial fill instead —
+        # still robust-sigma, just responsive sooner, matching the "fast tier" intent.
+        self._min_samples = min_samples if min_samples is not None else max(5, maxlen // 3)
     def add(self, v: float) -> None:
         self._buf.append(v)
     def z_score(self, v: float) -> float | None:
-        if len(self._buf) < self._maxlen:
+        if len(self._buf) < self._min_samples:
             return None
         s = sorted(self._buf)
         n = len(s)
@@ -1379,7 +1384,9 @@ class RollingZ:
         iqr = q75 - q25
         mh = (q25 + q75) / 2.0
         if iqr < 1e-12:
-            sigma = (sum((x - mh) ** 2 for x in s) / (n - 1)) ** 0.5
+            # BUGFIX: guard n==1 case (division by zero when only one sample exists,
+            # reachable now that warm-up no longer requires a full buffer).
+            sigma = ((sum((x - mh) ** 2 for x in s) / (n - 1)) ** 0.5) if n > 1 else 0.0
         else:
             sigma = iqr / 1.349
         return (v - mh) / sigma if sigma > 1e-12 else 0.0
@@ -3314,8 +3321,14 @@ def _compute_oi_zscore(ctx, cfg, intermediates):
     net_oi = sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) + \
              sum(float(r.get("pe_oi_chg", 0) or 0) for r in chain_rows)
     buf = oi_z_buffers[symbol]
-    buf.add(net_oi)
+    # BUGFIX: score against prior history BEFORE adding this observation. Adding first
+    # made every reading part of its own baseline, muting genuine outliers (an extreme
+    # spike pulled its own quartiles/sigma toward itself before being measured against them).
     z = buf.z_score(net_oi)
+    buf.add(net_oi)
+    # Shared with OI Rejection Zone below so it reuses this value instead of re-querying
+    # the buffer after it's been mutated this scan, which would reintroduce the same bias.
+    intermediates["oi_net_zscore"] = z
     if z is None:
         return 0, f"OI Z-score priming ({len(buf)}/{buf._maxlen} samples)"
     if z > 2.0:
@@ -3343,56 +3356,63 @@ def _compute_oi_rejection_zone(ctx, cfg, intermediates):
     if not cw and not pw:
         return None
     symbol = ctx.get("symbol", "")
-    touch_key = f"{symbol}_touches"
-    last_key = f"{symbol}_last_wall"
-    touches = oi_zone_state.get(touch_key, {"call": 0, "put": 0, "count": 0})
-    scans = oi_zone_state.get(last_key, {})
     prox = sig.oi_zone_wall_proximity_pts
+    lookback = sig.oi_zone_lookback_scans
+
+    # BUGFIX (windowing + strike-specificity): the old version kept a single cumulative
+    # counter per side that never aged out and wasn't tied to a specific strike, so a wall
+    # tested twice at 9:20am satisfied min_touch for the rest of the session even after
+    # price left the area, and a touch on an old wall level counted toward a new one after
+    # a wall shift. Track (scan_idx, strike) per side instead, and only count touches that
+    # are both within the lookback window AND at the *current* wall strike.
+    scan_key = f"{symbol}_scan_idx"
+    scan_idx = oi_zone_state.get(scan_key, 0) + 1
+    oi_zone_state[scan_key] = scan_idx
+
+    call_touches: deque = oi_zone_state.setdefault(f"{symbol}_call_touches", deque(maxlen=lookback * 2))
+    put_touches:  deque = oi_zone_state.setdefault(f"{symbol}_put_touches",  deque(maxlen=lookback * 2))
 
     # Layer 1 — structural: did price touch a wall this scan?
-    near_call = cw and abs(spot - cw) <= prox
-    near_put = pw and abs(spot - pw) <= prox
+    near_call = bool(cw) and abs(spot - cw) <= prox
+    near_put  = bool(pw) and abs(spot - pw) <= prox
     if near_call:
-        touches["call"] += 1
+        call_touches.append((scan_idx, cw))
     if near_put:
-        touches["put"] += 1
-    if near_call or near_put:
-        touches["count"] += 1
-    oi_zone_state[touch_key] = touches
-    oi_zone_state[last_key] = {"cw": cw, "pw": pw}
+        put_touches.append((scan_idx, pw))
 
-    # Layer 2 — statistical: OI Z-score at wall strikes
-    oi_z_buffers: dict[str, RollingZ] | None = ctx.get("oi_z_buffers")
-    wall_z = 0.0
-    if oi_z_buffers and symbol in oi_z_buffers:
-        z = oi_z_buffers[symbol].z_score(
-            sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) +
-            sum(float(r.get("pe_oi_chg", 0) or 0) for r in chain_rows)
-        )
-        wall_z = z if z is not None else 0.0
+    def _recent_count(touches: deque, current_strike: float) -> int:
+        return sum(1 for idx, strike in touches
+                   if (scan_idx - idx) <= lookback and strike == current_strike)
 
-    # Layer 3 — touch persistence
+    call_count = _recent_count(call_touches, cw)
+    put_count  = _recent_count(put_touches, pw)
+
+    # Layer 2 — statistical: reuse OI_ZSCORE's already-computed value (BUGFIX: previously
+    # re-queried oi_z_buffers[symbol] here, but OI_ZSCORE runs first in the registry and
+    # its z_score() call already mutated the buffer for this scan via .add() — re-querying
+    # it here would have reintroduced the same self-reference bias fixed in OI_ZSCORE).
+    wall_z = intermediates.get("oi_net_zscore") or 0.0
+
     touches_needed = sig.oi_zone_min_touch
     z_threshold = sig.oi_zone_z_threshold
     z_climax = sig.oi_zone_z_climax
     reject_ratio = sig.wall_reject_pct
 
-    if touches["count"] < touches_needed:
-        return 0, f"OI Rejection priming ({touches['count']}/{touches_needed} touches)"
+    near_wall = "call" if near_call else "put" if near_put else "none"
+    active_count = call_count if near_wall == "call" else put_count if near_wall == "put" else 0
+
+    if near_wall == "none" or active_count < touches_needed:
+        return 0, f"OI Rejection priming ({active_count}/{touches_needed} recent touches, wall={near_wall})"
 
     # Score: combine Z-layer and touch-layer
-    near_wall = "call" if near_call else "put" if near_put else "none"
     z_layer = 0.5 if abs(wall_z) >= z_climax else (0.25 if abs(wall_z) >= z_threshold else 0)
-    touch_layer = min(0.5, touches["count"] * reject_ratio)
+    touch_layer = min(0.5, active_count * reject_ratio)
     s = min(1.0, z_layer + touch_layer)
     if near_wall == "call":
         s = -s  # near call wall = bearish
     dir_label = "bearish" if s < 0 else "bullish" if s > 0 else "neutral"
-    return s, f"OI Rejection Zone {'→ '.join(filter(None, [
-        f"wall={near_wall}" if near_wall != 'none' else '',
-        f"z={wall_z:.2f}" if abs(wall_z) >= z_threshold else '',
-        f"touches={touches['count']}",
-    ]))} ({dir_label})"
+    return s, (f"OI Rejection Zone wall={near_wall} z={wall_z:.2f} "
+               f"touches={active_count}/{lookback}scans ({dir_label})")
 
 OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=0)
 
