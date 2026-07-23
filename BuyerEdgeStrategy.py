@@ -2956,6 +2956,35 @@ def _score_spot_vs_vwap(raw, cfg):
 SPOT_VS_VWAP = IndicatorSpec(name="Spot vs VWAP", min_bars=5, compute=_compute_spot_vs_vwap, score=_score_spot_vs_vwap)
 
 
+# ── RVOL-Simple ────────────────────────────────────────────────────────
+def _compute_rvol_simple(df_spot, cfg):
+    vol = pd.to_numeric(df_spot["volume"], errors="coerce")
+    if (vol <= 0).all():
+        return None
+    lb = cfg.signal.rvol_lookback
+    if len(vol) < lb + 1:
+        return None
+    current = float(vol.iloc[-1] or 0)
+    sma = float(vol.iloc[-lb:].mean() or 1)
+    return {"rvol": current / sma, "close": float(df_spot["close"].iloc[-1])}
+
+def _score_rvol_simple(raw, cfg):
+    r = raw["rvol"]
+    if r > 2.0:
+        return 1, f"RVOL {r:.2f}x — heavy volume surge, strong conviction"
+    if r > 1.5:
+        return 0.75, f"RVOL {r:.2f}x — elevated volume, buying conviction"
+    if r > 1.0:
+        return 0.5, f"RVOL {r:.2f}x — above-average volume, mild bullish"
+    if r < 0.4:
+        return -1, f"RVOL {r:.2f}x — dead volume, weak participation"
+    if r < 0.7:
+        return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
+    return 0, f"RVOL {r:.2f}x — neutral volume"
+
+RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple)
+
+
 INDICATOR_REGISTRY: list[IndicatorSpec] = [
     EMA_TREND,
     RSI_MOMENTUM,
