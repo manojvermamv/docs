@@ -1201,10 +1201,79 @@ class TrancheConfig:
         return errs
 
 
+# ── 3j — SignalConfig ──────────────────────────────────────────────────
+@dataclass
+class SignalConfig:
+    """Controls signal-generation layer parameters.
+    All env vars optional; defaults produce backward-compatible behaviour.
+    Shadow mode = new specs score_max=0 so they log but don't affect score."""
+
+    # ── RVOL-Simple ──
+    rvol_lookback:              int   = 14
+
+    # ── OI Z-score ──
+    oi_z_buffer_maxlen:         int   = 30
+
+    # ── OI Rejection Zone ──
+    oi_zone_z_threshold:        float = 1.0
+    oi_zone_z_climax:           float = 2.0
+    oi_zone_min_touch:          int   = 2
+    wall_reject_pct:            float = 0.3
+    oi_zone_wall_proximity_pts: float = 50.0
+    oi_zone_lookback_scans:     int   = 10
+
+    # ── Shadow mode ──
+    shadow_mode_enabled:        bool  = True
+
+    @classmethod
+    def from_env(cls) -> "SignalConfig":
+        defaults = cls()
+        return cls(
+            rvol_lookback=int(
+                os.getenv("RVOL_LOOKBACK", str(defaults.rvol_lookback))),
+            oi_z_buffer_maxlen=int(
+                os.getenv("OI_Z_BUFFER_MAXLEN", str(defaults.oi_z_buffer_maxlen))),
+            oi_zone_z_threshold=float(
+                os.getenv("OI_ZONE_Z_THRESHOLD", str(defaults.oi_zone_z_threshold))),
+            oi_zone_z_climax=float(
+                os.getenv("OI_ZONE_Z_CLIMAX", str(defaults.oi_zone_z_climax))),
+            oi_zone_min_touch=int(
+                os.getenv("OI_ZONE_MIN_TOUCH", str(defaults.oi_zone_min_touch))),
+            wall_reject_pct=float(
+                os.getenv("WALL_REJECT_PCT", str(defaults.wall_reject_pct))),
+            oi_zone_wall_proximity_pts=float(
+                os.getenv("OI_ZONE_WALL_PROXIMITY_PTS", str(defaults.oi_zone_wall_proximity_pts))),
+            oi_zone_lookback_scans=int(
+                os.getenv("OI_ZONE_LOOKBACK_SCANS", str(defaults.oi_zone_lookback_scans))),
+            shadow_mode_enabled=os.getenv("SHADOW_MODE_ENABLED",
+                str(defaults.shadow_mode_enabled)).lower() in ("1", "true", "yes"),
+        )
+
+    def validate(self) -> list[str]:
+        errs: list[str] = []
+        if self.rvol_lookback < 2:
+            errs.append("RVOL_LOOKBACK must be >= 2")
+        if self.oi_z_buffer_maxlen < 5:
+            errs.append("OI_Z_BUFFER_MAXLEN must be >= 5")
+        if self.oi_zone_z_threshold <= 0:
+            errs.append("OI_ZONE_Z_THRESHOLD must be > 0")
+        if self.oi_zone_z_climax <= self.oi_zone_z_threshold:
+            errs.append("OI_ZONE_Z_CLIMAX must be > OI_ZONE_Z_THRESHOLD")
+        if self.oi_zone_min_touch < 1:
+            errs.append("OI_ZONE_MIN_TOUCH must be >= 1")
+        if not 0 < self.wall_reject_pct <= 1.0:
+            errs.append("WALL_REJECT_PCT must be in (0, 1.0]")
+        if self.oi_zone_wall_proximity_pts <= 0:
+            errs.append("OI_ZONE_WALL_PROXIMITY_PTS must be > 0")
+        if self.oi_zone_lookback_scans < self.oi_zone_min_touch:
+            errs.append("OI_ZONE_LOOKBACK_SCANS must be >= OI_ZONE_MIN_TOUCH")
+        return errs
+
+
 # ── BotConfig (thin container — no __getattr__, explicit accessors) ────────
 @dataclass
 class BotConfig:
-    """Thin container holding the 8 sub-config dataclasses.
+    """Thin container holding the 9 sub-config dataclasses.
     Access fields via cfg.broker.xxx, cfg.market.xxx, cfg.entry.xxx, etc."""
     broker:   BrokerConfig   = field(default_factory=BrokerConfig)
     market:   MarketConfig   = field(default_factory=MarketConfig)
@@ -1214,6 +1283,7 @@ class BotConfig:
     journal:  JournalConfig  = field(default_factory=JournalConfig)
     position: PositionConfig = field(default_factory=PositionConfig)
     tranche:  TrancheConfig  = field(default_factory=TrancheConfig)
+    signal:   SignalConfig   = field(default_factory=SignalConfig)
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -1225,6 +1295,7 @@ class BotConfig:
         journal  = JournalConfig.from_env()
         position = PositionConfig.from_env()
         tranche  = TrancheConfig.from_env()
+        signal   = SignalConfig.from_env()
 
         # ── Cross-config: WebSocket URL auto-correction ──────────────────────
         _ws_domain = broker.api_host[8:].split("/")[0] if broker.api_host.startswith("https://") else ""
@@ -1258,14 +1329,15 @@ class BotConfig:
 
         return cls(broker=broker, market=market, entry=entry, risk=risk,
                    trail=trail, journal=journal,
-                   position=position, tranche=tranche)
+                   position=position, tranche=tranche,
+                   signal=signal)
 
     def validate(self) -> None:
         """Aggregate validation from all sub-configs. Raises SystemExit on errors."""
         errors: list[str] = []
         for sc in (self.broker, self.market, self.entry, self.risk,
                    self.trail, self.journal,
-                   self.position, self.tranche):
+                   self.position, self.tranche, self.signal):
             try:
                 errors.extend(sc.validate())
             except Exception as e:
@@ -1281,7 +1353,7 @@ class BotConfig:
         inf("[CONFIG] All configuration values validated OK")
         for sc in (self.broker, self.market, self.entry, self.risk,
                    self.trail, self.journal,
-                   self.position, self.tranche):
+                   self.position, self.tranche, self.signal):
             for w in (getattr(sc, "warnings", lambda: [])()):
                 inf(f"[CONFIG] WARNING: {w}")
 
