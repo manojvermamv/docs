@@ -1,4 +1,4 @@
-﻿"""
+"""
 OPTIONS BUYER-EDGE STRATEGY  ·  Multi-Layer Confirmation  ·  OpenAlgo NSE F&O Options Trading Bot
 
 Buys NSE F&O options (CE / PE) only when five independent signal layers agree:
@@ -80,17 +80,17 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Six design items identified during signal-layer V2 enhancement (shadow-mode specs live,
 # but integration architecture incomplete — all items below are open):
 #
-#   @ MACD replacement: MACD deleted without substitution — Layer 1 runs 3 live components
+#   ✓ Step 1 (MACD replacement): MACD deleted without substitution — Layer 1 runs 3 live components
 #     (EMA, RSI, VWAP) instead of planned 4; MAX_RAW_SCORE comment still lists MACD(1).
-#   ✓ Step 2 (tier field): IndicatorSpec/StatisticSpec have fast/slow tier tag on all 16 specs
+#   ✓ Step 2 (Tier field): IndicatorSpec/StatisticSpec have fast/slow tier tag on all specs
 #     (13 original + 3 new shadow-mode), propagated through ScoreComponent.evaluate().
-#   @ Two-stage combine: flat-sum raw_score aggregation still in place — Step 3 (the core
+#   ⬢ Two-stage combine: flat-sum raw_score aggregation still in place — Step 3 (the core
 #     architectural gap that requires shadow-mode quarantine; not implementable without tier field).
-#   @ Layer-1 persistence buffer: SignalEngine holds only OI-Z/zone state for new specs —
+#   ⬢ Layer-1 persistence buffer: SignalEngine holds only OI-Z/zone state for new specs —
 #     no trend-hold confirmation accumulator for technical indicators (Step 4).
-#   @ Recalibration: PRACTICAL_ALIGNMENT_FACTOR / thresholds need review after MACD removal
+#   ⬢ Recalibration: PRACTICAL_ALIGNMENT_FACTOR / thresholds need review after MACD removal
 #     and before shadow specs activate (Step 5).
-#   @ clear_oi_state() unused: method defined on SignalEngine but never called —
+#   ⬢ clear_oi_state() unused: method defined on SignalEngine but never called —
 #     cross-session OI buffer carry-over depends on daily process restart.
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
@@ -1219,42 +1219,52 @@ class TrancheConfig:
         return errs
 
 
-# ── 3j — SignalConfig ──────────────────────────────────────────────────────
+# ── 3j — SignalConfig ──────────────────────────────────────────────────
 @dataclass
 class SignalConfig:
-    """Controls signal-layer features: rolling buffers, shadow-mode specs, and
-    OI Rejection Zone thresholds. All fields have backward-compatible defaults."""
+    """Controls signal-generation layer parameters.
+    All env vars optional; defaults produce backward-compatible behaviour.
+    Shadow mode = new specs score_max=0 so they log but don't affect score."""
 
-    # ── RVOL ──
-    rvol_lookback:          int   = 20
+    # ── RVOL-Simple ──
+    rvol_lookback:              int   = 14
 
-    # ── OI Z-Score ──
-    oi_z_buffer_maxlen:     int   = 30
+    # ── OI Z-score ──
+    oi_z_buffer_maxlen:         int   = 30
 
     # ── OI Rejection Zone ──
-    oi_zone_z_threshold:    float = 2.0
-    oi_zone_z_climax:       float = 3.0
-    oi_zone_min_touch:      int   = 2
-    wall_reject_pct:        float = 0.15
+    oi_zone_z_threshold:        float = 1.0
+    oi_zone_z_climax:           float = 2.0
+    oi_zone_min_touch:          int   = 2
+    wall_reject_pct:            float = 0.3
     oi_zone_wall_proximity_pts: float = 50.0
-    oi_zone_lookback_scans: int   = 10
+    oi_zone_lookback_scans:     int   = 10
 
-    # ── Shadow Mode ──
-    shadow_mode_enabled:    bool  = True
+    # ── Shadow mode ──
+    shadow_mode_enabled:        bool  = True
 
     @classmethod
     def from_env(cls) -> "SignalConfig":
         defaults = cls()
         return cls(
-            rvol_lookback=int(os.getenv("RVOL_LOOKBACK", str(defaults.rvol_lookback))),
-            oi_z_buffer_maxlen=int(os.getenv("OI_Z_BUFFER_MAXLEN", str(defaults.oi_z_buffer_maxlen))),
-            oi_zone_z_threshold=float(os.getenv("OI_ZONE_Z_THRESHOLD", str(defaults.oi_zone_z_threshold))),
-            oi_zone_z_climax=float(os.getenv("OI_ZONE_Z_CLIMAX", str(defaults.oi_zone_z_climax))),
-            oi_zone_min_touch=int(os.getenv("OI_ZONE_MIN_TOUCH", str(defaults.oi_zone_min_touch))),
-            wall_reject_pct=float(os.getenv("WALL_REJECT_PCT", str(defaults.wall_reject_pct))),
-            oi_zone_wall_proximity_pts=float(os.getenv("OI_ZONE_WALL_PROXIMITY_PTS", str(defaults.oi_zone_wall_proximity_pts))),
-            oi_zone_lookback_scans=int(os.getenv("OI_ZONE_LOOKBACK_SCANS", str(defaults.oi_zone_lookback_scans))),
-            shadow_mode_enabled=os.getenv("SHADOW_MODE_ENABLED", str(defaults.shadow_mode_enabled)).lower() in ("1", "true", "yes"),
+            rvol_lookback=int(
+                os.getenv("RVOL_LOOKBACK", str(defaults.rvol_lookback))),
+            oi_z_buffer_maxlen=int(
+                os.getenv("OI_Z_BUFFER_MAXLEN", str(defaults.oi_z_buffer_maxlen))),
+            oi_zone_z_threshold=float(
+                os.getenv("OI_ZONE_Z_THRESHOLD", str(defaults.oi_zone_z_threshold))),
+            oi_zone_z_climax=float(
+                os.getenv("OI_ZONE_Z_CLIMAX", str(defaults.oi_zone_z_climax))),
+            oi_zone_min_touch=int(
+                os.getenv("OI_ZONE_MIN_TOUCH", str(defaults.oi_zone_min_touch))),
+            wall_reject_pct=float(
+                os.getenv("WALL_REJECT_PCT", str(defaults.wall_reject_pct))),
+            oi_zone_wall_proximity_pts=float(
+                os.getenv("OI_ZONE_WALL_PROXIMITY_PTS", str(defaults.oi_zone_wall_proximity_pts))),
+            oi_zone_lookback_scans=int(
+                os.getenv("OI_ZONE_LOOKBACK_SCANS", str(defaults.oi_zone_lookback_scans))),
+            shadow_mode_enabled=os.getenv("SHADOW_MODE_ENABLED",
+                str(defaults.shadow_mode_enabled)).lower() in ("1", "true", "yes"),
         )
 
     def validate(self) -> list[str]:
@@ -1263,18 +1273,18 @@ class SignalConfig:
             errs.append(f"RVOL_LOOKBACK={self.rvol_lookback} must be >= 2")
         if self.oi_z_buffer_maxlen < 5:
             errs.append(f"OI_Z_BUFFER_MAXLEN={self.oi_z_buffer_maxlen} must be >= 5")
-        if self.oi_zone_z_threshold < 0.5:
-            errs.append(f"OI_ZONE_Z_THRESHOLD={self.oi_zone_z_threshold} must be >= 0.5")
-        if self.oi_zone_z_climax < self.oi_zone_z_threshold:
-            errs.append(f"OI_ZONE_Z_CLIMAX={self.oi_zone_z_climax} must be >= OI_ZONE_Z_THRESHOLD={self.oi_zone_z_threshold}")
+        if self.oi_zone_z_threshold <= 0:
+            errs.append(f"OI_ZONE_Z_THRESHOLD={self.oi_zone_z_threshold} must be > 0")
+        if self.oi_zone_z_climax <= self.oi_zone_z_threshold:
+            errs.append(f"OI_ZONE_Z_CLIMAX={self.oi_zone_z_climax} must be > OI_ZONE_Z_THRESHOLD={self.oi_zone_z_threshold}")
         if self.oi_zone_min_touch < 1:
             errs.append(f"OI_ZONE_MIN_TOUCH={self.oi_zone_min_touch} must be >= 1")
-        if self.wall_reject_pct < 0 or self.wall_reject_pct > 1:
-            errs.append(f"WALL_REJECT_PCT={self.wall_reject_pct} must be in [0, 1]")
-        if self.oi_zone_wall_proximity_pts < 10:
-            errs.append(f"OI_ZONE_WALL_PROXIMITY_PTS={self.oi_zone_wall_proximity_pts} must be >= 10")
-        if self.oi_zone_lookback_scans < 2:
-            errs.append(f"OI_ZONE_LOOKBACK_SCANS={self.oi_zone_lookback_scans} must be >= 2")
+        if not 0 < self.wall_reject_pct <= 1.0:
+            errs.append(f"WALL_REJECT_PCT={self.wall_reject_pct} must be in (0, 1.0]")
+        if self.oi_zone_wall_proximity_pts <= 0:
+            errs.append(f"OI_ZONE_WALL_PROXIMITY_PTS={self.oi_zone_wall_proximity_pts} must be > 0")
+        if self.oi_zone_lookback_scans < self.oi_zone_min_touch:
+            errs.append(f"OI_ZONE_LOOKBACK_SCANS={self.oi_zone_lookback_scans} must be >= OI_ZONE_MIN_TOUCH={self.oi_zone_min_touch}")
         return errs
 
 
@@ -1370,6 +1380,39 @@ class BotConfig:
 # ║    OptionPosition / PendingEntry / PendingExit / TradeRecord         ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
+class RollingZ:
+    """Deque-backed rolling buffer that computes an IQR-based robust z-score
+    (AVRZ-derived). Warms up after _min_samples (partial fill, not full buffer)."""
+    __slots__ = ("_buf", "_maxlen", "_min_samples")
+    def __init__(self, maxlen: int = 30, min_samples: int | None = None):
+        self._buf: deque = deque(maxlen=maxlen)
+        self._maxlen = maxlen
+        # BUGFIX: previously required the buffer completely full (len < maxlen) before
+        # returning any z-score, which is a full-`maxlen`-scans blackout every session
+        # start (~30 min at maxlen=30 / 60s scans). Warm up on a partial fill instead —
+        # still robust-sigma, just responsive sooner, matching the "fast tier" intent.
+        self._min_samples = min_samples if min_samples is not None else max(5, maxlen // 3)
+    def add(self, v: float) -> None:
+        self._buf.append(v)
+    def z_score(self, v: float) -> float | None:
+        if len(self._buf) < self._min_samples:
+            return None
+        s = sorted(self._buf)
+        n = len(s)
+        q25, q75 = s[n // 4], s[(3 * n) // 4]
+        iqr = q75 - q25
+        mh = (q25 + q75) / 2.0
+        if iqr < 1e-12:
+            # BUGFIX: guard n==1 case (division by zero when only one sample exists,
+            # reachable now that warm-up no longer requires a full buffer).
+            sigma = ((sum((x - mh) ** 2 for x in s) / (n - 1)) ** 0.5) if n > 1 else 0.0
+        else:
+            sigma = iqr / 1.349
+        return (v - mh) / sigma if sigma > 1e-12 else 0.0
+    def __len__(self) -> int:
+        return len(self._buf)
+
+
 @dataclass
 class ScoreComponent:
     label:     str
@@ -1440,36 +1483,6 @@ class SignalResult:
     trap_reasons: list[str]
     reasons:      list[str]
     components:   list[ScoreComponent]
-
-
-# ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  RollingZ — robust rolling Z-score via IQR (AVRZ-derived pattern)       ║
-# ╚══════════════════════════════════════════════════════════════════════════╝
-class RollingZ:
-    """Deque-backed rolling buffer that computes an IQR-based robust z-score
-    (AVRZ-derived). Warms up after _min_samples (partial fill, not full buffer)."""
-    __slots__ = ("_buf", "_maxlen", "_min_samples")
-    def __init__(self, maxlen: int = 30, min_samples: int | None = None):
-        self._buf: deque = deque(maxlen=maxlen)
-        self._maxlen = maxlen
-        self._min_samples = min_samples if min_samples is not None else max(5, maxlen // 3)
-    def add(self, v: float) -> None:
-        self._buf.append(v)
-    def z_score(self, v: float) -> float | None:
-        if len(self._buf) < self._min_samples:
-            return None
-        s = sorted(self._buf)
-        n = len(s)
-        q25, q75 = s[n // 4], s[(3 * n) // 4]
-        iqr = q75 - q25
-        mh = (q25 + q75) / 2.0
-        if iqr < 1e-12:
-            sigma = ((sum((x - mh) ** 2 for x in s) / (n - 1)) ** 0.5) if n > 1 else 0.0
-        else:
-            sigma = iqr / 1.349
-        return (v - mh) / sigma if sigma > 1e-12 else 0.0
-    def __len__(self):
-        return len(self._buf)
 
 
 def get_ist_now() -> datetime:
@@ -2991,10 +3004,16 @@ def _compute_rvol_simple(df_spot, cfg):
 
 def _score_rvol_simple(raw, cfg):
     r = raw["rvol"]
-    if r >= 2.0:   return 1,   f"RVOL {r:.2f}x — heavy volume surge (bullish)"
-    if r >= 1.5:   return 0.5, f"RVOL {r:.2f}x — above-average volume"
-    if r >= 1.0:   return 0,   f"RVOL {r:.2f}x — normal volume range"
-    if r >= 0.5:   return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
+    if r > 2.0:
+        return 1, f"RVOL {r:.2f}x — heavy volume surge, strong conviction"
+    if r > 1.5:
+        return 0.75, f"RVOL {r:.2f}x — elevated volume, buying conviction"
+    if r > 1.0:
+        return 0.5, f"RVOL {r:.2f}x — above-average volume, mild bullish"
+    if r < 0.4:
+        return -1, f"RVOL {r:.2f}x — dead volume, weak participation"
+    if r < 0.7:
+        return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
     return 0, f"RVOL {r:.2f}x — neutral volume"
 
 RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0, tier="slow")
@@ -3322,28 +3341,31 @@ def _compute_oi_zscore(ctx, cfg, intermediates):
     chain_rows = ctx.get("chain_rows")
     oi_z_buffers: dict[str, RollingZ] | None = ctx.get("oi_z_buffers")
     symbol = ctx.get("symbol", "")
-    if not chain_rows or oi_z_buffers is None or not symbol:
+    if not chain_rows or not oi_z_buffers or not symbol:
         return None
+    if symbol not in oi_z_buffers:
+        oi_z_buffers[symbol] = RollingZ(maxlen=cfg.signal.oi_z_buffer_maxlen)
     net_oi = sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) + \
              sum(float(r.get("pe_oi_chg", 0) or 0) for r in chain_rows)
     buf = oi_z_buffers[symbol]
+    # Score against prior history BEFORE adding this observation.
     z = buf.z_score(net_oi)
     buf.add(net_oi)
     intermediates["oi_net_zscore"] = z
     if z is None:
         return 0, f"OI Z-score priming ({len(buf)}/{buf._min_samples} samples)"
     if z > 2.0:
-        return 1.5, f"OI Z-score {z:.2f} — extreme OI build (bullish)"
+        return -1.5, f"OI Z-score {z:.2f} — extreme net OI build, climax (bearish)"
     if z > 1.5:
-        return 1,   f"OI Z-score {z:.2f} — strong OI build (bullish)"
+        return -1.0, f"OI Z-score {z:.2f} — strong net OI build, crowded (bearish)"
     if z > 1.0:
-        return 0.5, f"OI Z-score {z:.2f} — mild OI build (bullish)"
+        return -0.5, f"OI Z-score {z:.2f} — mild net OI build (mild bearish)"
     if z < -2.0:
-        return -1.5, f"OI Z-score {z:.2f} — extreme OI unwind (bearish)"
+        return 1.5, f"OI Z-score {z:.2f} — extreme net OI unwind, reversal (bullish)"
     if z < -1.5:
-        return -1,   f"OI Z-score {z:.2f} — strong OI unwind (bearish)"
+        return 1.0, f"OI Z-score {z:.2f} — strong net OI unwind, flush (bullish)"
     if z < -1.0:
-        return -0.5, f"OI Z-score {z:.2f} — mild OI unwind (bearish)"
+        return 0.5, f"OI Z-score {z:.2f} — mild net OI unwind (mild bullish)"
     return 0, f"OI Z-score {z:.2f} — neutral range"
 
 OI_ZSCORE = StatisticSpec(name="OI Z-Score", compute=_compute_oi_zscore, score_max=0, tier="fast")
@@ -3353,14 +3375,14 @@ def _compute_oi_rejection_zone(ctx, cfg, intermediates):
     chain_rows = ctx.get("chain_rows")
     spot = ctx.get("spot")
     oi_zone_state: dict | None = ctx.get("oi_zone_state")
-    symbol = ctx.get("symbol", "")
-    if not chain_rows or spot is None or oi_zone_state is None or not symbol:
-        return None
-    cw = OIFlowAnalyzer.find_call_wall(chain_rows)
-    pw = OIFlowAnalyzer.find_put_wall(chain_rows)
-    if not cw and not pw:
+    if not chain_rows or not spot or not oi_zone_state:
         return None
     sig = cfg.signal
+    cw = float(OIFlowAnalyzer.call_wall(chain_rows) or 0)
+    pw = float(OIFlowAnalyzer.put_wall(chain_rows) or 0)
+    if not cw and not pw:
+        return None
+    symbol = ctx.get("symbol", "")
     prox = sig.oi_zone_wall_proximity_pts
     lookback = sig.oi_zone_lookback_scans
 
@@ -3435,17 +3457,14 @@ class SignalEngine:
 
     def __init__(self, cfg: BotConfig):
         self._config = cfg
-        # Stateful buffers for cross-scan signal specs (OI Z-score, Rejection Zone).
         self._oi_z_buffers: dict[str, RollingZ] = {}
         self._oi_zone_state: dict = {}
 
     def clear_oi_state(self, symbol: str | None = None) -> None:
-        """Reset OI buffers. Call once per day if the process runs across sessions
-        without restarting, to prevent stale cross-day data."""
         if symbol:
             self._oi_z_buffers.pop(symbol, None)
-            oi_zone_state_keys = [k for k in self._oi_zone_state if k.startswith(f"{symbol}_")]
-            for k in oi_zone_state_keys:
+            _keys = [k for k in self._oi_zone_state if k.startswith(f"{symbol}_")]
+            for k in _keys:
                 self._oi_zone_state.pop(k, None)
         else:
             self._oi_z_buffers.clear()
@@ -3499,7 +3518,6 @@ class SignalEngine:
             components.append(ind_spec.evaluate(df_spot, cfg))
 
         # ── LAYERS 2-5: Market Statistics (from STATISTIC_REGISTRY) ────────────
-        # Ensure per-symbol OI buffers exist (lazy init on first scan).
         if symbol and symbol not in self._oi_z_buffers:
             self._oi_z_buffers[symbol] = RollingZ(maxlen=self._config.signal.oi_z_buffer_maxlen)
         _ctx = dict(
