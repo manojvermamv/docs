@@ -7682,8 +7682,14 @@ class OptionsBuyerEdgeBot:
                     continue
                 stale.append(pos)
             for pos in stale:
+                _est_exit = pos.sl or pos.entry_premium
+                _est_pnl = _calc_pnl(pos, _est_exit)
+                self.orders._write_journal(
+                    pos.underlying, pos, _est_exit, _est_pnl, "orphan_cleanup",
+                    exit_price_source="estimated", record_type="orphan_cleanup",
+                )
                 inf(f"[CLEANUP] Force-removing stale position {pos.symbol} ({pos.slot_id}) — "
-                    f"exit already processed, removing from book. If PnL seems missing check broker.")
+                    f"exit already processed, wrote orphan_cleanup row. If PnL seems missing check broker.")
                 _advance_stage(pos, LifecycleStage.CLOSED)
                 self.state.positions.pop(pos.slot_id, None)
                 self.state.pending_opposite_exit.discard(pos.underlying)
