@@ -3330,7 +3330,7 @@ def _compute_oi_zscore(ctx, cfg, intermediates):
     # the buffer after it's been mutated this scan, which would reintroduce the same bias.
     intermediates["oi_net_zscore"] = z
     if z is None:
-        return 0, f"OI Z-score priming ({len(buf)}/{buf._maxlen} samples)"
+        return 0, f"OI Z-score priming ({len(buf)}/{buf._min_samples} samples)"
     if z > 2.0:
         return -1, f"OI Z-score {z:.2f} — extreme net OI build, climax bias (bearish)"
     if z > 1.0:
