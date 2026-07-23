@@ -196,7 +196,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #    Current: Slot-keyed position store; default single-position, supports multi-position (CE+PE, same-side) via env.
 #    Verified: SlotId threaded through exits, modify-callbacks, pending maps, exit cleanup, stale-snapshot refresh.
 #    Policy:
-#        slot_id = f"{underlying}_{option_type}_{timestamp_ms}"
+#        slot_id = f"{underlying}_{option_type}_{timestamp_us}"
 #
 # 2. Tranche Partial-Exit Framework
 #    Current: Equal/ladder modes with per-tranche SL/LIMIT order IDs. TGT order ID preserved via runner_tranche.
