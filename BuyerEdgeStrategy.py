@@ -2819,29 +2819,6 @@ def _score_rsi_momentum(raw, cfg):
 RSI_MOMENTUM = IndicatorSpec(name="RSI Momentum", min_bars=lambda cfg: cfg.entry.rsi_period + 2, compute=_compute_rsi_momentum, score=_score_rsi_momentum)
 
 
-# ── MACD Histogram ────────────────────────────────────────────────────
-def _compute_macd_histogram(df_spot, cfg):
-    _, _, hist = ta.macd(df_spot["close"])
-    h_now = ta_value(hist, -2)
-    h_prev = ta_value(hist, -3)
-    if h_now is None:
-        return None
-    return {"h_now": h_now, "h_prev": h_prev}
-
-def _score_macd_histogram(raw, cfg):
-    h_now, h_prev = raw["h_now"], raw["h_prev"]
-    if h_now > 0 and h_now > h_prev:
-        return 1, "MACD Histogram expanding positive"
-    if h_now < 0 and h_now < h_prev:
-        return -1, "MACD Histogram expanding negative"
-    if h_now > 0:
-        return 0.5, "MACD Histogram positive (contracting)"
-    if h_now < 0:
-        return -0.5, "MACD Histogram negative (contracting)"
-    return 0, "MACD Histogram flat"
-
-MACD_HISTOGRAM = IndicatorSpec(name="MACD Histogram", min_bars=35, compute=_compute_macd_histogram, score=_score_macd_histogram)
-
 
 # ── Spot vs VWAP ──────────────────────────────────────────────────────
 def _compute_spot_vs_vwap(df_spot, cfg):
@@ -2884,7 +2861,6 @@ SPOT_VS_VWAP = IndicatorSpec(name="Spot vs VWAP", min_bars=5, compute=_compute_s
 INDICATOR_REGISTRY: list[IndicatorSpec] = [
     EMA_TREND,
     RSI_MOMENTUM,
-    MACD_HISTOGRAM,
     SPOT_VS_VWAP,
 ]
 
