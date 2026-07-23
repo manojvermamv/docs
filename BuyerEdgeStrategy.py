@@ -73,7 +73,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
-# Remaining Work:                Signal architecture steps 2-6 (see OPEN OBSERVATIONS) + calibration
+# Remaining Work:                Signal architecture steps 3-6 (see OPEN OBSERVATIONS) + calibration
 #
 # OPEN OBSERVATIONS
 # ------------------------------------------------------------------------------
@@ -82,7 +82,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 #   @ MACD replacement: MACD deleted without substitution — Layer 1 runs 3 live components
 #     (EMA, RSI, VWAP) instead of planned 4; MAX_RAW_SCORE comment still lists MACD(1).
-#   @ Tier field: IndicatorSpec/StatisticSpec have no fast/slow tag — Step 2 of the plan.
+#   ✓ Step 2 (tier field): IndicatorSpec/StatisticSpec have fast/slow tier tag on all 16 specs
+#     (13 original + 3 new shadow-mode), propagated through ScoreComponent.evaluate().
 #   @ Two-stage combine: flat-sum raw_score aggregation still in place — Step 3 (the core
 #     architectural gap that requires shadow-mode quarantine; not implementable without tier field).
 #   @ Layer-1 persistence buffer: SignalEngine holds only OI-Z/zone state for new specs —
@@ -2996,7 +2997,7 @@ def _score_rvol_simple(raw, cfg):
     if r >= 0.5:   return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
     return 0, f"RVOL {r:.2f}x — neutral volume"
 
-RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0)
+RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0, tier="slow")
 
 
 INDICATOR_REGISTRY: list[IndicatorSpec] = [
@@ -3345,7 +3346,7 @@ def _compute_oi_zscore(ctx, cfg, intermediates):
         return -0.5, f"OI Z-score {z:.2f} — mild OI unwind (bearish)"
     return 0, f"OI Z-score {z:.2f} — neutral range"
 
-OI_ZSCORE = StatisticSpec(name="OI Z-Score", compute=_compute_oi_zscore, score_max=0)
+OI_ZSCORE = StatisticSpec(name="OI Z-Score", compute=_compute_oi_zscore, score_max=0, tier="fast")
 
 # ── OI Rejection Zone ──────────────────────────────────────────────────
 def _compute_oi_rejection_zone(ctx, cfg, intermediates):
@@ -3406,7 +3407,7 @@ def _compute_oi_rejection_zone(ctx, cfg, intermediates):
     return s, (f"OI Rejection Zone wall={near_wall} z={wall_z:.2f} "
                f"touches={active_count}/{lookback}scans ({dir_label})")
 
-OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=0)
+OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=0, tier="fast")
 
 
 STATISTIC_REGISTRY: list[StatisticSpec] = [
