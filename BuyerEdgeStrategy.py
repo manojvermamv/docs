@@ -3422,6 +3422,18 @@ class SignalEngine:
 
     def __init__(self, cfg: BotConfig):
         self._config = cfg
+        self._oi_z_buffers: dict[str, RollingZ] = {}
+        self._oi_zone_state: dict = {}
+
+    def clear_oi_state(self, symbol: str | None = None) -> None:
+        if symbol:
+            self._oi_z_buffers.pop(symbol, None)
+            _keys = [k for k in self._oi_zone_state if k.startswith(f"{symbol}_")]
+            for k in _keys:
+                self._oi_zone_state.pop(k, None)
+        else:
+            self._oi_z_buffers.clear()
+            self._oi_zone_state.clear()
 
     @staticmethod
     def iv_rank(
@@ -3459,6 +3471,7 @@ class SignalEngine:
         ce_iv_rank: float | None = None,
         pe_iv_rank: float | None = None,
         best_fit_iv_side: str | None = None,
+        symbol: str = "",
     ) -> SignalResult:
         """Compute composite directional score (−100 → +100) and trap_score (0 → 100)."""
         cfg = self._config
@@ -3482,6 +3495,9 @@ class SignalEngine:
             prev_spot=prev_spot, prev_sf_ltp=prev_sf_ltp,
             ce_iv_rank=ce_iv_rank, pe_iv_rank=pe_iv_rank,
             best_fit_iv_side=best_fit_iv_side,
+            oi_z_buffers=self._oi_z_buffers,
+            oi_zone_state=self._oi_zone_state,
+            symbol=symbol,
         )
         _intermediates: dict[str, Any] = {}
         for stat_spec in STATISTIC_REGISTRY:
@@ -8271,6 +8287,7 @@ class OptionsBuyerEdgeBot:
             ce_iv_rank=ce_iv_rank,
             pe_iv_rank=pe_iv_rank,
             best_fit_iv_side=best_fit_iv_side,
+            symbol=symbol,
         )
         state.latest_signals[symbol] = (result, time.time())
 
