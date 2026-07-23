@@ -73,25 +73,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
-# Remaining Work:                Signal architecture steps 2–6 (see OPEN OBSERVATIONS) + calibration
-#
-# OPEN OBSERVATIONS
-# ------------------------------------------------------------------------------
-# Six design items identified during signal-layer V2 enhancement (shadow-mode specs live,
-# but integration architecture incomplete — all items below are open):
-#
-#   ⬢ MACD replacement: MACD deleted without substitution — Layer 1 runs 3 live components
-#     (EMA, RSI, VWAP) instead of planned 4; MAX_RAW_SCORE comment still lists MACD(1).
-#   ⬢ Tier field: IndicatorSpec/StatisticSpec have no fast/slow tag — Step 2 of the plan.
-#   ⬢ Two-stage combine: flat-sum raw_score aggregation still in place — Step 3 (the core
-#     architectural gap that requires shadow-mode quarantine; not implementable without tier field).
-#   ⬢ Layer-1 persistence buffer: SignalEngine holds only OI-Z/zone state for new specs —
-#     no trend-hold confirmation accumulator for technical indicators (Step 4).
-#   ⬢ Recalibration: PRACTICAL_ALIGNMENT_FACTOR / thresholds need review after MACD removal
-#     and before shadow specs activate (Step 5).
-#   ⬢ clear_oi_state() unused: method defined on SignalEngine (line ~3448) but never called —
-#     cross-session OI buffer carry-over depends on daily process restart.
-#
+# Remaining Work:                Calibration + expectancy research only
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
 # telegram() correctly omits strategy= (SDK has no such param).
@@ -1219,79 +1201,10 @@ class TrancheConfig:
         return errs
 
 
-# ── 3j — SignalConfig ──────────────────────────────────────────────────
-@dataclass
-class SignalConfig:
-    """Controls signal-generation layer parameters.
-    All env vars optional; defaults produce backward-compatible behaviour.
-    Shadow mode = new specs score_max=0 so they log but don't affect score."""
-
-    # ── RVOL-Simple ──
-    rvol_lookback:              int   = 14
-
-    # ── OI Z-score ──
-    oi_z_buffer_maxlen:         int   = 30
-
-    # ── OI Rejection Zone ──
-    oi_zone_z_threshold:        float = 1.0
-    oi_zone_z_climax:           float = 2.0
-    oi_zone_min_touch:          int   = 2
-    wall_reject_pct:            float = 0.3
-    oi_zone_wall_proximity_pts: float = 50.0
-    oi_zone_lookback_scans:     int   = 10
-
-    # ── Shadow mode ──
-    shadow_mode_enabled:        bool  = True
-
-    @classmethod
-    def from_env(cls) -> "SignalConfig":
-        defaults = cls()
-        return cls(
-            rvol_lookback=int(
-                os.getenv("RVOL_LOOKBACK", str(defaults.rvol_lookback))),
-            oi_z_buffer_maxlen=int(
-                os.getenv("OI_Z_BUFFER_MAXLEN", str(defaults.oi_z_buffer_maxlen))),
-            oi_zone_z_threshold=float(
-                os.getenv("OI_ZONE_Z_THRESHOLD", str(defaults.oi_zone_z_threshold))),
-            oi_zone_z_climax=float(
-                os.getenv("OI_ZONE_Z_CLIMAX", str(defaults.oi_zone_z_climax))),
-            oi_zone_min_touch=int(
-                os.getenv("OI_ZONE_MIN_TOUCH", str(defaults.oi_zone_min_touch))),
-            wall_reject_pct=float(
-                os.getenv("WALL_REJECT_PCT", str(defaults.wall_reject_pct))),
-            oi_zone_wall_proximity_pts=float(
-                os.getenv("OI_ZONE_WALL_PROXIMITY_PTS", str(defaults.oi_zone_wall_proximity_pts))),
-            oi_zone_lookback_scans=int(
-                os.getenv("OI_ZONE_LOOKBACK_SCANS", str(defaults.oi_zone_lookback_scans))),
-            shadow_mode_enabled=os.getenv("SHADOW_MODE_ENABLED",
-                str(defaults.shadow_mode_enabled)).lower() in ("1", "true", "yes"),
-        )
-
-    def validate(self) -> list[str]:
-        errs: list[str] = []
-        if self.rvol_lookback < 2:
-            errs.append("RVOL_LOOKBACK must be >= 2")
-        if self.oi_z_buffer_maxlen < 5:
-            errs.append("OI_Z_BUFFER_MAXLEN must be >= 5")
-        if self.oi_zone_z_threshold <= 0:
-            errs.append("OI_ZONE_Z_THRESHOLD must be > 0")
-        if self.oi_zone_z_climax <= self.oi_zone_z_threshold:
-            errs.append("OI_ZONE_Z_CLIMAX must be > OI_ZONE_Z_THRESHOLD")
-        if self.oi_zone_min_touch < 1:
-            errs.append("OI_ZONE_MIN_TOUCH must be >= 1")
-        if not 0 < self.wall_reject_pct <= 1.0:
-            errs.append("WALL_REJECT_PCT must be in (0, 1.0]")
-        if self.oi_zone_wall_proximity_pts <= 0:
-            errs.append("OI_ZONE_WALL_PROXIMITY_PTS must be > 0")
-        if self.oi_zone_lookback_scans < self.oi_zone_min_touch:
-            errs.append("OI_ZONE_LOOKBACK_SCANS must be >= OI_ZONE_MIN_TOUCH")
-        return errs
-
-
 # ── BotConfig (thin container — no __getattr__, explicit accessors) ────────
 @dataclass
 class BotConfig:
-    """Thin container holding the 9 sub-config dataclasses.
+    """Thin container holding the 8 sub-config dataclasses.
     Access fields via cfg.broker.xxx, cfg.market.xxx, cfg.entry.xxx, etc."""
     broker:   BrokerConfig   = field(default_factory=BrokerConfig)
     market:   MarketConfig   = field(default_factory=MarketConfig)
@@ -1301,7 +1214,6 @@ class BotConfig:
     journal:  JournalConfig  = field(default_factory=JournalConfig)
     position: PositionConfig = field(default_factory=PositionConfig)
     tranche:  TrancheConfig  = field(default_factory=TrancheConfig)
-    signal:   SignalConfig   = field(default_factory=SignalConfig)
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -1313,7 +1225,6 @@ class BotConfig:
         journal  = JournalConfig.from_env()
         position = PositionConfig.from_env()
         tranche  = TrancheConfig.from_env()
-        signal   = SignalConfig.from_env()
 
         # ── Cross-config: WebSocket URL auto-correction ──────────────────────
         _ws_domain = broker.api_host[8:].split("/")[0] if broker.api_host.startswith("https://") else ""
@@ -1347,15 +1258,14 @@ class BotConfig:
 
         return cls(broker=broker, market=market, entry=entry, risk=risk,
                    trail=trail, journal=journal,
-                   position=position, tranche=tranche,
-                   signal=signal)
+                   position=position, tranche=tranche)
 
     def validate(self) -> None:
         """Aggregate validation from all sub-configs. Raises SystemExit on errors."""
         errors: list[str] = []
         for sc in (self.broker, self.market, self.entry, self.risk,
                    self.trail, self.journal,
-                   self.position, self.tranche, self.signal):
+                   self.position, self.tranche):
             try:
                 errors.extend(sc.validate())
             except Exception as e:
@@ -1371,7 +1281,7 @@ class BotConfig:
         inf("[CONFIG] All configuration values validated OK")
         for sc in (self.broker, self.market, self.entry, self.risk,
                    self.trail, self.journal,
-                   self.position, self.tranche, self.signal):
+                   self.position, self.tranche):
             for w in (getattr(sc, "warnings", lambda: [])()):
                 inf(f"[CONFIG] WARNING: {w}")
 
@@ -1380,37 +1290,6 @@ class BotConfig:
 # ║    PositionCore / PositionBroker / TrailState / KeyLevelState        ║
 # ║    OptionPosition / PendingEntry / PendingExit / TradeRecord         ║
 # ╚══════════════════════════════════════════════════════════════════════╝
-
-class RollingZ:
-    __slots__ = ("_buf", "_maxlen", "_min_samples")
-    def __init__(self, maxlen: int = 30, min_samples: int | None = None):
-        self._buf: deque = deque(maxlen=maxlen)
-        self._maxlen = maxlen
-        # BUGFIX: previously required the buffer completely full (len < maxlen) before
-        # returning any z-score, which is a full-`maxlen`-scans blackout every session
-        # start (~30 min at maxlen=30 / 60s scans). Warm up on a partial fill instead —
-        # still robust-sigma, just responsive sooner, matching the "fast tier" intent.
-        self._min_samples = min_samples if min_samples is not None else max(5, maxlen // 3)
-    def add(self, v: float) -> None:
-        self._buf.append(v)
-    def z_score(self, v: float) -> float | None:
-        if len(self._buf) < self._min_samples:
-            return None
-        s = sorted(self._buf)
-        n = len(s)
-        q25, q75 = s[n // 4], s[n * 3 // 4]
-        iqr = q75 - q25
-        mh = (q25 + q75) / 2.0
-        if iqr < 1e-12:
-            # BUGFIX: guard n==1 case (division by zero when only one sample exists,
-            # reachable now that warm-up no longer requires a full buffer).
-            sigma = ((sum((x - mh) ** 2 for x in s) / (n - 1)) ** 0.5) if n > 1 else 0.0
-        else:
-            sigma = iqr / 1.349
-        return (v - mh) / sigma if sigma > 1e-12 else 0.0
-    def __len__(self) -> int:
-        return len(self._buf)
-
 
 @dataclass
 class ScoreComponent:
@@ -2981,40 +2860,10 @@ def _score_spot_vs_vwap(raw, cfg):
 SPOT_VS_VWAP = IndicatorSpec(name="Spot vs VWAP", min_bars=5, compute=_compute_spot_vs_vwap, score=_score_spot_vs_vwap)
 
 
-# ── RVOL-Simple ────────────────────────────────────────────────────────
-def _compute_rvol_simple(df_spot, cfg):
-    vol = pd.to_numeric(df_spot["volume"], errors="coerce")
-    if (vol <= 0).all():
-        return None
-    lb = cfg.signal.rvol_lookback
-    if len(vol) < lb + 1:
-        return None
-    current = float(vol.iloc[-1] or 0)
-    sma = float(vol.iloc[-lb:].mean() or 1)
-    return {"rvol": current / sma, "close": float(df_spot["close"].iloc[-1])}
-
-def _score_rvol_simple(raw, cfg):
-    r = raw["rvol"]
-    if r > 2.0:
-        return 1, f"RVOL {r:.2f}x — heavy volume surge, strong conviction"
-    if r > 1.5:
-        return 0.75, f"RVOL {r:.2f}x — elevated volume, buying conviction"
-    if r > 1.0:
-        return 0.5, f"RVOL {r:.2f}x — above-average volume, mild bullish"
-    if r < 0.4:
-        return -1, f"RVOL {r:.2f}x — dead volume, weak participation"
-    if r < 0.7:
-        return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
-    return 0, f"RVOL {r:.2f}x — neutral volume"
-
-RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0)
-
-
 INDICATOR_REGISTRY: list[IndicatorSpec] = [
     EMA_TREND,
     RSI_MOMENTUM,
     SPOT_VS_VWAP,
-    RVOL_SIMPLE,
 ]
 
 
@@ -3327,114 +3176,6 @@ def _compute_synthetic_futures(ctx, cfg, intermediates):
 SYNTHETIC_FUTURES = StatisticSpec(name="Synthetic Futures", compute=_compute_synthetic_futures)
 
 
-# ── OI Z-Score ─────────────────────────────────────────────────────────
-def _compute_oi_zscore(ctx, cfg, intermediates):
-    chain_rows = ctx.get("chain_rows")
-    oi_z_buffers: dict[str, RollingZ] | None = ctx.get("oi_z_buffers")
-    symbol = ctx.get("symbol", "")
-    if not chain_rows or not oi_z_buffers or not symbol:
-        return None
-    if symbol not in oi_z_buffers:
-        oi_z_buffers[symbol] = RollingZ(maxlen=cfg.signal.oi_z_buffer_maxlen)
-    net_oi = sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) + \
-             sum(float(r.get("pe_oi_chg", 0) or 0) for r in chain_rows)
-    buf = oi_z_buffers[symbol]
-    # BUGFIX: score against prior history BEFORE adding this observation. Adding first
-    # made every reading part of its own baseline, muting genuine outliers (an extreme
-    # spike pulled its own quartiles/sigma toward itself before being measured against them).
-    z = buf.z_score(net_oi)
-    buf.add(net_oi)
-    # Shared with OI Rejection Zone below so it reuses this value instead of re-querying
-    # the buffer after it's been mutated this scan, which would reintroduce the same bias.
-    intermediates["oi_net_zscore"] = z
-    if z is None:
-        return 0, f"OI Z-score priming ({len(buf)}/{buf._min_samples} samples)"
-    if z > 2.0:
-        return -1, f"OI Z-score {z:.2f} — extreme net OI build, climax bias (bearish)"
-    if z > 1.0:
-        return -0.5, f"OI Z-score {z:.2f} — elevated net OI build (mild bearish)"
-    if z < -2.0:
-        return 1, f"OI Z-score {z:.2f} — extreme net OI unwind, reversal (bullish)"
-    if z < -1.0:
-        return 0.5, f"OI Z-score {z:.2f} — net OI unwind (mild bullish)"
-    return 0, f"OI Z-score {z:.2f} — neutral range"
-
-OI_ZSCORE = StatisticSpec(name="OI Z-Score", compute=_compute_oi_zscore, score_max=0)
-
-# ── OI Rejection Zone ──────────────────────────────────────────────────
-def _compute_oi_rejection_zone(ctx, cfg, intermediates):
-    chain_rows = ctx.get("chain_rows")
-    spot = ctx.get("spot")
-    oi_zone_state: dict | None = ctx.get("oi_zone_state")
-    if not chain_rows or not spot or not oi_zone_state:
-        return None
-    sig = cfg.signal
-    cw = float(OIFlowAnalyzer.call_wall(chain_rows) or 0)
-    pw = float(OIFlowAnalyzer.put_wall(chain_rows) or 0)
-    if not cw and not pw:
-        return None
-    symbol = ctx.get("symbol", "")
-    prox = sig.oi_zone_wall_proximity_pts
-    lookback = sig.oi_zone_lookback_scans
-
-    # BUGFIX (windowing + strike-specificity): the old version kept a single cumulative
-    # counter per side that never aged out and wasn't tied to a specific strike, so a wall
-    # tested twice at 9:20am satisfied min_touch for the rest of the session even after
-    # price left the area, and a touch on an old wall level counted toward a new one after
-    # a wall shift. Track (scan_idx, strike) per side instead, and only count touches that
-    # are both within the lookback window AND at the *current* wall strike.
-    scan_key = f"{symbol}_scan_idx"
-    scan_idx = oi_zone_state.get(scan_key, 0) + 1
-    oi_zone_state[scan_key] = scan_idx
-
-    call_touches: deque = oi_zone_state.setdefault(f"{symbol}_call_touches", deque(maxlen=lookback * 2))
-    put_touches:  deque = oi_zone_state.setdefault(f"{symbol}_put_touches",  deque(maxlen=lookback * 2))
-
-    # Layer 1 — structural: did price touch a wall this scan?
-    near_call = bool(cw) and abs(spot - cw) <= prox
-    near_put  = bool(pw) and abs(spot - pw) <= prox
-    if near_call:
-        call_touches.append((scan_idx, cw))
-    if near_put:
-        put_touches.append((scan_idx, pw))
-
-    def _recent_count(touches: deque, current_strike: float) -> int:
-        return sum(1 for idx, strike in touches
-                   if (scan_idx - idx) <= lookback and strike == current_strike)
-
-    call_count = _recent_count(call_touches, cw)
-    put_count  = _recent_count(put_touches, pw)
-
-    # Layer 2 — statistical: reuse OI_ZSCORE's already-computed value (BUGFIX: previously
-    # re-queried oi_z_buffers[symbol] here, but OI_ZSCORE runs first in the registry and
-    # its z_score() call already mutated the buffer for this scan via .add() — re-querying
-    # it here would have reintroduced the same self-reference bias fixed in OI_ZSCORE).
-    wall_z = intermediates.get("oi_net_zscore") or 0.0
-
-    touches_needed = sig.oi_zone_min_touch
-    z_threshold = sig.oi_zone_z_threshold
-    z_climax = sig.oi_zone_z_climax
-    reject_ratio = sig.wall_reject_pct
-
-    near_wall = "call" if near_call else "put" if near_put else "none"
-    active_count = call_count if near_wall == "call" else put_count if near_wall == "put" else 0
-
-    if near_wall == "none" or active_count < touches_needed:
-        return 0, f"OI Rejection priming ({active_count}/{touches_needed} recent touches, wall={near_wall})"
-
-    # Score: combine Z-layer and touch-layer
-    z_layer = 0.5 if abs(wall_z) >= z_climax else (0.25 if abs(wall_z) >= z_threshold else 0)
-    touch_layer = min(0.5, active_count * reject_ratio)
-    s = min(1.0, z_layer + touch_layer)
-    if near_wall == "call":
-        s = -s  # near call wall = bearish
-    dir_label = "bearish" if s < 0 else "bullish" if s > 0 else "neutral"
-    return s, (f"OI Rejection Zone wall={near_wall} z={wall_z:.2f} "
-               f"touches={active_count}/{lookback}scans ({dir_label})")
-
-OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=0)
-
-
 STATISTIC_REGISTRY: list[StatisticSpec] = [
     PCR_LEVEL,
     CALL_OI_FLOW,
@@ -3443,8 +3184,6 @@ STATISTIC_REGISTRY: list[StatisticSpec] = [
     DELTA_BIAS,
     GAMMA_REGIME,
     OI_VELOCITY,
-    OI_ZSCORE,
-    OI_REJECTION_ZONE,
     IV_REGIME,
     STRADDLE_VELOCITY,
     SYNTHETIC_FUTURES,
@@ -3460,18 +3199,6 @@ class SignalEngine:
 
     def __init__(self, cfg: BotConfig):
         self._config = cfg
-        self._oi_z_buffers: dict[str, RollingZ] = {}
-        self._oi_zone_state: dict = {}
-
-    def clear_oi_state(self, symbol: str | None = None) -> None:
-        if symbol:
-            self._oi_z_buffers.pop(symbol, None)
-            _keys = [k for k in self._oi_zone_state if k.startswith(f"{symbol}_")]
-            for k in _keys:
-                self._oi_zone_state.pop(k, None)
-        else:
-            self._oi_z_buffers.clear()
-            self._oi_zone_state.clear()
 
     @staticmethod
     def iv_rank(
@@ -3509,7 +3236,6 @@ class SignalEngine:
         ce_iv_rank: float | None = None,
         pe_iv_rank: float | None = None,
         best_fit_iv_side: str | None = None,
-        symbol: str = "",
     ) -> SignalResult:
         """Compute composite directional score (−100 → +100) and trap_score (0 → 100)."""
         cfg = self._config
@@ -3533,9 +3259,6 @@ class SignalEngine:
             prev_spot=prev_spot, prev_sf_ltp=prev_sf_ltp,
             ce_iv_rank=ce_iv_rank, pe_iv_rank=pe_iv_rank,
             best_fit_iv_side=best_fit_iv_side,
-            oi_z_buffers=self._oi_z_buffers,
-            oi_zone_state=self._oi_zone_state,
-            symbol=symbol,
         )
         _intermediates: dict[str, Any] = {}
         for stat_spec in STATISTIC_REGISTRY:
@@ -3572,8 +3295,8 @@ class SignalEngine:
         # Active score_max sum includes Gamma Regime now.
         # Current total: EMA(1)+RSI(1)+MACD(1)+VWAP(1)+PCR(1)+CE-flow(2)+PE-flow(2)
         # +Wall(1)+Delta(1)+Gamma(2)+OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 16
-        MAX_RAW_SCORE = sum(c.score_max for c in components if c.available and c.score_max > 0)
-        raw_score  = sum(c.score for c in components if c.available and c.score_max > 0)
+        MAX_RAW_SCORE = sum(c.score_max for c in components if c.available)
+        raw_score  = sum(c.score for c in components if c.available)
         
         # We cap expected alignment to PRACTICAL_ALIGNMENT_FACTOR, so achieving this threshold yields a 100 score.
         effective_max = MAX_RAW_SCORE * PRACTICAL_ALIGNMENT_FACTOR
@@ -8325,7 +8048,6 @@ class OptionsBuyerEdgeBot:
             ce_iv_rank=ce_iv_rank,
             pe_iv_rank=pe_iv_rank,
             best_fit_iv_side=best_fit_iv_side,
-            symbol=symbol,
         )
         state.latest_signals[symbol] = (result, time.time())
 
