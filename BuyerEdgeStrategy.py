@@ -80,8 +80,9 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Six design items identified during signal-layer V2 enhancement (shadow-mode specs live,
 # but integration architecture incomplete — all items below are open):
 #
-#   ✓ Step 1 (MACD replacement): MACD deleted without substitution — Layer 1 runs 3 live components
-#     (EMA, RSI, VWAP) instead of planned 4; MAX_RAW_SCORE comment still lists MACD(1).
+#   ⬢ Step 1 (MACD replacement): MACD deleted without substitution, no EMA-slope replacement
+#     landed — Layer 1 runs 3 live components (EMA, RSI, VWAP) instead of the planned 4.
+#     Still open — diagnosis done, fix not implemented.
 #   ✓ Step 2 (Tier field): IndicatorSpec/StatisticSpec have fast/slow tier tag on all specs
 #     (13 original + 3 new shadow-mode), propagated through ScoreComponent.evaluate().
 #   ⬢ Two-stage combine: flat-sum raw_score aggregation still in place — Step 3 (the core
@@ -3572,7 +3573,7 @@ class SignalEngine:
         # (score_max=0) log in the component list but are excluded from both
         # numerator and denominator, preventing systematic score deflation.
         # Current total: EMA(1)+RSI(1)+VWAP(1)+PCR(1)+CE-flow(2)+PE-flow(2)
-        # +Wall(1)+Delta(1)+Gamma(2)+OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 15
+        # +Wall(1)+Delta(1)+Gamma(2)+OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 17
         MAX_RAW_SCORE = sum(c.score_max for c in components if c.available and c.score_max > 0)
         raw_score  = sum(c.score for c in components if c.available and c.score_max > 0)
         
