@@ -1499,6 +1499,9 @@ class SignalResult:
     trap_reasons: list[str]
     reasons:      list[str]
     components:   list[ScoreComponent]
+    fast_norm:    float = 0.0
+    slow_norm:    float = 0.0
+    confirm_mult: float = 1.0
 
 
 def get_ist_now() -> datetime:
@@ -3669,6 +3672,7 @@ class SignalEngine:
             score=final_score, label=label, signal=signal, direction=direction,
             trap_score=trap_score, trap_reasons=trap_reasons,
             reasons=list(dict.fromkeys(reasons)), components=components,
+            fast_norm=fast_norm, slow_norm=slow_norm, confirm_mult=confirm_mult,
         )
 
 
@@ -8421,7 +8425,8 @@ class OptionsBuyerEdgeBot:
             return
 
         # ✔ EXECUTE path — separator printed AFTER every blocking guard below
-        inf(f"  ✔ EXECUTE  {_dir_ico}  {result.direction}")
+        inf(f"  ✔ EXECUTE  {_dir_ico}  {result.direction}"
+            f"  fast_norm={result.fast_norm:.3f} slow_norm={result.slow_norm:.3f} mult={result.confirm_mult:.3f}")
 
         # V2-A6: Signal parallel sync — exit opposing active positions on new EXECUTE signal
         if cfg.position.signal_parallel_exit:
