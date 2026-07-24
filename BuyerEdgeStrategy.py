@@ -3017,7 +3017,7 @@ def _score_rvol_simple(raw, cfg):
         return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
     return 0, f"RVOL {r:.2f}x — neutral volume"
 
-RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0, tier="slow")
+RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0, tier="fast")
 
 
 INDICATOR_REGISTRY: list[IndicatorSpec] = [
