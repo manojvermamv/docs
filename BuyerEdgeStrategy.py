@@ -1244,6 +1244,13 @@ class SignalConfig:
     # ── Shadow mode ──
     shadow_mode_enabled:        bool  = True
 
+    # ── Step 3: fast/slow two-stage combine ──
+    # Slow (technical-trend) tier no longer adds points directly; it dampens the fast
+    # (options-statistical) tier's score on disagreement via this multiplier. Agreement
+    # or a neutral/unavailable slow layer never boosts or penalizes (multiplier = 1.0).
+    slow_disagree_weight:       float = 0.5   # how strongly full disagreement dampens (0-1)
+    slow_disagree_floor:        float = 0.5   # multiplier can never drop below this
+
     @classmethod
     def from_env(cls) -> "SignalConfig":
         defaults = cls()
@@ -1266,6 +1273,10 @@ class SignalConfig:
                 os.getenv("OI_ZONE_LOOKBACK_SCANS", str(defaults.oi_zone_lookback_scans))),
             shadow_mode_enabled=os.getenv("SHADOW_MODE_ENABLED",
                 str(defaults.shadow_mode_enabled)).lower() in ("1", "true", "yes"),
+            slow_disagree_weight=float(
+                os.getenv("SLOW_DISAGREE_WEIGHT", str(defaults.slow_disagree_weight))),
+            slow_disagree_floor=float(
+                os.getenv("SLOW_DISAGREE_FLOOR", str(defaults.slow_disagree_floor))),
         )
 
     def validate(self) -> list[str]:
@@ -1286,6 +1297,10 @@ class SignalConfig:
             errs.append(f"OI_ZONE_WALL_PROXIMITY_PTS={self.oi_zone_wall_proximity_pts} must be > 0")
         if self.oi_zone_lookback_scans < self.oi_zone_min_touch:
             errs.append(f"OI_ZONE_LOOKBACK_SCANS={self.oi_zone_lookback_scans} must be >= OI_ZONE_MIN_TOUCH={self.oi_zone_min_touch}")
+        if not 0 <= self.slow_disagree_weight <= 1.0:
+            errs.append(f"SLOW_DISAGREE_WEIGHT={self.slow_disagree_weight} must be in [0, 1.0]")
+        if not 0 <= self.slow_disagree_floor <= 1.0:
+            errs.append(f"SLOW_DISAGREE_FLOOR={self.slow_disagree_floor} must be in [0, 1.0]")
         return errs
 
 
@@ -3569,14 +3584,51 @@ class SignalEngine:
         trap_score = min(100, trap_score)
 
         # ── Final Score ──────────────────────────────────────────────────────
-        # Active (available + score_max > 0) score_max sum. Shadow-mode specs
-        # (score_max=0) log in the component list but are excluded from both
-        # numerator and denominator, preventing systematic score deflation.
-        # Current total: EMA(1)+RSI(1)+VWAP(1)+PCR(1)+CE-flow(2)+PE-flow(2)
-        # +Wall(1)+Delta(1)+Gamma(2)+OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 17
-        MAX_RAW_SCORE = sum(c.score_max for c in components if c.available and c.score_max > 0)
-        raw_score  = sum(c.score for c in components if c.available and c.score_max > 0)
-        
+        # STEP 3 — Two-stage combine. Previously this flat-summed every available
+        # component (fast + slow) into one pool, which is exactly the coupling problem
+        # this redesign set out to fix: a lagging technical read got the same per-point
+        # weight as a live options-statistical read, and the composite ended up behaving
+        # like whichever layer moved most on a given scan rather than reflecting a real
+        # confirmation relationship between the two.
+        #
+        # Now: fast (options-statistical, Layers 2-5) tier drives direction and magnitude
+        # directly and stays fully responsive — it is never blended down by a slow-moving
+        # trend read. Slow (technical-trend, Layer 1) tier no longer contributes points;
+        # it only modulates fast_raw via confirm_mult below — dampening conviction when it
+        # disagrees with the fast layer's direction, and doing nothing (mult=1.0) when it
+        # agrees or has no strong opinion. It can reduce confidence, never flip or silence
+        # the fast layer's read outright (bounded by slow_disagree_floor).
+        fast_components = [c for c in components if c.tier == "fast" and c.available and c.score_max > 0]
+        slow_components = [c for c in components if c.tier == "slow" and c.available and c.score_max > 0]
+
+        FAST_MAX = sum(c.score_max for c in fast_components)
+        fast_raw = sum(c.score for c in fast_components)
+        fast_norm = (fast_raw / FAST_MAX) if FAST_MAX > 0 else 0.0
+
+        SLOW_MAX = sum(c.score_max for c in slow_components)
+        slow_raw = sum(c.score for c in slow_components)
+        slow_norm = (slow_raw / SLOW_MAX) if SLOW_MAX > 0 else 0.0
+
+        if FAST_MAX <= 0 or fast_norm == 0 or slow_norm == 0:
+            confirm_mult = 1.0
+        elif (fast_norm > 0) == (slow_norm > 0):
+            confirm_mult = 1.0
+        else:
+            confirm_mult = max(cfg.signal.slow_disagree_floor,
+                                1.0 - abs(slow_norm) * cfg.signal.slow_disagree_weight)
+
+        # NOTE — scale shift vs. the old flat-sum formula: the denominator is now
+        # FAST_MAX (14) instead of the old flat-sum total (17, fast+slow combined).
+        # For the same fast-tier conditions this produces a systematically higher
+        # base_score than before (~17/14 ≈ 1.21x). Recalibrate cfg.entry.min_score /
+        # PRACTICAL_ALIGNMENT_FACTOR before relying on this in live trading (Step 5) —
+        # this scale shift is a direct, known consequence of Step 3, not a bug.
+        # Fast-tier total: PCR(1)+CE-flow(2)+PE-flow(2)+Wall(1)+Delta(1)+Gamma(2)
+        # +OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 14. Slow-tier (now a multiplier,
+        # not points): EMA(1)+RSI(1)+VWAP(1) = 3.
+        MAX_RAW_SCORE = FAST_MAX
+        raw_score = fast_raw * confirm_mult
+
         # We cap expected alignment to PRACTICAL_ALIGNMENT_FACTOR, so achieving this threshold yields a 100 score.
         effective_max = MAX_RAW_SCORE * PRACTICAL_ALIGNMENT_FACTOR
         base_score = (raw_score / effective_max) * 100 if effective_max > 0 else 0
