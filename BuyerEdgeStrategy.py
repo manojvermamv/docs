@@ -1499,9 +1499,9 @@ class SignalResult:
     trap_reasons: list[str]
     reasons:      list[str]
     components:   list[ScoreComponent]
-    fast_norm:    float = 0.0
-    slow_norm:    float = 0.0
-    confirm_mult: float = 1.0
+    fast_norm:    float | None = None
+    slow_norm:    float | None = None
+    confirm_mult: float | None = None
 
 
 def get_ist_now() -> datetime:
@@ -8425,7 +8425,9 @@ class OptionsBuyerEdgeBot:
             return
 
         # ✔ EXECUTE path — separator printed AFTER every blocking guard below
+        _entry_ts = _time_str  # same HH:MM:SS from header, join key against journal.entry_time
         inf(f"  ✔ EXECUTE  {_dir_ico}  {result.direction}"
+            f"  [{symbol}] {_entry_ts}"
             f"  fast_norm={result.fast_norm:.3f} slow_norm={result.slow_norm:.3f} mult={result.confirm_mult:.3f}")
 
         # V2-A6: Signal parallel sync — exit opposing active positions on new EXECUTE signal
