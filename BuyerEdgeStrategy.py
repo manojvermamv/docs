@@ -8410,8 +8410,11 @@ class OptionsBuyerEdgeBot:
         inf(f"  {_sep}")
         _cbar_w = 8
         for c in result.components:
-            _cfill = int(abs(c.score) / max(c.score_max, 0.01) * _cbar_w)
-            _cbar  = "█" * _cfill + "░" * (_cbar_w - _cfill)
+            if c.score_max > 0:
+                _cfill = int(abs(c.score) / c.score_max * _cbar_w)
+                _cbar  = "█" * _cfill + "░" * (_cbar_w - _cfill)
+            else:
+                _cbar  = "░" * _cbar_w
             inf(f"     {c.score:+.0f}/{c.score_max:.0f}  {_cbar}  {c.label:<20} {c.note}")
         if result.trap_reasons:
             inf(f"  ⚠ TRAP {_trap}  ·  {'  ·  '.join(result.trap_reasons)}")
