@@ -194,6 +194,12 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F77 ✓ Fixed: Order-stream dispatcher only handled entry completions — LIMIT fills, SL-M triggers, and exit completions silently dropped. Fixed with 4-priority universal dispatch covering pending_entries, pending_exits, protection-fill immediate action, and shadow inf().
 #
 # F81 ✓ Fixed: Entry-flow placeorder() network exception — broker may have landed the order despite client-side failure. Fixed with _reconcile_lost_placeorder() that checks orderbook() for an unambiguous matching order (same symbol, action, qty, within 60s window, not in known_order_ids). Only covers the entry _place_entry_order call site (the path F81 was traced through). Same blind spot exists at protective-order (SL/TGT), partial-exit, and full-exit placeorder() calls — those remain exposed but were out of scope for this finding's evidence.
+#
+# F82 ✓ Fixed: RVOL_SIMPLE tier mislabelled as "fast" (options-statistical) when spot-volume-based — now "slow" (technical-trend). Latent (score_max=0, shadow mode only) but would have silently scored on wrong tier if activated without review.
+#
+# F83 ✓ Fixed: MAX_RAW_SCORE ceiling restored to FAST_MAX + SLOW_MAX after slow tier became a multiplier — effective ceiling was FAST_MAX alone, causing final_score to cap ~82 instead of 100, making min_score thresholds above that silently unreachable. Fixed to MAX_RAW_SCORE = FAST_MAX.
+#
+# F84 ✓ Fixed: _known_order_ids (set) accessed from strategy thread and exit-executor pool without locking — race could drop order IDs from registry. Same class already locks _pending_tranche_exits two lines above. Fixed with _known_order_ids_lock and double-checked locking in property getter.
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -3035,7 +3041,7 @@ def _score_rvol_simple(raw, cfg):
         return -0.5, f"RVOL {r:.2f}x — below-average volume, low interest"
     return 0, f"RVOL {r:.2f}x — neutral volume"
 
-RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0, tier="fast")
+RVOL_SIMPLE = IndicatorSpec(name="RVOL-Simple", min_bars=lambda cfg: cfg.signal.rvol_lookback + 1, compute=_compute_rvol_simple, score=_score_rvol_simple, score_max=0, tier="slow")
 
 
 INDICATOR_REGISTRY: list[IndicatorSpec] = [
@@ -3616,9 +3622,9 @@ class SignalEngine:
             f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} "
             f"({_disagree}) → raw={fast_raw * confirm_mult:.1f}")
 
-        # Step 3 made slow a multiplier (not points), shrinking the effective max
-        # from 17 to 14. Restore the ceiling so min_score thresholds stay calibrated.
-        MAX_RAW_SCORE = FAST_MAX + SLOW_MAX
+        # Step 3 made slow a multiplier (not points) — MAX_RAW_SCORE must use
+        # FAST_MAX as the ceiling since slow no longer contributes points directly.
+        MAX_RAW_SCORE = FAST_MAX
         raw_score = fast_raw * confirm_mult
 
         # We cap expected alignment to PRACTICAL_ALIGNMENT_FACTOR, so achieving this threshold yields a 100 score.
@@ -6032,6 +6038,7 @@ class OrderManager:
         self._journal = JournalWriter(self.config.journal.trade_journal_path)
         self._pending_tranche_exits: dict[str, str] = {}  # key=f"{underlying}_{tr.tranche_id}" → order_id
         self._pending_tranche_exits_lock: threading.Lock = threading.Lock()
+        self._known_order_ids_lock: threading.Lock = threading.Lock()
         self._known_order_ids: set[str] = set()
         self._known_order_ids_path = self.config.journal.known_order_ids_path
 
@@ -6039,12 +6046,13 @@ class OrderManager:
         """Persist a placed order ID to the local registry (F80: defense-in-depth)."""
         if not oid:
             return
-        self._known_order_ids.add(oid)
-        try:
-            with open(self._known_order_ids_path, 'w') as f:
-                json.dump({oid: get_ist_now().isoformat() for oid in self._known_order_ids}, f)
-        except Exception as exc:
-            err(f"[ORDER] Failed to save known order ID {oid}: ", exc)
+        with self._known_order_ids_lock:
+            self._known_order_ids.add(oid)
+            try:
+                with open(self._known_order_ids_path, 'w') as f:
+                    json.dump({oid: get_ist_now().isoformat() for oid in self._known_order_ids}, f)
+            except Exception as exc:
+                err(f"[ORDER] Failed to save known order ID {oid}: ", exc)
 
     def _load_known_order_ids(self) -> set[str]:
         """Load known order IDs from JSON, prune entries >14 days old."""
@@ -6065,18 +6073,21 @@ class OrderManager:
             except Exception:
                 pruned.add(oid)  # keep on parse failure
         if len(pruned) < len(data):
-            self._known_order_ids = pruned
-            try:
-                with open(path, 'w') as f:
-                    json.dump({oid: get_ist_now().isoformat() for oid in pruned}, f)
-            except Exception:
-                pass
+            with self._known_order_ids_lock:
+                self._known_order_ids = pruned
+                try:
+                    with open(path, 'w') as f:
+                        json.dump({oid: get_ist_now().isoformat() for oid in pruned}, f)
+                except Exception:
+                    pass
         return pruned
 
     @property
     def known_order_ids(self) -> set[str]:
         if not self._known_order_ids:
-            self._known_order_ids = self._load_known_order_ids()
+            with self._known_order_ids_lock:
+                if not self._known_order_ids:  # double-checked locking
+                    self._known_order_ids = self._load_known_order_ids()
         return self._known_order_ids
 
     def _reconcile_lost_placeorder(
