@@ -6069,10 +6069,10 @@ class OrderManager:
                             entry_conviction=pending.entry_conviction,
                             entry_sl_source=pending.entry_sl_source,
                         )
-                        inf(f"[ORDER] Cancel-race {order_id}: reconciled {use_qty} @ \u20b9{ep:.2f}")
+                        dbg(f"[ORDER] Cancel-race {order_id}: reconciled {use_qty} @ \u20b9{ep:.2f}")
                     return "reconciled"
                 if bs in ("cancelled", "canceled", "rejected") and fq_raw == 0:
-                    inf(f"[ORDER] Cancel confirmed for {order_id}: {bs}")
+                    dbg(f"[ORDER] Cancel confirmed for {order_id}: {bs}")
                     return "cancelled"
                 if bs in ("cancelled", "canceled", "rejected") and ep > 0:
                     if pending:
@@ -6085,9 +6085,9 @@ class OrderManager:
                             entry_conviction=pending.entry_conviction,
                             entry_sl_source=pending.entry_sl_source,
                         )
-                        inf(f"[ORDER] Cancel-race {order_id}: partial {use_qty} @ \u20b9{ep:.2f} — reconciled")
+                        dbg(f"[ORDER] Cancel-race {order_id}: partial {use_qty} @ \u20b9{ep:.2f} — reconciled")
                     return "reconciled"
-                inf(f"[ORDER] Cancel-confirm status {bs} for {order_id}: fq_raw={fq_raw} ep={ep}")
+                dbg(f"[ORDER] Cancel-confirm status {bs} for {order_id}: fq_raw={fq_raw} ep={ep}")
         except Exception as exc:
             err(f"[ORDER] Cancel-confirm error {order_id}: ", exc)
         return "still_open"
@@ -6193,7 +6193,7 @@ class OrderManager:
                 if order_status in _TERMINAL_FILL:
                     return resp
                 if order_status in _TERMINAL_FAIL:
-                    inf(f"[ORDER] Order {order_id} {order_status}")
+                    dbg(f"[ORDER] Order {order_id} {order_status}")
                     return None
                 # ORD-2: detect partial fill near end of retry window
                 filled_qty = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
@@ -6205,7 +6205,7 @@ class OrderManager:
                     return resp
             except Exception as exc: err(f"[ORDER] orderstatus error (attempt {attempt+1}): ", exc)
             time.sleep(slp)
-        inf(f"[ORDER] Timed out polling order {order_id} after {max_r} attempts")
+        dbg(f"[ORDER] Timed out polling order {order_id} after {max_r} attempts")
         return None
 
     def _finalize_exit(
@@ -6285,7 +6285,7 @@ class OrderManager:
                                 "order_status": broker_stat,
                                 "tranche_id": tr.tranche_id,
                             }
-                            inf(f"[ORDER] Broker {attr_name} already filled for {underlying} t={tr.tranche_id}: {oid}")
+                            dbg(f"[ORDER] Broker {attr_name} already filled for {underlying} t={tr.tranche_id}: {oid}")
                 except Exception as exc:
                     err(f"[ORDER] pre-check fill error {oid}: ", exc)
 
@@ -6299,9 +6299,9 @@ class OrderManager:
                         order_id=oid, strategy=self.config.broker.strategy_name
                     )
                     if isinstance(resp, dict) and resp.get("status") in ("success", "cancelled"):
-                        inf(f"[ORDER] Cancelled broker {attr_name} {oid} for {underlying} t={tr.tranche_id}")
+                        dbg(f"[ORDER] Cancelled broker {attr_name} {oid} for {underlying} t={tr.tranche_id}")
                     else:
-                        inf(f"[ORDER] Cancel resp for {oid}: {resp}")
+                        dbg(f"[ORDER] Cancel resp for {oid}: {resp}")
                 except Exception as exc:
                     err(f"[ORDER] Cancel error {oid}: ", exc)
 
@@ -6316,7 +6316,7 @@ class OrderManager:
                     if isinstance(resp, dict) and resp.get("status") == "success":
                         data = resp.get("data") or resp
                         broker_stat = str(data.get("order_status", "")).lower()
-                        inf(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
+                        dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
                         # Race: fill arrived between pre-check and cancel.
                         key = f"{tr.tranche_id}_{attr_name}"
                         if broker_stat in ("complete", "filled", "executed") and key not in broker_filled:
@@ -6327,7 +6327,7 @@ class OrderManager:
                                 "order_status": broker_stat,
                                 "tranche_id":  tr.tranche_id,
                             }
-                            inf(f"[ORDER] Post-cancel check detected {attr_name} already filled for {underlying} t={tr.tranche_id}: {oid} @ {executed_price}")
+                            dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled for {underlying} t={tr.tranche_id}: {oid} @ {executed_price}")
                 except Exception as exc:
                     err(f"[ORDER] Post-cancel check error {oid}: ", exc)
                 setattr(tr, attr_name, None)
@@ -6361,7 +6361,7 @@ class OrderManager:
                             "executed":    float(data.get("average_price", 0) or 0),
                             "order_status": broker_stat,
                         }
-                        inf(f"[ORDER] Broker {attr_name} already filled: {oid}")
+                        dbg(f"[ORDER] Broker {attr_name} already filled: {oid}")
             except Exception as exc: err(f"[ORDER] pre-check fill error {oid}: ", exc)
 
         for attr_name, oid in (("sl_order_id", sl_id), ("tgt_order_id", tgt_id)):
@@ -6370,9 +6370,9 @@ class OrderManager:
             try:
                 resp = self.client.cancelorder(order_id=oid, strategy=self.config.broker.strategy_name)
                 if isinstance(resp, dict) and resp.get("status") in ("success", "cancelled"):
-                    inf(f"[ORDER] Cancelled broker {attr_name} {oid}")
+                    dbg(f"[ORDER] Cancelled broker {attr_name} {oid}")
                 else:
-                    inf(f"[ORDER] Cancel resp for {oid}: {resp}")
+                    dbg(f"[ORDER] Cancel resp for {oid}: {resp}")
             except Exception as exc: err(f"[ORDER] Cancel error {oid}: ", exc)
 
         for attr_name, oid in (("sl_order_id", sl_id), ("tgt_order_id", tgt_id)):
@@ -6383,7 +6383,7 @@ class OrderManager:
                 if isinstance(resp, dict) and resp.get("status") == "success":
                     data = resp.get("data") or resp
                     broker_stat = str(data.get("order_status", "")).lower()
-                    inf(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
+                    dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
                     # Race: fill arrived between pre-check and cancel. Record it
                     # so caller won't place a redundant market SELL.
                     if broker_stat in ("complete", "filled", "executed") and attr_name not in broker_filled:
@@ -6393,7 +6393,7 @@ class OrderManager:
                             "executed":    executed_price,
                             "order_status": broker_stat,
                         }
-                        inf(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
+                        dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
             except Exception as exc: err(f"[ORDER] Post-cancel check error {oid}: ", exc)
         pos.sl_order_id  = None
         pos.tgt_order_id = None
@@ -6415,7 +6415,7 @@ class OrderManager:
             if isinstance(pre, dict) and pre.get("status") == "success":
                 _data = pre.get("data") or pre
                 if str(_data.get("order_status", "")).lower() in ("complete", "filled", "executed"):
-                    inf(f"[ORDER] SL already filled for {underlying} — skipping modify, triggering exit")
+                    dbg(f"[ORDER] SL already filled for {underlying} — skipping modify, triggering exit")
                     self.place_exit(underlying, "broker_sl_filled_on_modify", slot_id=pos.slot_id)
                     return False
         except Exception as _pre_exc: err(f"[ORDER] modify_broker_sl pre-check error for {underlying}: ", _pre_exc)
@@ -6433,10 +6433,10 @@ class OrderManager:
                 trigger_price=new_trigger,
             )
             if isinstance(resp, dict) and resp.get("status") == "success":
-                inf(f"[ORDER] Broker SL modified for {underlying} → trigger ₹{new_trigger:.2f}")
+                dbg(f"[ORDER] Broker SL modified for {underlying} → trigger ₹{new_trigger:.2f}")
                 return True
             else:
-                inf(f"[ORDER] modifyorder resp for {underlying}: {resp}")
+                dbg(f"[ORDER] modifyorder resp for {underlying}: {resp}")
                 # TOCTOU guard: modify may have failed because SL filled in the
                 # window between pre-check and modifyorder. Re-query immediately.
                 try:
@@ -6446,7 +6446,7 @@ class OrderManager:
                     if isinstance(post, dict) and post.get("status") == "success":
                         _post_data = post.get("data") or post
                         if str(_post_data.get("order_status", "")).lower() in ("complete", "filled", "executed"):
-                            inf(f"[ORDER] SL filled in modify window for {underlying} — triggering exit")
+                            dbg(f"[ORDER] SL filled in modify window for {underlying} — triggering exit")
                             self.place_exit(underlying, "broker_sl_filled_on_modify", slot_id=pos.slot_id)
                 except Exception:
                     pass
@@ -6461,7 +6461,7 @@ class OrderManager:
                 if isinstance(post, dict) and post.get("status") == "success":
                     _post_data = post.get("data") or post
                     if str(_post_data.get("order_status", "")).lower() in ("complete", "filled", "executed"):
-                        inf(f"[ORDER] SL filled in modify window (exc) for {underlying} — triggering exit")
+                        dbg(f"[ORDER] SL filled in modify window (exc) for {underlying} — triggering exit")
                         self.place_exit(underlying, "broker_sl_filled_on_modify", slot_id=pos.slot_id)
             except Exception:
                 pass
@@ -6526,14 +6526,14 @@ class OrderManager:
             pos.exit_pending = True
             with self._state.exit_lock:
                 self._state.exit_queue.add(pos.slot_id)
-        inf(f"[ORDER] Broker {attr_name} filled for {underlying} ({oid})")
+        dbg(f"[ORDER] Broker {attr_name} filled for {underlying} ({oid})")
 
         # Cancel opposite leg
         other_oid = pos.tgt_order_id if attr_name == "sl_order_id" else pos.sl_order_id
         other_name = "tgt_order_id" if attr_name == "sl_order_id" else "sl_order_id"
         if other_oid:
             try:
-                inf(f"[ORDER] Cancelling opposite broker order {other_name} ({other_oid})...")
+                dbg(f"[ORDER] Cancelling opposite broker order {other_name} ({other_oid})...")
                 self.client.cancelorder(order_id=other_oid, strategy=self.config.broker.strategy_name)
             except Exception as c_exc: err(f"[ORDER] Cancel opposite broker order error {other_name} ({other_oid}): ", c_exc)
 
@@ -6673,7 +6673,7 @@ class OrderManager:
             broker_stat = str(data.get("order_status", "")).lower()
             if broker_stat in ("cancelled", "rejected", "canceled", "expired"):
                 tag = f"t={tr.tranche_id} " if tr else ""
-                inf(f"[ORDER] {label} ORDER MISSING for {underlying} {tag}(status={broker_stat}) — re-issuing")
+                dbg(f"[ORDER] {label} ORDER MISSING for {underlying} {tag}(status={broker_stat}) — re-issuing")
                 if tr:
                     setattr(tr, attr, None)
                 else:
@@ -6817,12 +6817,12 @@ class OrderManager:
             if isinstance(basket_resp, dict) and basket_resp.get("status") == "success":
                 results = basket_resp.get("results", [])
                 if len(results) != len(basket_orders):
-                    inf(f"[ORDER] Basket result count mismatch for {underlying}: "
+                    dbg(f"[ORDER] Basket result count mismatch for {underlying}: "
                         f"sent {len(basket_orders)}, got {len(results)} — falling back to sequential")
                 else:
                     for i, leg in enumerate(results):
                         if leg.get("status") != "success" or not leg.get("orderid"):
-                            inf(f"[ORDER] Basket leg {i} rejected for {underlying}: {leg}")
+                            dbg(f"[ORDER] Basket leg {i} rejected for {underlying}: {leg}")
                             continue
                         # NOTE: basketorder's response schema has no field identifying leg type
                         # (confirmed against openalgo SDK source) — position in `results` is
@@ -6830,16 +6830,16 @@ class OrderManager:
                         is_sl = (i == 0)
                         if is_sl:
                             pos.sl_order_id = leg.get("orderid")
-                            inf(f"[ORDER] Basket SL-M placed for {underlying}: trigger ₹{sl:.2f} (id:{pos.sl_order_id})")
+                            dbg(f"[ORDER] Basket SL-M placed for {underlying}: trigger ₹{sl:.2f} (id:{pos.sl_order_id})")
                         else:
                             pos.tgt_order_id = leg.get("orderid")
-                            inf(f"[ORDER] Basket LIMIT placed for {underlying}: ₹{tgt:.2f} (id:{pos.tgt_order_id})")
+                            dbg(f"[ORDER] Basket LIMIT placed for {underlying}: ₹{tgt:.2f} (id:{pos.tgt_order_id})")
 
                     if pos.sl_order_id and pos.tgt_order_id:
                         return
         except Exception as exc: err(f"[ORDER] Basket order error for {underlying}: ", exc)
 
-        inf(f"[ORDER] Falling back to sequential protective orders for {underlying}...")
+        dbg(f"[ORDER] Falling back to sequential protective orders for {underlying}...")
         self._place_protection_orders_sequential(underlying, pos, option_symbol, qty, sl, tgt)
 
     def _place_protection_orders_sequential(
@@ -6870,7 +6870,7 @@ class OrderManager:
                     )
                     if isinstance(sl_resp, dict) and sl_resp.get("status") == "success":
                         pos.sl_order_id = sl_resp.get("orderid")
-                        inf(f"[ORDER] Broker SL-M placed for {underlying}: trigger ₹{sl:.2f} (id:{pos.sl_order_id})")
+                        dbg(f"[ORDER] Broker SL-M placed for {underlying}: trigger ₹{sl:.2f} (id:{pos.sl_order_id})")
                 except Exception as exc: err(f"[ORDER] Broker SL-M error for {underlying}: ", exc)
 
             if not pos.tgt_order_id:
@@ -6887,7 +6887,7 @@ class OrderManager:
                     )
                     if isinstance(tgt_resp, dict) and tgt_resp.get("status") == "success":
                         pos.tgt_order_id = tgt_resp.get("orderid")
-                        inf(f"[ORDER] Broker LIMIT placed for {underlying}: ₹{tgt:.2f} (id:{pos.tgt_order_id})")
+                        dbg(f"[ORDER] Broker LIMIT placed for {underlying}: ₹{tgt:.2f} (id:{pos.tgt_order_id})")
                 except Exception as exc: err(f"[ORDER] Broker LIMIT target error for {underlying}: ", exc)
         else:
             # ── Multi-tranche: each tranche gets its own orders ──────────────
@@ -6910,7 +6910,7 @@ class OrderManager:
                             )
                             if isinstance(sl_resp, dict) and sl_resp.get("status") == "success":
                                 tr.sl_order_id = sl_resp.get("orderid")
-                                inf(f"[ORDER] Broker SL-M placed for {underlying} t={tr.tranche_id}: trigger ₹{sl:.2f} (id:{tr.sl_order_id})")
+                                dbg(f"[ORDER] Broker SL-M placed for {underlying} t={tr.tranche_id}: trigger ₹{sl:.2f} (id:{tr.sl_order_id})")
                         except Exception as exc: err(f"[ORDER] Broker SL-M error for {underlying} t={tr.tranche_id}: ", exc)
                 if not tr.tgt_order_id:
                     _tgt_price = tr.tp_pts if tr.tp_pts is not None else tgt
@@ -6927,7 +6927,7 @@ class OrderManager:
                         )
                         if isinstance(tgt_resp, dict) and tgt_resp.get("status") == "success":
                             tr.tgt_order_id = tgt_resp.get("orderid")
-                            inf(f"[ORDER] Broker LIMIT placed for {underlying} t={tr.tranche_id}: ₹{_tgt_price:.2f} (id:{tr.tgt_order_id})")
+                            dbg(f"[ORDER] Broker LIMIT placed for {underlying} t={tr.tranche_id}: ₹{_tgt_price:.2f} (id:{tr.tgt_order_id})")
                     except Exception as exc: err(f"[ORDER] Broker LIMIT target error for {underlying} t={tr.tranche_id}: ", exc)
 
     # ── Trade Journal ──────────────────────────────────────────────────────────
@@ -6971,7 +6971,7 @@ class OrderManager:
         resolved_sl_pts = sl_pts if (sl_pts is not None and sl_pts > 0) else cfg.entry.premium_stop_pts
         allowed, reason = self._state.position_book.can_enter(underlying, direction, cfg)
         if not allowed:
-            inf(f"[ORDER] {underlying} blocked by position guard: {reason}")
+            dbg(f"[ORDER] {underlying} blocked by position guard: {reason}")
             return False
 
         if cfg.broker.paper_trade:
@@ -7015,7 +7015,7 @@ class OrderManager:
                             )
                             return False
 
-            inf(f"[ORDER] Calling placeorder for {underlying}...")
+            dbg(f"[ORDER] Calling placeorder for {underlying}...")
             resp = self.client.placeorder(
                 strategy=cfg.broker.strategy_name,
                 symbol=option_symbol,
@@ -7025,15 +7025,15 @@ class OrderManager:
                 product="MIS",
                 quantity=qty,
             )
-            inf(f"[ORDER] placeorder returned for {underlying}")
+            dbg(f"[ORDER] placeorder returned for {underlying}")
             if not isinstance(resp, dict) or resp.get("status") != "success":
-                inf(f"[ORDER] Entry order rejected for {underlying}: {resp}")
+                dbg(f"[ORDER] Entry order rejected for {underlying}: {resp}")
                 return False
             order_id: str | None = resp.get("orderid")
             if not order_id:
                 err(f"[ORDER] {underlying}: place_order returned no orderid — abandoning entry")
                 return False
-            inf(f"[ORDER] Entry order {order_id} placed for {underlying} ({option_symbol} x{qty})")
+            dbg(f"[ORDER] Entry order {order_id} placed for {underlying} ({option_symbol} x{qty})")
 
             # Add to pending entries for reconciliation
             pending_entry = PendingEntry(
@@ -7058,15 +7058,15 @@ class OrderManager:
                 if outcome == "cancelled":
                     with self._state.state_lock:
                         self._state.pending_entries.pop(order_id, None)
-                    inf(f"[ORDER] Entry order {order_id} not filled — cancelled confirmed, removed")
+                    dbg(f"[ORDER] Entry order {order_id} not filled — cancelled confirmed, removed")
                 elif outcome == "reconciled":
                     with self._state.state_lock:
                         self._state.pending_entries.pop(order_id, None)
-                    inf(f"[ORDER] Entry order {order_id} not filled — reconciled via race-fill")
+                    dbg(f"[ORDER] Entry order {order_id} not filled — reconciled via race-fill")
                     return True
                 else:
-                    inf(f"[ORDER] Cannot confirm cancel for {order_id} — keeping pending entry")
-                inf(f"[ORDER] Entry order {order_id} not filled within poll window — abandoning")
+                    dbg(f"[ORDER] Cannot confirm cancel for {order_id} — keeping pending entry")
+                dbg(f"[ORDER] Entry order {order_id} not filled within poll window — abandoning")
                 return False
 
             data       = filled.get("data") or filled
@@ -7074,7 +7074,7 @@ class OrderManager:
             if not executed:
                 executed = float(data.get("price", 0) or 0)
             if not executed:
-                inf(f"[ORDER] Executed price is zero for {order_id} — cannot register position")
+                dbg(f"[ORDER] Executed price is zero for {order_id} — cannot register position")
                 return False
 
             filled_qty = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
@@ -7082,14 +7082,14 @@ class OrderManager:
                 outcome = self._cancel_three_outcome(order_id, pending_entry)
                 if outcome == "cancelled":
                     qty = filled_qty
-                    inf(f"[ORDER] Partial fill accepted: {filled_qty} (residual cancelled)")
+                    dbg(f"[ORDER] Partial fill accepted: {filled_qty} (residual cancelled)")
                 elif outcome == "reconciled":
                     with self._state.state_lock:
                         self._state.pending_entries.pop(order_id, None)
-                    inf(f"[ORDER] Partial fill reconciled by cancel-race for {order_id}")
+                    dbg(f"[ORDER] Partial fill reconciled by cancel-race for {order_id}")
                     return True
                 else:
-                    inf(f"[ORDER] Cannot confirm residual for {order_id} — keeping pending entry")
+                    dbg(f"[ORDER] Cannot confirm residual for {order_id} — keeping pending entry")
                     return False
             with self._state.state_lock:
                 self._state.pending_entries.pop(order_id, None)
@@ -7134,7 +7134,7 @@ class OrderManager:
                                 self.client.cancelorder(order_id=oid, strategy=cfg.broker.strategy_name)
                             except Exception as exc:
                                 err(f"[ORDER] Cancel {attr_name} error for {underlying} t={tr.tranche_id}: ", exc)
-                    inf(f"[ORDER] Tranche exit SELL {_pending_oid} complete for {underlying} t={tr.tranche_id}")
+                    dbg(f"[ORDER] Tranche exit SELL {_pending_oid} complete for {underlying} t={tr.tranche_id}")
                 elif bs in ("cancelled", "canceled", "rejected") and ep > 0:
                     use_qty = fq_raw if fq_raw > 0 else tr.qty
                     with self._pending_tranche_exits_lock:
@@ -7150,15 +7150,15 @@ class OrderManager:
                             underlying, pos, pos.symbol, pos.remaining_qty,
                             pos.sl, pos.tgt,
                         )
-                    inf(f"[ORDER] Tranche exit SELL {_pending_oid} partially filled {fq_raw} — protection re-placed for residual")
+                    dbg(f"[ORDER] Tranche exit SELL {_pending_oid} partially filled {fq_raw} — protection re-placed for residual")
                 elif bs in ("cancelled", "canceled", "rejected"):
                     with self._pending_tranche_exits_lock:
                         self._pending_tranche_exits.pop(_tranche_key, None)
-                    inf(f"[ORDER] Tranche exit SELL {_pending_oid} unreported — protection left active")
+                    dbg(f"[ORDER] Tranche exit SELL {_pending_oid} unreported — protection left active")
                 else:
-                    inf(f"[ORDER] Tranche exit SELL {_pending_oid} status {bs} — still pending")
+                    dbg(f"[ORDER] Tranche exit SELL {_pending_oid} status {bs} — still pending")
             else:
-                inf(f"[ORDER] Tranche exit SELL {_pending_oid} status check failed — will retry")
+                dbg(f"[ORDER] Tranche exit SELL {_pending_oid} status check failed — will retry")
             return
         if cfg.broker.paper_trade:
             executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
@@ -7166,7 +7166,7 @@ class OrderManager:
             tr.exit_reason = reason
             tr.exit_price = executed_price
             pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
-            inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
+            dbg(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
                 f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
             self._risk.record_exit(pnl)
             _pts_loss = max(0.0, pos.entry_premium - executed_price)
@@ -7191,13 +7191,13 @@ class OrderManager:
             )
             if isinstance(resp, dict) and resp.get("status") == "success":
                 order_id = resp.get("orderid")
-                inf(f"[ORDER] Partial exit order {order_id} placed for {underlying} t={tr.tranche_id}")
+                dbg(f"[ORDER] Partial exit order {order_id} placed for {underlying} t={tr.tranche_id}")
             else:
-                inf(f"[ORDER] Partial exit order response: {resp}")
+                dbg(f"[ORDER] Partial exit order response: {resp}")
         except Exception as exc:
             err(f"[ORDER] Partial exit error for {underlying} t={tr.tranche_id}: ", exc)
         if order_id is None:
-            inf(f"[ORDER] Partial exit SELL failed for {underlying} t={tr.tranche_id} — protection remains active")
+            dbg(f"[ORDER] Partial exit SELL failed for {underlying} t={tr.tranche_id} — protection remains active")
             return
         # Register in-flight before poll so place_exit sees it (F-A1)
         with self._pending_tranche_exits_lock:
@@ -7220,7 +7220,7 @@ class OrderManager:
                 tr.exit_reason = reason
                 tr.exit_price = executed_price
                 pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
-                inf(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
+                dbg(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
                     f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
                 self._risk.record_exit(pnl)
                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
@@ -7232,7 +7232,7 @@ class OrderManager:
                 self._journal.write(tr_exit_record)
                 return
         # Fill unconfirmed — entry already in _pending_tranche_exits, stays for reconciliation
-        inf(f"[ORDER] Partial exit SELL unconfirmed for {underlying} t={tr.tranche_id} — saved for reconciliation")
+        dbg(f"[ORDER] Partial exit SELL unconfirmed for {underlying} t={tr.tranche_id} — saved for reconciliation")
 
     def _sellable_qty(self, pos: OptionPosition) -> int:
         """remaining_qty minus any in-flight tranche exits for this position (F-A1)."""
@@ -7255,7 +7255,7 @@ class OrderManager:
         _advance_stage(pos, LifecycleStage.EXIT_PENDING)
         # Normalize exit reason to enum for consistent attribution
         norm_reason = ExitReason.normalize(reason)
-        inf(f"[ORDER] Exiting {underlying} — reason: {reason} → {norm_reason}")
+        dbg(f"[ORDER] Exiting {underlying} — reason: {reason} → {norm_reason}")
 
         if cfg.broker.paper_trade:
             executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
@@ -7296,7 +7296,7 @@ class OrderManager:
             for attr_name, info in broker_filled.items():
                 if isinstance(info, dict) and info.get("order_status") in ("complete", "filled", "executed"):
                     executed_price = info.get("executed", 0)
-                    inf(f"[ORDER] Broker {attr_name} already filled at ₹{executed_price:.2f} — skipping SELL")
+                    dbg(f"[ORDER] Broker {attr_name} already filled at ₹{executed_price:.2f} — skipping SELL")
                     pnl = _calc_pnl(pos, float(executed_price))
                     self._finalize_exit(underlying, pos, float(executed_price), pnl, norm_reason,
                                         exit_price_source="broker_fill")
@@ -7319,7 +7319,7 @@ class OrderManager:
                             paper_trade=cfg.broker.paper_trade,
                         )
                         self._journal.write(tr_exit_record)
-                        inf(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — P&L ₹{tr_pnl:.0f}")
+                        dbg(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — P&L ₹{tr_pnl:.0f}")
             if pos.remaining_qty == 0:
                 # All tranches exited via broker fills — cleanup without _finalize_exit
                 # to avoid double-recording P&L and duplicate full-exit journal row
@@ -7339,7 +7339,7 @@ class OrderManager:
         # F-A1: don't oversell — in-flight tranche exits may already be covering remaining qty
         sellable_qty = self._sellable_qty(pos)
         if sellable_qty <= 0:
-            inf(f"[ORDER] Exit skipped for {underlying} — all qty covered by in-flight tranche exits")
+            dbg(f"[ORDER] Exit skipped for {underlying} — all qty covered by in-flight tranche exits")
             with self._state.exit_lock:
                 self._state.exit_queue.discard(pos.slot_id)
             pos.exit_pending = False
@@ -7359,9 +7359,9 @@ class OrderManager:
             )
             if isinstance(resp, dict) and resp.get("status") == "success":
                 order_id = resp.get("orderid")
-                inf(f"[ORDER] Exit order {order_id} placed for {underlying}")
+                dbg(f"[ORDER] Exit order {order_id} placed for {underlying}")
             else:
-                inf(f"[ORDER] Exit order response: {resp}")
+                dbg(f"[ORDER] Exit order response: {resp}")
         except Exception as exc: err(f"[ORDER] place_exit error for {underlying}: ", exc)
 
         if order_id is None:
@@ -7393,7 +7393,7 @@ class OrderManager:
 
             # Order was not submitted — safe to release exit lock so the next SL
             # trigger from the WS trail can retry the exit on the next tick.
-            inf(f"[ORDER] Exit order not submitted for {underlying} — releasing for retry")
+            dbg(f"[ORDER] Exit order not submitted for {underlying} — releasing for retry")
             with self._state.exit_lock:
                 self._state.exit_queue.discard(pos.slot_id)
             pos.exit_pending = False
