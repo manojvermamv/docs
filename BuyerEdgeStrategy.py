@@ -192,6 +192,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F76 ✓ Fixed: REST API filled_quantity empty for 27+ brokers — six call sites with fq>0 guard silently skipped order confirmation. Fixed by substituting pending.qty in cancellation paths and avg_price>0 as primary exit-fill signal.
 #
 # F77 ✓ Fixed: Order-stream dispatcher only handled entry completions — LIMIT fills, SL-M triggers, and exit completions silently dropped. Fixed with 4-priority universal dispatch covering pending_entries, pending_exits, protection-fill immediate action, and shadow inf().
+#
+# F81 ✓ Fixed: Entry-flow placeorder() network exception — broker may have landed the order despite client-side failure. Fixed with _reconcile_lost_placeorder() that checks orderbook() for an unambiguous matching order (same symbol, action, qty, within 60s window, not in known_order_ids). Only covers the entry _place_entry_order call site (the path F81 was traced through). Same blind spot exists at protective-order (SL/TGT), partial-exit, and full-exit placeorder() calls — those remain exposed but were out of scope for this finding's evidence.
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -6077,6 +6079,48 @@ class OrderManager:
             self._known_order_ids = self._load_known_order_ids()
         return self._known_order_ids
 
+    def _reconcile_lost_placeorder(
+        self, symbol: str, action: str, qty: int, window_secs: int = 60
+    ) -> str | None:
+        """F81: placeorder() raised before a response was received — the broker may
+        have processed the order anyway. Check orderbook() for a recent order
+        matching (symbol, action, quantity) that isn't already in known_order_ids.
+        Only recovers on exactly one unambiguous match — orderbook() is account-wide
+        and unfiltered, so 0 or 2+ matches are treated as unrecoverable, not guessed.
+        """
+        try:
+            resp = self.client.orderbook(strategy=self.config.broker.strategy_name)
+            data = resp.get("data", {}) if isinstance(resp, dict) else {}
+            orders = data.get("orders", []) if isinstance(data, dict) else []
+        except Exception as exc:
+            err("[ORDER] F81 reconcile: orderbook() lookup failed", exc)
+            return None
+        cutoff = get_ist_now() - timedelta(seconds=window_secs)
+        known = self.known_order_ids
+        candidates = []
+        for o in orders:
+            if o.get("symbol") != symbol or str(o.get("action", "")).upper() != action:
+                continue
+            if int(o.get("quantity", 0) or 0) != qty:
+                continue
+            oid = o.get("orderid")
+            if not oid or oid in known:
+                continue
+            try:
+                ts = datetime.strptime(str(o.get("timestamp", "")), "%d-%b-%Y %H:%M:%S")
+            except Exception:
+                continue
+            if ts >= cutoff:
+                candidates.append(oid)
+        if len(candidates) == 1:
+            inf(f"[ORDER] F81 reconcile: recovered order {candidates[0]} for {symbol} "
+                f"after placeorder() network error")
+            return candidates[0]
+        if len(candidates) > 1:
+            err(f"[ORDER] F81 reconcile: {len(candidates)} ambiguous candidates for {symbol} "
+                f"— cannot safely recover, treating as failed", None)
+        return None
+
     def _cancel_three_outcome(self, order_id: str, pending: PendingEntry | None = None) -> str:
         """Cancel order_id and determine terminal disposition.
         
@@ -7061,15 +7105,23 @@ class OrderManager:
                             return False
 
             dbg(f"[ORDER] Calling placeorder for {underlying}...")
-            resp = self.client.placeorder(
-                strategy=cfg.broker.strategy_name,
-                symbol=option_symbol,
-                action="BUY",
-                exchange=cfg.market.fno_exchange,
-                price_type="MARKET",
-                product="MIS",
-                quantity=qty,
-            )
+            try:
+                resp = self.client.placeorder(
+                    strategy=cfg.broker.strategy_name,
+                    symbol=option_symbol,
+                    action="BUY",
+                    exchange=cfg.market.fno_exchange,
+                    price_type="MARKET",
+                    product="MIS",
+                    quantity=qty,
+                )
+            except Exception as _po_exc:
+                err(f"[ORDER] placeorder() network error for {underlying} — "
+                    f"checking if broker landed it anyway", _po_exc)
+                recovered_id = self._reconcile_lost_placeorder(option_symbol, "BUY", qty)
+                if not recovered_id:
+                    return False
+                resp = {"status": "success", "orderid": recovered_id}
             dbg(f"[ORDER] placeorder returned for {underlying}")
             if not isinstance(resp, dict) or resp.get("status") != "success":
                 dbg(f"[ORDER] Entry order rejected for {underlying}: {resp}")
