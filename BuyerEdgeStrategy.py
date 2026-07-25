@@ -1780,7 +1780,11 @@ class OptionPosition:
     @property
     def exit_pending(self) -> bool: return self.broker.exit_pending
     @exit_pending.setter
-    def exit_pending(self, val): self.broker.exit_pending = val
+    def exit_pending(self, val):
+        self.broker.exit_pending = val
+        self.broker.exit_pending_since = get_ist_now() if val else None
+    @property
+    def exit_pending_since(self): return self.broker.exit_pending_since
     # TrailState
     @property
     def sl(self) -> float: return self.trail.sl
@@ -6410,27 +6414,33 @@ class OrderManager:
                 oid = getattr(tr, attr_name, None)
                 if not oid:
                     continue
-                try:
-                    resp = self.client.orderstatus(
-                        order_id=oid, strategy=self.config.broker.strategy_name
-                    )
-                    if isinstance(resp, dict) and resp.get("status") == "success":
-                        data = resp.get("data") or resp
-                        broker_stat = str(data.get("order_status", "")).lower()
-                        dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
-                        # Race: fill arrived between pre-check and cancel.
-                        key = f"{tr.tranche_id}_{attr_name}"
-                        if broker_stat in ("complete", "filled", "executed") and key not in broker_filled:
-                            executed_price = float(data.get("average_price", 0) or 0)
-                            broker_filled[key] = {
-                                "order_id":    oid,
-                                "executed":    executed_price,
-                                "order_status": broker_stat,
-                                "tranche_id":  tr.tranche_id,
-                            }
-                            dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled for {underlying} t={tr.tranche_id}: {oid} @ {executed_price}")
-                except Exception as exc:
-                    err(f"[ORDER] Post-cancel check error {oid}: ", exc)
+                broker_stat = None
+                data = {}
+                for attempt in range(2):
+                    try:
+                        resp = self.client.orderstatus(
+                            order_id=oid, strategy=self.config.broker.strategy_name
+                        )
+                        if isinstance(resp, dict) and resp.get("status") == "success":
+                            data = resp.get("data") or resp
+                            broker_stat = str(data.get("order_status", "")).lower()
+                            break
+                    except Exception as exc:
+                        err(f"[ORDER] Post-cancel check error (attempt {attempt+1}) {oid}: ", exc)
+                    if attempt == 0:
+                        time.sleep(0.3)
+                if broker_stat is not None:
+                    dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
+                    key = f"{tr.tranche_id}_{attr_name}"
+                    if broker_stat in ("complete", "filled", "executed") and key not in broker_filled:
+                        executed_price = float(data.get("average_price", 0) or 0)
+                        broker_filled[key] = {
+                            "order_id":    oid,
+                            "executed":    executed_price,
+                            "order_status": broker_stat,
+                            "tranche_id":  tr.tranche_id,
+                        }
+                        dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled for {underlying} t={tr.tranche_id}: {oid} @ {executed_price}")
                 setattr(tr, attr_name, None)
         pos.sl_order_id = None  # F62: clear flat alias — per-tranche loop clears tr.sl_order_id, but pos.sl_order_id (direct broker field, not a property delegation) would remain stale for multi-tranche positions that survived restart
         return broker_filled
