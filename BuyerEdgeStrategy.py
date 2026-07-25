@@ -8245,6 +8245,38 @@ class OptionsBuyerEdgeBot:
                 
         except Exception as exc: err(f"[PNL REPORT] Error checking active PNL: ", exc)
 
+    def _check_naked_shorts(self) -> None:
+        if self.config.broker.paper_trade or not hasattr(self.client, "positionbook"):
+            return
+        try:
+            resp = self.client.positionbook()
+            if not isinstance(resp, dict) or resp.get("status") != "success":
+                return
+            data = resp.get("data", []) or []
+            current_shorts: set[str] = set()
+            for p in data:
+                qty = int(p.get("quantity", 0) or 0)
+                if qty >= 0:
+                    continue
+                sym = p.get("symbol", "unknown")
+                avg = float(p.get("average_price", 0) or 0)
+                current_shorts.add(sym)
+                if sym in self._naked_short_alerted:
+                    continue
+                self._naked_short_alerted.add(sym)
+                tracked = any(pos.symbol == sym for pos in self.state.positions.all_positions())
+                err(f"[SAFETY] NAKED SHORT DETECTED: {sym} qty={qty} @ \u20b9{avg:.2f} tracked_by_strategy={tracked}")
+                self._notify(
+                    f"\U0001f6a8\U0001f6a8 NAKED SHORT DETECTED \U0001f6a8\U0001f6a8\n"
+                    f"{sym}  qty={qty} @ \u20b9{avg:.2f}\n"
+                    f"Strategy tracking this symbol: {'yes' if tracked else 'NO — untracked'}\n"
+                    f"Not auto-corrected — square off at the broker manually.",
+                    10,
+                )
+            self._naked_short_alerted &= current_shorts
+        except Exception as exc:
+            err(f"[SAFETY] naked-short check error: ", exc)
+
     def _is_market_hours(self) -> bool:
         hm = int(get_ist_now().strftime("%H%M"))
         return MARKET_HOURS_START <= hm <= MARKET_HOURS_END
