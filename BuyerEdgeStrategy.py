@@ -3621,7 +3621,7 @@ class SignalEngine:
                                 1.0 - abs(slow_norm) * cfg.signal.slow_disagree_weight)
 
         _disagree = "DISAGREE" if confirm_mult < 1.0 else "AGREE"
-        inf(f"[S3] fast={fast_raw:.1f}/{FAST_MAX} norm={fast_norm:.3f} "
+        inf(f"[SCORE] fast={fast_raw:.1f}/{FAST_MAX} norm={fast_norm:.3f} "
             f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} "
             f"({_disagree}) → raw={fast_raw * confirm_mult:.1f}")
 
