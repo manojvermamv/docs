@@ -195,9 +195,9 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # F81 ✓ Fixed: Entry-flow placeorder() network exception — broker may have landed the order despite client-side failure. Fixed with _reconcile_lost_placeorder() that checks orderbook() for an unambiguous matching order (same symbol, action, qty, within 60s window, not in known_order_ids). Only covers the entry _place_entry_order call site (the path F81 was traced through). Same blind spot exists at protective-order (SL/TGT), partial-exit, and full-exit placeorder() calls — those remain exposed but were out of scope for this finding's evidence.
 #
-# F82 ✓ Fixed: RVOL_SIMPLE tier mislabelled as "fast" (options-statistical) when spot-volume-based — now "slow" (technical-trend). Latent (score_max=0, shadow mode only) but would have silently scored on wrong tier if activated without review.
+# F82 ⬇ Identified: RVOL_SIMPLE tier is "fast" but spot-volume-based (Layer 1 = "slow" by file's own taxonomy). Latent (score_max=0). Code retains "fast" — no behavioral impact until activated.
 #
-# F83 ✓ Fixed: MAX_RAW_SCORE ceiling restored to FAST_MAX + SLOW_MAX after slow tier became a multiplier — effective ceiling was FAST_MAX alone, causing final_score to cap ~82 instead of 100, making min_score thresholds above that silently unreachable. Fixed to MAX_RAW_SCORE = FAST_MAX.
+# F83 ⬇ Identified: MAX_RAW_SCORE = FAST_MAX + SLOW_MAX while slow tier is a multiplier (not points) — effective ceiling is FAST_MAX, causing final_score to cap ~82 instead of 100. Code retains original formula pending review of calibration approach.
 #
 # F84 ✓ Fixed: _known_order_ids (set) accessed from strategy thread and exit-executor pool — race could lose entries. Fixed with _known_order_ids_lock and double-checked locking in property getter.
 
