@@ -5503,7 +5503,7 @@ class WebSocketManager:
         self._raw_cb_count: int = 0
         self._tick_counts: dict[str, int] = {}
         self._spot_tick_counts: dict[str, int] = {}
-        self._order_event_queue: queue.Queue[dict] = queue.Queue()
+        self._order_event_queue: queue.Queue[dict] = queue.Queue(maxsize=500)
 
     def set_fetcher(self, fetcher: DataFetcher) -> None:
         """Set DataFetcher reference to consolidate greeks API calls."""
@@ -5833,11 +5833,17 @@ class WebSocketManager:
                 _actual_url = getattr(self.client, 'ws_url', ws_url)
                 inf(f"[WS] Client connects using {_actual_url} (expected {ws_url})")
                 if ok:
-                    if not is_first_connect:
+                    was_reconnect = not is_first_connect
+                    if was_reconnect:
                         self._reconnect_count += 1
                     is_first_connect = False
                     self._ws_connected = True
                     inf(f"[WS] Connected to {_actual_url} — SDK managing reconnects automatically")
+                    if was_reconnect:
+                        inf(f"[ORDER-STREAM] Reconnected after gap (reconnect #{self._reconnect_count}) — "
+                            f"events missed during the outage are still covered by the next "
+                            f"check_pending_entries/check_pending_exits/check_broker_order_fills scan cycle; "
+                            f"only the sub-5s protective-fill fast-path was unavailable during the gap")
                     backoff_secs = 5  # Reset backoff on successful connect
                     consecutive_failures = 0
                     # ── Diff-based subscription reconciliation ──────────────────────────────
@@ -5876,10 +5882,10 @@ class WebSocketManager:
                             if sent:
                                 inf("[ORDER-STREAM] Subscribed to account-level order updates — broker push events will be processed")
                             else:
-                                err("[ORDER-STREAM] subscribe_orders() returned False — platform does not advertise 'orders' in supported_features. "
-                                    "Continuing on polling only.", None)
+                                inf("[ORDER-STREAM] subscribe_orders() returned False — platform does not advertise 'orders' in supported_features. "
+                                    "Continuing on polling only.")
                         except Exception as _os_exc:
-                            err("[ORDER-STREAM] subscribe_orders() raised exception — continuing on polling only", _os_exc)
+                            inf(f"[ORDER-STREAM] subscribe_orders() raised exception — continuing on polling only: {_os_exc}")
                     else:
                         dbg("[ORDER-STREAM] order_stream_enabled=False — subscribe_orders() skipped. "
                             "All order-status updates via REST polling.")
@@ -7761,6 +7767,7 @@ class OptionsBuyerEdgeBot:
                 if filled_qty > 0 and avg_price > 0:
                     inf(f"[ORDER-STREAM] Confirmed fill for {order_id}: "
                         f"qty={filled_qty} @ {avg_price} — completing entry immediately")
+                    self.risk.record_entry(pending.underlying)
                     self.orders.register_filled_entry(
                         pending.underlying, pending.symbol, filled_qty,
                         pending.spot, pending.direction, avg_price,
