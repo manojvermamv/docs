@@ -7898,21 +7898,34 @@ class OptionsBuyerEdgeBot:
                     pos_symbols.add(sym)
 
             orphan_orders_cancelled = 0
+            orphan_orders_skipped = 0
+            known_ids = self.orders.known_order_ids
+            if not known_ids:
+                inf("[STARTUP] Known order ID record is empty — no orders placed since F80 "
+                    "patch. Genuine orphans from before this deploy may need manual cleanup.")
             for order in open_orders:
                 o_sym = order.get("symbol", "")
                 o_stat = str(order.get("order_status", "")).lower()
                 if o_sym and o_sym not in pos_symbols and o_stat in ("pending", "open"):
                     oid = order.get("orderid")
-                    if oid:
-                        try:
-                            resp_c = self.client.cancelorder(order_id=oid, strategy=cfg.broker.strategy_name)
-                            if isinstance(resp_c, dict) and resp_c.get("status") in ("success", "cancelled"):
-                                orphan_orders_cancelled += 1
-                                inf(f"[STARTUP] Cancelled orphan order {oid} for {o_sym}")
-                        except Exception:
-                            pass
+                    if not oid:
+                        continue
+                    if oid not in known_ids:
+                        orphan_orders_skipped += 1
+                        inf(f"[STARTUP] Unrecognized order {oid} for {o_sym} — "
+                            f"not in local order history, skipping cancellation for safety")
+                        continue
+                    try:
+                        resp_c = self.client.cancelorder(order_id=oid, strategy=cfg.broker.strategy_name)
+                        if isinstance(resp_c, dict) and resp_c.get("status") in ("success", "cancelled"):
+                            orphan_orders_cancelled += 1
+                            inf(f"[STARTUP] Cancelled orphan order {oid} for {o_sym}")
+                    except Exception:
+                        pass
             if orphan_orders_cancelled:
                 inf(f"[STARTUP] Cancelled {orphan_orders_cancelled} orphan order(s)")
+            if orphan_orders_skipped:
+                inf(f"[STARTUP] Skipped {orphan_orders_skipped} unrecognized order(s) (not in local history)")
 
             # ── Restore positions ──────────────────────────────────
             for p in positions:
@@ -8214,6 +8227,8 @@ class OptionsBuyerEdgeBot:
         inf(f"  Max Hold Time   : {'disabled' if cfg.market.max_hold_minutes <= 0 else f'{cfg.market.max_hold_minutes}m per trade'}")
         if cfg.journal.trade_journal_path:
             inf(f"  Trade Journal   : {os.path.abspath(cfg.journal.trade_journal_path)}")
+        if cfg.journal.known_order_ids_path:
+            inf(f"  Known Order IDs : {os.path.abspath(cfg.journal.known_order_ids_path)}")
         if cfg.broker.paper_trade:
             inf(f"\n  *** PAPER TRADE MODE — no real orders will be sent ***")
         inf("=" * 70)
