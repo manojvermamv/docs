@@ -6062,7 +6062,6 @@ class OrderManager:
                 data: dict = json.load(f)
         except Exception:
             return set()
-        from datetime import datetime, timedelta
         cutoff = datetime.now() - timedelta(days=14)
         pruned = set()
         for oid, ts in data.items():
