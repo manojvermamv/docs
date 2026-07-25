@@ -3625,16 +3625,9 @@ class SignalEngine:
             f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} "
             f"({_disagree}) → raw={fast_raw * confirm_mult:.1f}")
 
-        # NOTE — scale shift vs. the old flat-sum formula: the denominator is now
-        # FAST_MAX (14) instead of the old flat-sum total (17, fast+slow combined).
-        # For the same fast-tier conditions this produces a systematically higher
-        # base_score than before (~17/14 ≈ 1.21x). Recalibrate cfg.entry.min_score /
-        # PRACTICAL_ALIGNMENT_FACTOR before relying on this in live trading (Step 5) —
-        # this scale shift is a direct, known consequence of Step 3, not a bug.
-        # Fast-tier total: PCR(1)+CE-flow(2)+PE-flow(2)+Wall(1)+Delta(1)+Gamma(2)
-        # +OI-vel(1)+IV(1)+Straddle(2)+SF(1) = 14. Slow-tier (now a multiplier,
-        # not points): EMA(1)+RSI(1)+VWAP(1) = 3.
-        MAX_RAW_SCORE = FAST_MAX
+        # Step 3 made slow a multiplier (not points), shrinking the effective max
+        # from 17 to 14. Restore the ceiling so min_score thresholds stay calibrated.
+        MAX_RAW_SCORE = FAST_MAX + SLOW_MAX
         raw_score = fast_raw * confirm_mult
 
         # We cap expected alignment to PRACTICAL_ALIGNMENT_FACTOR, so achieving this threshold yields a 100 score.
@@ -6324,6 +6317,16 @@ class OrderManager:
                         data = resp.get("data") or resp
                         broker_stat = str(data.get("order_status", "")).lower()
                         inf(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
+                        # Race: order filled between pre-check and cancel. Record
+                        # it so caller won't place a redundant market SELL.
+                        key = f"{tr.tranche_id}_{attr_name}"
+                        if broker_stat in ("complete", "filled", "executed") and key not in broker_filled:
+                            broker_filled[key] = {
+                                "order_id":    oid,
+                                "executed":    float(data.get("average_price", 0) or 0),
+                                "order_status": broker_stat,
+                                "tranche_id":  tr.tranche_id,
+                            }
                 except Exception as exc:
                     err(f"[ORDER] Post-cancel check error {oid}: ", exc)
                 setattr(tr, attr_name, None)
@@ -6380,6 +6383,13 @@ class OrderManager:
                     data = resp.get("data") or resp
                     broker_stat = str(data.get("order_status", "")).lower()
                     inf(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
+                    # Same race as multi-tranche: fill arrived after pre-check.
+                    if broker_stat in ("complete", "filled", "executed") and attr_name not in broker_filled:
+                        broker_filled[attr_name] = {
+                            "order_id":     oid,
+                            "executed":     float(data.get("average_price", 0) or 0),
+                            "order_status": broker_stat,
+                        }
             except Exception as exc: err(f"[ORDER] Post-cancel check error {oid}: ", exc)
         pos.sl_order_id  = None
         pos.tgt_order_id = None
