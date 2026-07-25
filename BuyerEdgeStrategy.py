@@ -199,7 +199,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # F83 ✓ Fixed: MAX_RAW_SCORE ceiling restored to FAST_MAX + SLOW_MAX after slow tier became a multiplier — effective ceiling was FAST_MAX alone, causing final_score to cap ~82 instead of 100, making min_score thresholds above that silently unreachable. Fixed to MAX_RAW_SCORE = FAST_MAX.
 #
-# F84 ✓ Fixed: _known_order_ids (set) accessed from strategy thread and exit-executor pool — race could lose entries. Fixed via eager init in __init__ (load before any thread starts) instead of lazy-load + lock. GIL protects individual set.add() calls at runtime; file write is best-effort try/except.
+# F84 ✓ Fixed: _known_order_ids (set) accessed from strategy thread and exit-executor pool — race could lose entries. Fixed with _known_order_ids_lock and double-checked locking in property getter.
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -6038,20 +6038,21 @@ class OrderManager:
         self._journal = JournalWriter(self.config.journal.trade_journal_path)
         self._pending_tranche_exits: dict[str, str] = {}  # key=f"{underlying}_{tr.tranche_id}" → order_id
         self._pending_tranche_exits_lock: threading.Lock = threading.Lock()
+        self._known_order_ids_lock: threading.Lock = threading.Lock()
         self._known_order_ids: set[str] = set()
         self._known_order_ids_path = self.config.journal.known_order_ids_path
-        self._known_order_ids = self._load_known_order_ids()
 
     def _record_placed_order_id(self, oid: str | None) -> None:
         """Persist a placed order ID to the local registry (F80: defense-in-depth)."""
         if not oid:
             return
-        self._known_order_ids.add(oid)
-        try:
-            with open(self._known_order_ids_path, 'w') as f:
-                json.dump({oid: get_ist_now().isoformat() for oid in self._known_order_ids}, f)
-        except Exception as exc:
-            err(f"[ORDER] Failed to save known order ID {oid}: ", exc)
+        with self._known_order_ids_lock:
+            self._known_order_ids.add(oid)
+            try:
+                with open(self._known_order_ids_path, 'w') as f:
+                    json.dump({oid: get_ist_now().isoformat() for oid in self._known_order_ids}, f)
+            except Exception as exc:
+                err(f"[ORDER] Failed to save known order ID {oid}: ", exc)
 
     def _load_known_order_ids(self) -> set[str]:
         """Load known order IDs from JSON, prune entries >14 days old."""
@@ -6072,16 +6073,21 @@ class OrderManager:
             except Exception:
                 pruned.add(oid)  # keep on parse failure
         if len(pruned) < len(data):
-            self._known_order_ids = pruned
-            try:
-                with open(path, 'w') as f:
-                    json.dump({oid: get_ist_now().isoformat() for oid in pruned}, f)
-            except Exception:
-                pass
+            with self._known_order_ids_lock:
+                self._known_order_ids = pruned
+                try:
+                    with open(path, 'w') as f:
+                        json.dump({oid: get_ist_now().isoformat() for oid in pruned}, f)
+                except Exception:
+                    pass
         return pruned
 
     @property
     def known_order_ids(self) -> set[str]:
+        if not self._known_order_ids:
+            with self._known_order_ids_lock:
+                if not self._known_order_ids:  # double-checked locking
+                    self._known_order_ids = self._load_known_order_ids()
         return self._known_order_ids
 
     def _reconcile_lost_placeorder(
