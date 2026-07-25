@@ -9035,6 +9035,12 @@ class OptionsBuyerEdgeBot:
                             self._send_live_pnl_alert(pnl_positions)
                             self._last_pnl_alert_time = now_ts
 
+                if LIVE_PNL_ALERT_INTERVAL > 0 and self._is_market_hours():
+                    now_ts = time.time()
+                    if now_ts - self._last_naked_short_check_time >= LIVE_PNL_ALERT_INTERVAL:
+                        self._check_naked_shorts()
+                        self._last_naked_short_check_time = now_ts
+
                 if self._is_market_hours():
                     for symbol in cfg.market.underlyings:
                         self.scan_underlying(symbol)
