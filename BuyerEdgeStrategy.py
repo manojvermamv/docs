@@ -8174,6 +8174,8 @@ class OptionsBuyerEdgeBot:
         pending_exits.pop and positions.pop in the poll-confirmed path).
         """
         stale = []
+        now = get_ist_now()
+        grace = timedelta(seconds=self.config.market.stale_cleanup_grace_secs)
         with self.state.state_lock:
             for pos in self.state.positions.all_positions():
                 if not pos.exit_pending:
@@ -8181,6 +8183,9 @@ class OptionsBuyerEdgeBot:
                 if pos.slot_id in self.state.pending_exits:
                     continue
                 if pos.sl_order_id or pos.tgt_order_id:
+                    continue
+                since = pos.exit_pending_since
+                if since is not None and (now - since) < grace:
                     continue
                 stale.append(pos)
             for pos in stale:
