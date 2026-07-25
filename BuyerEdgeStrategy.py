@@ -1406,10 +1406,8 @@ class RollingZ:
     def __init__(self, maxlen: int = 30, min_samples: int | None = None):
         self._buf: deque = deque(maxlen=maxlen)
         self._maxlen = maxlen
-        # BUGFIX: previously required the buffer completely full (len < maxlen) before
-        # returning any z-score, which is a full-`maxlen`-scans blackout every session
-        # start (~30 min at maxlen=30 / 60s scans). Warm up on a partial fill instead —
-        # still robust-sigma, just responsive sooner, matching the "fast tier" intent.
+        # BUGFIX: old full-buffer requirement caused ~30min blackout at session start.
+        # Warm up on partial fill instead — still robust, responsive sooner.
         self._min_samples = min_samples if min_samples is not None else max(5, maxlen // 3)
     def add(self, v: float) -> None:
         self._buf.append(v)
@@ -1440,12 +1438,9 @@ class ScoreComponent:
     direction: str
     note:      str
     available: bool = True
-    # "fast" = options-statistical (Layers 2-5: OI/Greeks/IV/straddle/synthetic-futures) —
-    # responsive, point-in-time, can react to a single scan's chain snapshot.
-    # "slow" = technical-trend on spot candles (Layer 1: EMA/RSI/VWAP) — deliberately
-    # less noisy, meant to confirm/dampen rather than chase every tick.
-    # Carried through from IndicatorSpec/StatisticSpec so SignalEngine.score() can combine
-    # the two groups differently instead of flat-summing them (Step 3).
+    # "fast" = options-statistical (Layers 2-5) — responsive, point-in-time.
+    # "slow" = technical-trend on spot candles (Layer 1) — confirms/dampens fast layer.
+    # Carried from IndicatorSpec/StatisticSpec so score() can group differently (Step 3).
     tier:      str = "fast"
 
 
@@ -3590,20 +3585,11 @@ class SignalEngine:
         trap_score = min(100, trap_score)
 
         # ── Final Score ──────────────────────────────────────────────────────
-        # STEP 3 — Two-stage combine. Previously this flat-summed every available
-        # component (fast + slow) into one pool, which is exactly the coupling problem
-        # this redesign set out to fix: a lagging technical read got the same per-point
-        # weight as a live options-statistical read, and the composite ended up behaving
-        # like whichever layer moved most on a given scan rather than reflecting a real
-        # confirmation relationship between the two.
-        #
-        # Now: fast (options-statistical, Layers 2-5) tier drives direction and magnitude
-        # directly and stays fully responsive — it is never blended down by a slow-moving
-        # trend read. Slow (technical-trend, Layer 1) tier no longer contributes points;
-        # it only modulates fast_raw via confirm_mult below — dampening conviction when it
-        # disagrees with the fast layer's direction, and doing nothing (mult=1.0) when it
-        # agrees or has no strong opinion. It can reduce confidence, never flip or silence
-        # the fast layer's read outright (bounded by slow_disagree_floor).
+        # STEP 3 — Two-stage combine: fast (L2-5) drives direction/magnitude directly.
+        # Slow (L1) no longer adds points; it only dampens fast_raw via confirm_mult
+        # when disagreeing (bounded by slow_disagree_floor), mult=1.0 when agreeing or
+        # neutral. Fixes old flat-sum coupling where lagging technicals diluted live
+        # options-statistical reads.
         fast_components = [c for c in components if c.tier == "fast" and c.available and c.score_max > 0]
         slow_components = [c for c in components if c.tier == "slow" and c.available and c.score_max > 0]
 
