@@ -200,6 +200,12 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # F83 ✓ Fixed: MAX_RAW_SCORE = FAST_MAX + SLOW_MAX capped final_score at ~82 (fast_raw's own numerator ceiling is FAST_MAX; dividing by a larger denominator made 100 unreachable). Fixed to MAX_RAW_SCORE = FAST_MAX. Reintroduces the ~1.21x scale shift vs pre-Step-3 flat-sum this was meant to absorb — cfg.entry.min_score needs a matching upward adjustment (not applied here; live-trading threshold, left for explicit review).
 #
+#   Invariant (anchor for F83): MAX_RAW_SCORE must always equal FAST_MAX, never anything more.
+#   raw_score (the numerator) can never be bigger than FAST_MAX — slow only dampens, never adds.
+#   If MAX_RAW_SCORE (the denominator) is set to anything bigger than FAST_MAX, base_score
+#   can never reach 100 no matter how strong the signal. Numerator ceiling and denominator
+#   must match.
+#
 # F84 ✓ Fixed: _known_order_ids (set) accessed from strategy thread and exit-executor pool — race could lose entries. Fixed with _known_order_ids_lock and double-checked locking in property getter.
 
 # ==============================================================================
