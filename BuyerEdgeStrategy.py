@@ -73,7 +73,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
-# Remaining Work:                Signal architecture steps 3-6 (see OPEN OBSERVATIONS) + calibration
+# Remaining Work:                Signal architecture steps 1, 4 (see OPEN OBSERVATIONS) + min_score calibration
 #
 # OPEN OBSERVATIONS
 # ------------------------------------------------------------------------------
@@ -85,12 +85,13 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #     Still open — diagnosis done, fix not implemented.
 #   ✓ Step 2 (Tier field): IndicatorSpec/StatisticSpec have fast/slow tier tag on all specs
 #     (13 original + 3 new shadow-mode), propagated through ScoreComponent.evaluate().
-#   ⬢ Two-stage combine: flat-sum raw_score aggregation still in place — Step 3 (the core
-#     architectural gap that requires shadow-mode quarantine; not implementable without tier field).
+#   ✓ Two-stage combine (Step 3): raw_score = fast_raw * confirm_mult — fast tier drives
+#     direction/magnitude, slow tier dampens on disagreement only, never adds points.
 #   ⬢ Layer-1 persistence buffer: SignalEngine holds only OI-Z/zone state for new specs —
 #     no trend-hold confirmation accumulator for technical indicators (Step 4).
-#   ⬢ Recalibration: PRACTICAL_ALIGNMENT_FACTOR / thresholds need review after MACD removal
-#     and before shadow specs activate (Step 5).
+#   ⬢ Recalibration (Step 5): MAX_RAW_SCORE ceiling fixed (F83, base_score can reach 100
+#     again) but cfg.entry.min_score itself still needs a ~1.21x upward adjustment to match
+#     pre-Step-3 threshold semantics — deliberately not auto-applied to a live parameter.
 #   ⬢ clear_oi_state() unused: method defined on SignalEngine but never called —
 #     cross-session OI buffer carry-over depends on daily process restart.
 #
@@ -197,7 +198,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # F82 ⬇ Identified: RVOL_SIMPLE tier is "fast" but spot-volume-based (Layer 1 = "slow" by file's own taxonomy). Latent (score_max=0). Code retains "fast" — no behavioral impact until activated.
 #
-# F83 ⬇ Identified: MAX_RAW_SCORE = FAST_MAX + SLOW_MAX while slow tier is a multiplier (not points) — effective ceiling is FAST_MAX, causing final_score to cap ~82 instead of 100. Code retains original formula pending review of calibration approach.
+# F83 ✓ Fixed: MAX_RAW_SCORE = FAST_MAX + SLOW_MAX capped final_score at ~82 (fast_raw's own numerator ceiling is FAST_MAX; dividing by a larger denominator made 100 unreachable). Fixed to MAX_RAW_SCORE = FAST_MAX. Reintroduces the ~1.21x scale shift vs pre-Step-3 flat-sum this was meant to absorb — cfg.entry.min_score needs a matching upward adjustment (not applied here; live-trading threshold, left for explicit review).
 #
 # F84 ✓ Fixed: _known_order_ids (set) accessed from strategy thread and exit-executor pool — race could lose entries. Fixed with _known_order_ids_lock and double-checked locking in property getter.
 
@@ -3631,9 +3632,9 @@ class SignalEngine:
             f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} "
             f"({_disagree}) → raw={fast_raw * confirm_mult:.1f}")
 
-        # Step 3 made slow a multiplier (not points), shrinking the effective max
-        # from 17 to 14. Restore the ceiling so min_score thresholds stay calibrated.
-        MAX_RAW_SCORE = FAST_MAX + SLOW_MAX
+        # fast_raw's own numerator ceiling is FAST_MAX (slow only dampens, never adds
+        # points) — MAX_RAW_SCORE must match that or 100 becomes unreachable (F83).
+        MAX_RAW_SCORE = FAST_MAX
         raw_score = fast_raw * confirm_mult
 
         # We cap expected alignment to PRACTICAL_ALIGNMENT_FACTOR, so achieving this threshold yields a 100 score.
