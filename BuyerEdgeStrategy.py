@@ -655,6 +655,7 @@ class MarketConfig:
     # ── Timing ──
     candle_interval:       str   = "1m"
     signal_check_interval: int   = 60
+    stale_cleanup_grace_secs: int = 30
     dte_min:               int   = 7
     dte_max:               int   = 30
     otm_offset:            int   = 1
@@ -701,6 +702,7 @@ class MarketConfig:
             otm_offset=int(os.getenv("OTM_OFFSET", str(defaults.otm_offset))),
             strike_count=int(os.getenv("STRIKE_COUNT", str(defaults.strike_count))),
             signal_check_interval=int(os.getenv("SIGNAL_CHECK_INTERVAL", str(defaults.signal_check_interval))),
+            stale_cleanup_grace_secs=int(os.getenv("STALE_CLEANUP_GRACE_SECS", str(defaults.stale_cleanup_grace_secs))),
             chain_smooth_bars=int(os.getenv("CHAIN_SMOOTH_BARS", str(defaults.chain_smooth_bars))),
             greeks_smooth_max_age=float(os.getenv("GREEKS_SMOOTH_MAX_AGE", str(defaults.greeks_smooth_max_age))),
             no_new_trade_after=os.getenv("NO_NEW_TRADE_AFTER", defaults.no_new_trade_after),
@@ -725,6 +727,8 @@ class MarketConfig:
             errs.append(f"MAX_HOLD_MINUTES={self.max_hold_minutes} must be >= 0 (0=disabled)")
         if self.signal_check_interval <= 0:
             errs.append(f"SIGNAL_CHECK_INTERVAL={self.signal_check_interval} must be > 0")
+        if self.stale_cleanup_grace_secs < 0:
+            errs.append(f"STALE_CLEANUP_GRACE_SECS={self.stale_cleanup_grace_secs} must be >= 0")
         if self.lookback_days < 1:
             errs.append(f"LOOKBACK_DAYS={self.lookback_days} must be >= 1")
         return errs
