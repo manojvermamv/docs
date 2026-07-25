@@ -1099,15 +1099,17 @@ class TrailConfig:
 # ── 3f — JournalConfig ────────────────────────────────────────────────────
 @dataclass
 class JournalConfig:
-    """Trade journal file path and analytics flags."""
-    trade_journal_path: str  = "/app/strategies/data/trades.csv"
-    analytics_enabled:  bool = True
+    """Trade journal file path, analytics flags, and order-ID registry."""
+    trade_journal_path:   str = "/app/strategies/data/trades.csv"
+    known_order_ids_path: str = "/app/strategies/data/known_order_ids.json"
+    analytics_enabled:    bool = True
 
     @classmethod
     def from_env(cls) -> "JournalConfig":
         defaults = cls()
         return cls(
             trade_journal_path=os.getenv("TRADE_JOURNAL_PATH", defaults.trade_journal_path),
+            known_order_ids_path=os.getenv("KNOWN_ORDER_IDS_PATH", defaults.known_order_ids_path),
             analytics_enabled=os.getenv("ANALYTICS_ENABLED", str(defaults.analytics_enabled)).lower() in ("1", "true", "yes"),
         )
 
@@ -6035,6 +6037,8 @@ class OrderManager:
         self._journal = JournalWriter(self.config.journal.trade_journal_path)
         self._pending_tranche_exits: dict[str, str] = {}  # key=f"{underlying}_{tr.tranche_id}" → order_id
         self._pending_tranche_exits_lock: threading.Lock = threading.Lock()
+        self._known_order_ids: set[str] = set()
+        self._known_order_ids_path = self.config.journal.known_order_ids_path
 
     def _cancel_three_outcome(self, order_id: str, pending: PendingEntry | None = None) -> str:
         """Cancel order_id and determine terminal disposition.
