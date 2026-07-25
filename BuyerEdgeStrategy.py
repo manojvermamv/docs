@@ -360,6 +360,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 import csv
 import copy
 import ast
+import json
 import concurrent.futures
 import math
 import os
@@ -6040,6 +6041,51 @@ class OrderManager:
         self._known_order_ids: set[str] = set()
         self._known_order_ids_path = self.config.journal.known_order_ids_path
 
+    def _record_placed_order_id(self, oid: str | None) -> None:
+        """Persist a placed order ID to the local registry (F80: defense-in-depth)."""
+        if not oid:
+            return
+        self._known_order_ids.add(oid)
+        try:
+            with open(self._known_order_ids_path, 'w') as f:
+                json.dump({oid: get_ist_now().isoformat() for oid in self._known_order_ids}, f)
+        except Exception as exc:
+            err(f"[ORDER] Failed to save known order ID {oid}: ", exc)
+
+    def _load_known_order_ids(self) -> set[str]:
+        """Load known order IDs from JSON, prune entries >14 days old."""
+        path = self._known_order_ids_path
+        if not path or not os.path.exists(path):
+            return set()
+        try:
+            with open(path) as f:
+                data: dict = json.load(f)
+        except Exception:
+            return set()
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(days=14)
+        pruned = set()
+        for oid, ts in data.items():
+            try:
+                if datetime.fromisoformat(str(ts)) >= cutoff:
+                    pruned.add(oid)
+            except Exception:
+                pruned.add(oid)  # keep on parse failure
+        if len(pruned) < len(data):
+            self._known_order_ids = pruned
+            try:
+                with open(path, 'w') as f:
+                    json.dump({oid: get_ist_now().isoformat() for oid in pruned}, f)
+            except Exception:
+                pass
+        return pruned
+
+    @property
+    def known_order_ids(self) -> set[str]:
+        if not self._known_order_ids:
+            self._known_order_ids = self._load_known_order_ids()
+        return self._known_order_ids
+
     def _cancel_three_outcome(self, order_id: str, pending: PendingEntry | None = None) -> str:
         """Cancel order_id and determine terminal disposition.
         
@@ -6874,6 +6920,7 @@ class OrderManager:
                     )
                     if isinstance(sl_resp, dict) and sl_resp.get("status") == "success":
                         pos.sl_order_id = sl_resp.get("orderid")
+                        self._record_placed_order_id(pos.sl_order_id)
                         dbg(f"[ORDER] Broker SL-M placed for {underlying}: trigger ₹{sl:.2f} (id:{pos.sl_order_id})")
                 except Exception as exc: err(f"[ORDER] Broker SL-M error for {underlying}: ", exc)
 
@@ -6891,6 +6938,7 @@ class OrderManager:
                     )
                     if isinstance(tgt_resp, dict) and tgt_resp.get("status") == "success":
                         pos.tgt_order_id = tgt_resp.get("orderid")
+                        self._record_placed_order_id(pos.tgt_order_id)
                         dbg(f"[ORDER] Broker LIMIT placed for {underlying}: ₹{tgt:.2f} (id:{pos.tgt_order_id})")
                 except Exception as exc: err(f"[ORDER] Broker LIMIT target error for {underlying}: ", exc)
         else:
@@ -6914,6 +6962,7 @@ class OrderManager:
                             )
                             if isinstance(sl_resp, dict) and sl_resp.get("status") == "success":
                                 tr.sl_order_id = sl_resp.get("orderid")
+                                self._record_placed_order_id(tr.sl_order_id)
                                 dbg(f"[ORDER] Broker SL-M placed for {underlying} t={tr.tranche_id}: trigger ₹{sl:.2f} (id:{tr.sl_order_id})")
                         except Exception as exc: err(f"[ORDER] Broker SL-M error for {underlying} t={tr.tranche_id}: ", exc)
                 if not tr.tgt_order_id:
@@ -6931,6 +6980,7 @@ class OrderManager:
                         )
                         if isinstance(tgt_resp, dict) and tgt_resp.get("status") == "success":
                             tr.tgt_order_id = tgt_resp.get("orderid")
+                            self._record_placed_order_id(tr.tgt_order_id)
                             dbg(f"[ORDER] Broker LIMIT placed for {underlying} t={tr.tranche_id}: ₹{_tgt_price:.2f} (id:{tr.tgt_order_id})")
                     except Exception as exc: err(f"[ORDER] Broker LIMIT target error for {underlying} t={tr.tranche_id}: ", exc)
 
@@ -7038,6 +7088,7 @@ class OrderManager:
                 err(f"[ORDER] {underlying}: place_order returned no orderid — abandoning entry")
                 return False
             dbg(f"[ORDER] Entry order {order_id} placed for {underlying} ({option_symbol} x{qty})")
+            self._record_placed_order_id(order_id)
 
             # Add to pending entries for reconciliation
             pending_entry = PendingEntry(
@@ -7196,6 +7247,7 @@ class OrderManager:
             if isinstance(resp, dict) and resp.get("status") == "success":
                 order_id = resp.get("orderid")
                 dbg(f"[ORDER] Partial exit order {order_id} placed for {underlying} t={tr.tranche_id}")
+                self._record_placed_order_id(order_id)
             else:
                 dbg(f"[ORDER] Partial exit order response: {resp}")
         except Exception as exc:
@@ -7364,6 +7416,7 @@ class OrderManager:
             if isinstance(resp, dict) and resp.get("status") == "success":
                 order_id = resp.get("orderid")
                 dbg(f"[ORDER] Exit order {order_id} placed for {underlying}")
+                self._record_placed_order_id(order_id)
             else:
                 dbg(f"[ORDER] Exit order response: {resp}")
         except Exception as exc: err(f"[ORDER] place_exit error for {underlying}: ", exc)
