@@ -1558,6 +1558,7 @@ class PositionBroker:
     tgt_order_id:     str | None = None
     broker_protection: bool      = False
     exit_pending:     bool      = False
+    exit_pending_since: datetime | None = None
 
 
 class LifecycleStage(Enum):
