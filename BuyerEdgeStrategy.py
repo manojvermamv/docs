@@ -77,8 +77,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # OPEN OBSERVATIONS
 # ------------------------------------------------------------------------------
-# Six design items identified during signal-layer V2 enhancement (shadow-mode specs live,
-# but integration architecture incomplete — all items below are open):
+# Design items identified during signal-layer V2 enhancement:
 #
 #   ⬢ Step 1 (MACD replacement): MACD deleted without substitution, no EMA-slope replacement
 #     landed — Layer 1 runs 3 live components (EMA, RSI, VWAP) instead of the planned 4.
@@ -199,12 +198,6 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F82 ⬇ Identified: RVOL_SIMPLE tier is "fast" but spot-volume-based (Layer 1 = "slow" by file's own taxonomy). Latent (score_max=0). Code retains "fast" — no behavioral impact until activated.
 #
 # F83 ✓ Fixed: MAX_RAW_SCORE = FAST_MAX + SLOW_MAX capped final_score at ~82 (fast_raw's own numerator ceiling is FAST_MAX; dividing by a larger denominator made 100 unreachable). Fixed to MAX_RAW_SCORE = FAST_MAX. Reintroduces the ~1.21x scale shift vs pre-Step-3 flat-sum this was meant to absorb — cfg.entry.min_score needs a matching upward adjustment (not applied here; live-trading threshold, left for explicit review).
-#
-#   Invariant (anchor for F83): MAX_RAW_SCORE must always equal FAST_MAX, never anything more.
-#   raw_score (the numerator) can never be bigger than FAST_MAX — slow only dampens, never adds.
-#   If MAX_RAW_SCORE (the denominator) is set to anything bigger than FAST_MAX, base_score
-#   can never reach 100 no matter how strong the signal. Numerator ceiling and denominator
-#   must match.
 #
 # F84 ✓ Fixed: _known_order_ids (set) accessed from strategy thread and exit-executor pool — race could lose entries. Fixed with _known_order_ids_lock and double-checked locking in property getter.
 
@@ -3634,9 +3627,6 @@ class SignalEngine:
                                 1.0 - abs(slow_norm) * cfg.signal.slow_disagree_weight)
 
         _disagree = "DISAGREE" if confirm_mult < 1.0 else "AGREE"
-        inf(f"[SCORE] fast={fast_raw:.1f}/{FAST_MAX} norm={fast_norm:.3f} "
-            f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} "
-            f"({_disagree}) → raw={fast_raw * confirm_mult:.1f}")
 
         # fast_raw's own numerator ceiling is FAST_MAX (slow only dampens, never adds
         # points) — MAX_RAW_SCORE must match that or 100 becomes unreachable (F83).
@@ -3670,6 +3660,17 @@ class SignalEngine:
             signal = "WATCH"
         else:
             signal = "NO_TRADE"
+
+        # Shadow comparison: what final_score would have been under the pre-Step-3
+        # flat-sum (slow adding points directly, MAX_RAW_SCORE=FAST_MAX+SLOW_MAX).
+        # Logged so cfg.entry.min_score can be recalibrated from the real distribution
+        # of this gap across a live session instead of the theoretical ~1.21x estimate.
+        _old_max = FAST_MAX + SLOW_MAX
+        _old_raw = fast_raw + slow_raw
+        _old_score = int(max(-100, min(100, (_old_raw / (_old_max * PRACTICAL_ALIGNMENT_FACTOR)) * 100))) if _old_max > 0 else 0
+        inf(f"[SCORE] fast={fast_raw:.1f}/{FAST_MAX} norm={fast_norm:.3f} "
+            f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} ({_disagree}) → "
+            f"final={final_score} min={effective_min_score} signal={signal} old_style={_old_score}")
 
         label = "Bullish" if final_score > 15 else "Bearish" if final_score < -15 else "Neutral"
         direction: str | None = "CE" if final_score > 0 else ("PE" if final_score < 0 else None)
