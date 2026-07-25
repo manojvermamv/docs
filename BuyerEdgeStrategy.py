@@ -8265,10 +8265,10 @@ class OptionsBuyerEdgeBot:
                     continue
                 self._naked_short_alerted.add(sym)
                 tracked = any(pos.symbol == sym for pos in self.state.positions.all_positions())
-                err(f"[SAFETY] NAKED SHORT DETECTED: {sym} qty={qty} @ \u20b9{avg:.2f} tracked_by_strategy={tracked}")
+                err(f"[SAFETY] NAKED SHORT DETECTED: {sym} qty={qty} @ ₹{avg:.2f} tracked_by_strategy={tracked}")
                 self._notify(
-                    f"\U0001f6a8\U0001f6a8 NAKED SHORT DETECTED \U0001f6a8\U0001f6a8\n"
-                    f"{sym}  qty={qty} @ \u20b9{avg:.2f}\n"
+                    f"🚨🚨 NAKED SHORT DETECTED 🚨🚨\n"
+                    f"{sym}  qty={qty} @ ₹{avg:.2f}\n"
                     f"Strategy tracking this symbol: {'yes' if tracked else 'NO — untracked'}\n"
                     f"Not auto-corrected — square off at the broker manually.",
                     10,
