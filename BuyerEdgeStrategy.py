@@ -6489,23 +6489,29 @@ class OrderManager:
         for attr_name, oid in (("sl_order_id", sl_id), ("tgt_order_id", tgt_id)):
             if not oid:
                 continue
-            try:
-                resp = self.client.orderstatus(order_id=oid, strategy=self.config.broker.strategy_name)
-                if isinstance(resp, dict) and resp.get("status") == "success":
-                    data = resp.get("data") or resp
-                    broker_stat = str(data.get("order_status", "")).lower()
-                    dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
-                    # Race: fill arrived between pre-check and cancel. Record it
-                    # so caller won't place a redundant market SELL.
-                    if broker_stat in ("complete", "filled", "executed") and attr_name not in broker_filled:
-                        executed_price = float(data.get("average_price", 0) or 0)
-                        broker_filled[attr_name] = {
-                            "order_id":    oid,
-                            "executed":    executed_price,
-                            "order_status": broker_stat,
-                        }
-                        dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
-            except Exception as exc: err(f"[ORDER] Post-cancel check error {oid}: ", exc)
+            broker_stat = None
+            data = {}
+            for attempt in range(2):
+                try:
+                    resp = self.client.orderstatus(order_id=oid, strategy=self.config.broker.strategy_name)
+                    if isinstance(resp, dict) and resp.get("status") == "success":
+                        data = resp.get("data") or resp
+                        broker_stat = str(data.get("order_status", "")).lower()
+                        break
+                except Exception as exc:
+                    err(f"[ORDER] Post-cancel check error (attempt {attempt+1}) {oid}: ", exc)
+                if attempt == 0:
+                    time.sleep(0.3)
+            if broker_stat is not None:
+                dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
+                if broker_stat in ("complete", "filled", "executed") and attr_name not in broker_filled:
+                    executed_price = float(data.get("average_price", 0) or 0)
+                    broker_filled[attr_name] = {
+                        "order_id":    oid,
+                        "executed":    executed_price,
+                        "order_status": broker_stat,
+                    }
+                    dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
         pos.sl_order_id  = None
         pos.tgt_order_id = None
         pos.broker_protection = False
@@ -7808,6 +7814,8 @@ class OptionsBuyerEdgeBot:
         self.ws.set_notify_callback(self._send_alert)  # U-G: WS watchdog alert
         self.trail_engine.modify_callback = self.orders.modify_broker_sl
         self._last_pnl_alert_time: float = 0.0
+        self._naked_short_alerted: set[str] = set()
+        self._last_naked_short_check_time: float = 0.0
         self._last_quote_refresh_ts: dict[str, float] = {}
 
     # ── Order-stream event dispatcher ────────────────────────────────────────
