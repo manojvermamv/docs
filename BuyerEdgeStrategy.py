@@ -6317,16 +6317,17 @@ class OrderManager:
                         data = resp.get("data") or resp
                         broker_stat = str(data.get("order_status", "")).lower()
                         inf(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
-                        # Race: order filled between pre-check and cancel. Record
-                        # it so caller won't place a redundant market SELL.
+                        # Race: fill arrived between pre-check and cancel.
                         key = f"{tr.tranche_id}_{attr_name}"
                         if broker_stat in ("complete", "filled", "executed") and key not in broker_filled:
+                            executed_price = float(data.get("average_price", 0) or 0)
                             broker_filled[key] = {
                                 "order_id":    oid,
-                                "executed":    float(data.get("average_price", 0) or 0),
+                                "executed":    executed_price,
                                 "order_status": broker_stat,
                                 "tranche_id":  tr.tranche_id,
                             }
+                            inf(f"[ORDER] Post-cancel check detected {attr_name} already filled for {underlying} t={tr.tranche_id}: {oid} @ {executed_price}")
                 except Exception as exc:
                     err(f"[ORDER] Post-cancel check error {oid}: ", exc)
                 setattr(tr, attr_name, None)
@@ -6383,13 +6384,16 @@ class OrderManager:
                     data = resp.get("data") or resp
                     broker_stat = str(data.get("order_status", "")).lower()
                     inf(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
-                    # Same race as multi-tranche: fill arrived after pre-check.
+                    # Race: fill arrived between pre-check and cancel. Record it
+                    # so caller won't place a redundant market SELL.
                     if broker_stat in ("complete", "filled", "executed") and attr_name not in broker_filled:
+                        executed_price = float(data.get("average_price", 0) or 0)
                         broker_filled[attr_name] = {
-                            "order_id":     oid,
-                            "executed":     float(data.get("average_price", 0) or 0),
+                            "order_id":    oid,
+                            "executed":    executed_price,
                             "order_status": broker_stat,
                         }
+                        inf(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
             except Exception as exc: err(f"[ORDER] Post-cancel check error {oid}: ", exc)
         pos.sl_order_id  = None
         pos.tgt_order_id = None
