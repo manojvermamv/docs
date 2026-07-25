@@ -1407,7 +1407,7 @@ class RollingZ:
         self._buf: deque = deque(maxlen=maxlen)
         self._maxlen = maxlen
         # BUGFIX: old full-buffer requirement caused ~30min blackout at session start.
-        # Warm up on partial fill instead — still robust, responsive sooner.
+        # Warm up on partial fill instead — still robust-sigma, responsive sooner.
         self._min_samples = min_samples if min_samples is not None else max(5, maxlen // 3)
     def add(self, v: float) -> None:
         self._buf.append(v)
