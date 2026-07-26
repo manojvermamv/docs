@@ -87,4 +87,4 @@ When the user requests a durable behavior change, record it here or in the relev
 ### Covered by Root
 
 - `automation/` — 1 Python script (GitHub fork tracker). Single file, instructions in docstring, no child doc warranted.
-- `keys/` — SSH key storage. Gitignored, no instructions needed.
+
