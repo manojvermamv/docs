@@ -23,14 +23,24 @@ Act as a compiler engineer. Run exhaustive multi-layer structural analysis on th
 
 ---
 
-## Auditing Verification Pormpts
+## Auditing, Verification & Fixes Pormpts
 
-### Last-Context Integrity Check
+### Verify-Then-Fix Audit / Findings Verification & Conditional Fix
+```text
+Verify whether the findings below are correct by analyzing them in depth against the complete script/codebase architecture, including all usages, dependencies, and relationships with other components. Then apply fixes only if still necessary after this verification.
+```
+
+### Post-Fix Consistency Audit / Step-by-Step Fix Reconciliation
+```text
+Verify that all fixed or patched findings are correct and mutually consistent with each other within the complete script/codebase architecture. Go through this step by step, in depth, checking all usages and relationships with other components, and identify any subtle or remaining findings and issues that still need attention.
+```
+
+### Context-Scoped Correctness Audit / Last-Context Integrity Check
 ```text
 Review all changes made so far and verify their correctness end-to-end, using the last valid message and available context to determine the correct scope of review. Explicitly check for anything that was skipped, left incomplete, or silently dropped, and surface it clearly rather than assuming it was handled.
 ```
 
-### Continuity & Correctness Audit
+### Post-Continue Verification Check / Continuity & Correctness Audit
 ```text
 Review all changes made so far and verify their correctness end-to-end. Explicitly check for anything that was skipped, left incomplete, or silently dropped during prior "Continue" responses, and surface it clearly rather than assuming it was handled.
 ```
