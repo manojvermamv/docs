@@ -8280,7 +8280,7 @@ class OptionsBuyerEdgeBot:
                 self._naked_short_alerted.add(sym)
                 tracked = any(pos.symbol == sym for pos in self.state.positions.all_positions())
                 err(f"[SAFETY] NAKED SHORT DETECTED: {sym} qty={qty} @ ₹{avg:.2f} tracked_by_strategy={tracked}")
-                self._notify(
+                self._send_alert(
                     f"🚨🚨 NAKED SHORT DETECTED 🚨🚨\n"
                     f"{sym}  qty={qty} @ ₹{avg:.2f}\n"
                     f"Strategy tracking this symbol: {'yes' if tracked else 'NO — untracked'}\n"
