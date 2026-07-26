@@ -172,40 +172,29 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F61 ✓ Fixed: check_pending_entries cancel-after-cutoff path used bare cancelorder instead of _cancel_three_outcome — cancel-race fill popped pending entry without orderstatus re-check, orphaned position. Swapped to _cancel_three_outcome.
 # F62 ✓ Fixed: _cancel_tranche_orders cleared per-tranche order IDs but not pos.sl_order_id flat alias — stale after restart for multi-tranche positions; modify_broker_sl proceeded on dead order ID. Added pos.sl_order_id = None after per-tranche clear loop.
 # F63 ✓ Fixed: _handle_broker_order_fill non-runner path — SL fill cancelled TGT but ID never cleared, next loop re-queried stale ID and could fire duplicate exit. Fixed with tr.is_exit_placed guard + setattr(tr, other_name, None) in finally.
-#
 # F-A1 ✓ Fixed: _exit_non_runner_tranche placed SELL then blocked on poll (~30s) without registering in-flight qty — WS-triggered place_exit could oversell from stale remaining_qty. Fixed by registering into _pending_tranche_exits before poll under lock, _sellable_qty() helper + 0-qty defer in place_exit.
-#
 # F-A2 ⬇ Accepted: poll_order_status stalls strategy loop ~30s during tranche exit. F-A1 removed the overselling risk from this window; reduced to performance/UX concern. Not patched.
-#
 # F-A3 ✓ Fixed: warnings() hook was dead code — no config class defined it. EntryConfig.validate() treated a soft warning as fatal SystemExit. Fixed by adding warnings() to EntryConfig.
-#
 # F64 ✓ Fixed: check_entry_gates() drawdown-rate check read _pnl_history outside state_lock as two unlocked statements — concurrent record_exit() popleft() could raise IndexError. Fixed by snapshotting guard inside existing locked block.
-#
 # F72 ✓ Fixed: TrancheConfig.validate() checked sum == 100 but never that each field is within [0, 100] — out-of-range values summing to 100 passed validation and could cause >qty allocation in ladder mode. Fixed with per-field range check loop.
-#
 # F73 ✓ Fixed: Basket-order leg identification used multi-key lookup (pricetype/price_type/ordertype) but response schema has none of these — only orderid, status, symbol per entry. Relied on positional fallback (i==0) by accident. Made positional assumption explicit with count-mismatch guard.
-#
 # F74 ✓ Fixed: poll_order_status partial-fill branch reads filled_quantity from orderstatus() REST endpoint — confirmed endpoint never populates this for 27+ of 32+ brokers. Order-update stream completes pending entries via order_stream_complete_entries flag, preserving polling fallback.
-#
 # F75 ✓ Fixed: fetch_candles() type annotation claimed `-> pd.DataFrame | None` but SDK's history() returns dict on error (empty data, processing failure, API error) — len(dict) returns key count, passing length check by coincidence. Added isinstance(result, pd.DataFrame) guard.
-#
 # F76 ✓ Fixed: REST API filled_quantity empty for 27+ brokers — six call sites with fq>0 guard silently skipped order confirmation. Fixed by substituting pending.qty in cancellation paths and avg_price>0 as primary exit-fill signal.
-#
 # F77 ✓ Fixed: Order-stream dispatcher only handled entry completions — LIMIT fills, SL-M triggers, and exit completions silently dropped. Fixed with 4-priority universal dispatch covering pending_entries, pending_exits, protection-fill immediate action, and shadow inf().
-#
 # F81 ✓ Fixed: Entry-flow placeorder() network exception — broker may have landed the order despite client-side failure. Fixed with _reconcile_lost_placeorder() that checks orderbook() for an unambiguous matching order (same symbol, action, qty, within 60s window, not in known_order_ids). Only covers the entry _place_entry_order call site (the path F81 was traced through). Same blind spot exists at protective-order (SL/TGT), partial-exit, and full-exit placeorder() calls — those remain exposed but were out of scope for this finding's evidence.
-#
 # F82 ⬇ Identified: RVOL_SIMPLE tier is "fast" but spot-volume-based (Layer 1 = "slow" by file's own taxonomy). Latent (score_max=0). Code retains "fast" — no behavioral impact until activated.
-#
 # F83 ✓ Fixed: MAX_RAW_SCORE = FAST_MAX + SLOW_MAX capped final_score at ~82 (fast_raw's own numerator ceiling is FAST_MAX; dividing by a larger denominator made 100 unreachable). Fixed to MAX_RAW_SCORE = FAST_MAX. Reintroduces the ~1.21x scale shift vs pre-Step-3 flat-sum this was meant to absorb — cfg.entry.min_score needs a matching upward adjustment (not applied here; live-trading threshold, left for explicit review).
-#
-#   Invariant (anchor for F83): MAX_RAW_SCORE must always equal FAST_MAX, never anything more.
-#   raw_score (the numerator) can never be bigger than FAST_MAX — slow only dampens, never adds.
-#   If MAX_RAW_SCORE (the denominator) is set to anything bigger than FAST_MAX, base_score
-#   can never reach 100 no matter how strong the signal. Numerator ceiling and denominator
-#   must match.
-#
+#       Invariant (anchor for F83): MAX_RAW_SCORE must always equal FAST_MAX, never anything more.
+#       raw_score (the numerator) can never be bigger than FAST_MAX — slow only dampens, never adds.
+#       If MAX_RAW_SCORE (the denominator) is set to anything bigger than FAST_MAX, base_score
+#       can never reach 100 no matter how strong the signal. Numerator ceiling and denominator must match.
 # F84 ✓ Fixed: _known_order_ids (set) accessed from strategy thread and exit-executor pool — race could lose entries. Fixed with _known_order_ids_lock and double-checked locking in property getter.
+# F85 ✓ Fixed (P2): _expiry_list_cache cached None on transient failures. Updated to only cache on success.
+# F86 ✓ Fixed (P2): Startup known-orders pruning self-deadlocked because _load_known_order_ids re-acquired the caller-held non-reentrant _known_order_ids_lock. Removed inner lock.
+# F87 ✓ Fixed (P1): place_exit() blindly finalized entire positions on partial exits when tranches were in-flight, stranding pending orders and skipping P&L/journal accounting.
+# F88 ✓ Fixed (P2): Order-stream dispatcher missed streamed exit fills because it keyed pending_exits by order_id instead of slot_id.
+# F89 ✓ Fixed (P1): Partial exits leaked slot_id in exit_queue permanently, disabling all future fast WS-tick exits (trail/SL) for the residual tranche. Added exit_queue.discard().
 
 # ==============================================================================
 # CODING CONVENTIONS
@@ -327,17 +316,11 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # ==============================================================================
 #
 # 1. Snapshot is authority for market data only. Position state (fills, protection orders) comes from broker APIs via independent reconciliation.
-#
 # 2. Broker SL-M is the source of truth for protection. Trail state reinitializes from live market data after every restart.
-#
 # 3. WS is operationally optional — stale-snapshot quote-API fallback re-populates SnapshotCache when ticks go stale.
-#
 # 4. Broker SL modify failure → SL not advanced (retry on next tick). No escalation path — intentional.
-#
 # 5. Default runtime policy: 1 active position per underlying. Architecture supports multi-position (CE+PE, same-side) via configuration.
-#
 # 6. Retail API idempotency externally constrained. Residual tail-risk: network timeout after broker acceptance may create duplicate orders during fallback recovery. Accepted operational risk.
-#
 # 7. SL Ceiling — Three configs, three different questions, compose via min():
 #    premium_stop_pts (X points)  =  "What's my simple default SL when no data?"
 #    max_sl_pts (0 = premium_stop_pts) =  "What's my absolute never-exceed cap?"
@@ -681,7 +664,7 @@ class MarketConfig:
     def from_env(cls) -> "MarketConfig":
         underlyings_csv = os.getenv("UNDERLYINGS", "BANKNIFTY")
         index_csv = os.getenv("INDEX_UNDERLYINGS", "BANKNIFTY")
-        underlyings = sorted(set(u.strip() for u in underlyings_csv.split(",") if u.strip()))
+        underlyings = sorted({u.strip() for u in underlyings_csv.split(",") if u.strip()})
         index_underlyings: frozenset[str] = frozenset(
             u.strip() for u in index_csv.split(",") if u.strip()
         )
@@ -690,8 +673,8 @@ class MarketConfig:
         mapped = _STRATEGY_EXCHANGE_MAP.get(strategy_exch)
         if strategy_exch and not mapped:
             inf(f"[CONFIG] OPENALGO_STRATEGY_EXCHANGE={strategy_exch!r} has no "
-                f"options segment this bot supports (needs NFO/BFO/MCX/CDS/BCD) — "
-                f"falling back to EXCHANGE/FNO_EXCHANGE/INDEX_EXCHANGE env vars.")
+                "options segment this bot supports (needs NFO/BFO/MCX/CDS/BCD) — "
+                "falling back to EXCHANGE/FNO_EXCHANGE/INDEX_EXCHANGE env vars.")
         fno_default = mapped[0] if mapped else defaults.fno_exchange
         spot_default = mapped[1] if mapped else defaults.spot_exchange
         index_default = mapped[2] if mapped else defaults.index_exchange
@@ -906,7 +889,7 @@ class EntryConfig:
 
         # ── Group 3: Indicator periods — zero = ta.* crash ──
         if self.fast_ema_period < 1 or self.slow_ema_period < 1 or self.rsi_period < 1:
-            errs.append(f"Indicator periods must be >= 1 "
+            errs.append("Indicator periods must be >= 1 "
                         f"(fast_ema={self.fast_ema_period}, slow_ema={self.slow_ema_period}, "
                         f"rsi={self.rsi_period})")
         if self.fast_ema_period >= self.slow_ema_period:
@@ -929,8 +912,8 @@ class EntryConfig:
         if self.max_sl_pts > 0 and self.max_sl_pts < self.premium_stop_pts:
             ws.append(
                 f"MAX_SL_PTS={self.max_sl_pts} < PREMIUM_STOP_PTS={self.premium_stop_pts} — "
-                f"adaptive ceiling would be TIGHTER than the no-data fallback, which is almost "
-                f"certainly not intended. If deliberate, this warning can be ignored."
+                "adaptive ceiling would be TIGHTER than the no-data fallback, which is almost "
+                "certainly not intended. If deliberate, this warning can be ignored."
             )
         return ws
 
@@ -1230,10 +1213,7 @@ class TrancheConfig:
                     errs.append(f"{_name}={_val} must be in [0, 100]")
             total = self.tp1_pct + self.tp2_pct + self.runner_pct
             if abs(total - 100.0) > 0.1:
-                errs.append(
-                    f"TRANCHE_TP1_PCT + TRANCHE_TP2_PCT + TRANCHE_RUNNER_PCT "
-                    f"must sum to 100 (got {total:.1f})"
-                )
+                errs.append(f"TRANCHE_TP1_PCT + TRANCHE_TP2_PCT + TRANCHE_RUNNER_PCT must sum to 100 (got {total:.1f})")
             if self.mode not in ("equal", "ladder"):
                 errs.append(f"TRANCHE_MODE must be 'equal' or 'ladder' (got {self.mode!r})")
             if self.mode == "equal" and self.number_of_tranches < 2:
@@ -2126,7 +2106,7 @@ class JournalWriter:
                     w.writerow(TradeRecord.header)
                 w.writerow(row)
         except OSError as exc:
-            err(f"[JOURNAL] Write error", exc)
+            err("[JOURNAL] Write error", exc)
 
 
 class TradeAnalytics:
@@ -3915,8 +3895,8 @@ class DataFetcher:
                     self._auth_error_notified = True
                     self._notify(
                         f"🚨 API Auth Error: Broker token invalid (UDAPI100050) for {symbol}.\n"
-                        f"All quote/chain calls will fail until token is refreshed.\n"
-                        f"Action: Re-login to broker and restart strategy.",
+                        "All quote/chain calls will fail until token is refreshed.\n"
+                        "Action: Re-login to broker and restart strategy.",
                         9,
                     )
             elif isinstance(error_msg, str) and ("UDAPI10005," in error_msg or "Too Many Request Sent" in error_msg):
@@ -3925,7 +3905,7 @@ class DataFetcher:
                     self._rate_limit_notified = True
                     self._notify(
                         f"⚠️ Upstox rate limit hit (UDAPI10005) for {symbol}.\n"
-                        f"Action: Reduce quote API frequency or check for other clients using same API key.",
+                        "Action: Reduce quote API frequency or check for other clients using same API key.",
                         7,
                     )
                 time.sleep(2)  # Backoff before next call to let the rate window reset
@@ -3941,7 +3921,7 @@ class DataFetcher:
                     self._auth_error_notified = True
                     self._notify(
                         f"🚨 API Auth Error: Broker token invalid (exception) for {symbol}.\n"
-                        f"Action: Re-login to broker and restart strategy.",
+                        "Action: Re-login to broker and restart strategy.",
                         9,
                     )
             else:
@@ -4134,16 +4114,15 @@ class DataFetcher:
             elif pe_ivr is not None:
                 result["best_fit"] = "PE"
             
-        except Exception as exc: err(f"[DATA] IV ranks fetch error: ", exc)
+        except Exception as exc: err("[DATA] IV ranks fetch error: ", exc)
         
         return result
 
     def _expiry_list(self, symbol: str) -> list[str] | None:
-        """Fetch and cache the raw expiry list. Called at most once per symbol per strategy lifecycle."""
-        if symbol in self._expiry_list_cache:
+        """Fetch and cache the raw expiry list. Caches only successful lookups."""
+        if symbol in self._expiry_list_cache and self._expiry_list_cache[symbol]:
             return self._expiry_list_cache[symbol]
         if not hasattr(self.client, "expiry"):
-            self._expiry_list_cache[symbol] = None
             return None
         try:
             resp = self.client.expiry(
@@ -4152,20 +4131,19 @@ class DataFetcher:
                 instrumenttype="options",
             )
             if not resp:
-                self._expiry_list_cache[symbol] = None
                 return None
             if isinstance(resp, list):
-                parsed: list[str] = resp
+                parsed = resp
             elif isinstance(resp, dict):
                 parsed = resp.get("data", resp.get("expiries", []))
             else:
-                self._expiry_list_cache[symbol] = None
                 return None
-            self._expiry_list_cache[symbol] = parsed
+            
+            if parsed:
+                self._expiry_list_cache[symbol] = parsed
             return parsed
         except Exception as exc:
             err(f"[DATA] expiry list fetch error for {symbol}", exc)
-            self._expiry_list_cache[symbol] = None
             return None
 
     def fetch_target_expiry(self, symbol: str) -> str | None:
@@ -4522,7 +4500,7 @@ class TrailSLEngine:
                 atr_val = ta_value(atr_series, -2)
                 if atr_val is not None and atr_val > 0:
                     return atr_val * cfg.trail.atr_mult
-            except Exception as e: err(f"[TRAIL] ATR compute error: ", e)
+            except Exception as e: err("[TRAIL] ATR compute error: ", e)
 
         # ── delta: tier-based pct ──────────────────────────────────────────
         if method == "delta" and current_delta is not None:
@@ -5027,7 +5005,7 @@ class StrikeSelector:
         otm_offset: int,
     ) -> dict | None:
         """Pick a slightly OTM strike that is `otm_offset` strikes away from ATM."""
-        strikes = sorted(set(r["strike"] for r in chain_rows if "strike" in r))
+        strikes = sorted({r["strike"] for r in chain_rows if "strike" in r})
         if not strikes:
             return None
         atm = min(strikes, key=lambda x: abs(x - spot))
@@ -5166,7 +5144,7 @@ class StrikeSelector:
         if delta_available:
             if not delta_checked:
                 inf(
-                    f"[STRIKE] No candidate delta in "
+                    "[STRIKE] No candidate delta in "
                     f"[{target_delta_low:.2f}, {target_delta_high:.2f}] "
                     f"— conviction={conviction:.2f}, relaxing to closest available"
                 )
@@ -5188,7 +5166,7 @@ class StrikeSelector:
                     if best_fallback:
                         inf(
                             f"[STRIKE] Fallback gap {best_gap:.2f} > MAX_DELTA_GAP {MAX_DELTA_GAP:.2f} "
-                            f"— delta filter bypassed, using liquidity ranking only"
+                            "— delta filter bypassed, using liquidity ranking only"
                         )
                     candidates = annotated
             else:
@@ -5347,7 +5325,7 @@ class RiskManager:
                     return capital
             inf(f"[FUNDS] available cash not found in funds() response: {resp}")
         except Exception as exc:
-            err(f"[FUNDS] funds() fetch error", exc)
+            err("[FUNDS] funds() fetch error", exc)
             if self._funds_cache_time:
                 delta_pnl = self._daily_pnl - self._pnl_at_last_fetch
                 return max(0.0, self._funds_cache + delta_pnl)
@@ -5872,9 +5850,9 @@ class WebSocketManager:
                     inf(f"[WS] Connected to {_actual_url} — SDK managing reconnects automatically")
                     if was_reconnect:
                         inf(f"[ORDER-STREAM] Reconnected after gap (reconnect #{self._reconnect_count}) — "
-                            f"events missed during the outage are still covered by the next "
-                            f"check_pending_entries/check_pending_exits/check_broker_order_fills scan cycle; "
-                            f"only the sub-5s protective-fill fast-path was unavailable during the gap")
+                            "events missed during the outage are still covered by the next "
+                            "check_pending_entries/check_pending_exits/check_broker_order_fills scan cycle; "
+                            "only the sub-5s protective-fill fast-path was unavailable during the gap")
                     backoff_secs = 5  # Reset backoff on successful connect
                     consecutive_failures = 0
                     # ── Diff-based subscription reconciliation ──────────────────────────────
@@ -6009,7 +5987,7 @@ class WebSocketManager:
                     try:
                         self._notify_callback(
                             f"🚨 WS Circuit Breaker: {consecutive_failures} consecutive failures. "
-                            f"WebSocket monitoring STOPPED. Only broker SL-M protecting positions.",
+                            "WebSocket monitoring STOPPED. Only broker SL-M protecting positions.",
                             9,
                         )
                     except Exception:
@@ -6096,13 +6074,12 @@ class OrderManager:
             except Exception:
                 pruned.add(oid)  # keep on parse failure
         if len(pruned) < len(data):
-            with self._known_order_ids_lock:
-                self._known_order_ids = pruned
-                try:
-                    with open(path, 'w') as f:
-                        json.dump({oid: get_ist_now().isoformat() for oid in pruned}, f)
-                except Exception:
-                    pass
+            self._known_order_ids = pruned
+            try:
+                with open(path, 'w') as f:
+                    json.dump({oid: get_ist_now().isoformat() for oid in pruned}, f)
+            except Exception:
+                pass
         return pruned
 
     @property
@@ -6147,12 +6124,10 @@ class OrderManager:
             if ts >= cutoff:
                 candidates.append(oid)
         if len(candidates) == 1:
-            inf(f"[ORDER] F81 reconcile: recovered order {candidates[0]} for {symbol} "
-                f"after placeorder() network error")
+            inf(f"[ORDER] F81 reconcile: recovered order {candidates[0]} for {symbol} after placeorder() network error")
             return candidates[0]
         if len(candidates) > 1:
-            err(f"[ORDER] F81 reconcile: {len(candidates)} ambiguous candidates for {symbol} "
-                f"— cannot safely recover, treating as failed", None)
+            err(f"[ORDER] F81 reconcile: {len(candidates)} ambiguous candidates for {symbol} — cannot safely recover, treating as failed", None)
         return None
 
     def _cancel_three_outcome(self, order_id: str, pending: PendingEntry | None = None) -> str:
@@ -6428,7 +6403,7 @@ class OrderManager:
                 oid = getattr(tr, attr_name, None)
                 if not oid:
                     continue
-                broker_stat = None
+                broker_stat: str | None = None
                 data = {}
                 for attempt in range(2):
                     try:
@@ -6503,7 +6478,7 @@ class OrderManager:
         for attr_name, oid in (("sl_order_id", sl_id), ("tgt_order_id", tgt_id)):
             if not oid:
                 continue
-            broker_stat = None
+            broker_stat: str | None = None
             data = {}
             for attempt in range(2):
                 try:
@@ -7162,8 +7137,7 @@ class OrderManager:
                     quantity=qty,
                 )
             except Exception as _po_exc:
-                err(f"[ORDER] placeorder() network error for {underlying} — "
-                    f"checking if broker landed it anyway", _po_exc)
+                err(f"[ORDER] placeorder() network error for {underlying} — checking if broker landed it anyway", _po_exc)
                 recovered_id = self._reconcile_lost_placeorder(option_symbol, "BUY", qty)
                 if not recovered_id:
                     return False
@@ -7407,12 +7381,34 @@ class OrderManager:
             exit_qty = self._sellable_qty(pos)
             pnl = _calc_pnl(pos, executed_price, qty=exit_qty)
             inf(f"[PAPER] Simulated SELL {exit_qty}x {pos.symbol} @ ₹{executed_price:.2f} | P&L ₹{pnl:.2f}")
-            self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
-                                exit_price_source="paper")
+            
+            if exit_qty < pos.remaining_qty:
+                for tr in list(pos.open_tranches):
+                    is_in_flight = False
+                    with self._pending_tranche_exits_lock:
+                        if f"{pos.underlying}_{tr.tranche_id}" in self._pending_tranche_exits:
+                            is_in_flight = True
+                    if not is_in_flight and not tr.is_exit_placed:
+                        tr.is_exit_placed = True
+                        tr.exit_price = executed_price
+                        tr.exit_reason = norm_reason
+                        tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
+                        self._risk.record_exit(tr_pnl)
+                        _pts_loss = max(0.0, pos.entry_premium - executed_price)
+                        self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                        tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=True)
+                        self._journal.write(tr_rec)
+                with self._state.exit_lock:
+                    self._state.exit_queue.discard(pos.slot_id)
+                pos.exit_pending = False
+            else:
+                self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
+                                    exit_price_source="paper")
+            
             direction_emoji = "🔺 UP" if pos.option_type.upper() == "CE" else "🔻 DN"
             emoji = "✅ PROFIT" if pnl >= 0 else "❌ LOSS"
             risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
-            risk_amt = risk_pts * pos.remaining_qty
+            risk_amt = risk_pts * exit_qty
             r_multiple = pnl / risk_amt if risk_amt > 0 else 0.0
             hold_mins = max(0, int((get_ist_now() - pos.entry_time).total_seconds() / 60))
             self._notify(
@@ -7424,11 +7420,13 @@ class OrderManager:
                     f"⏱ Hold: {hold_mins}m | Daily: ₹{self._risk.daily_pnl:.0f}",
                     2,
                 )
-            # Safety check: verify position was actually removed
-            if self._state.positions.slot(pos.slot_id):
-                err(f"[CLEANUP] PAPER EXIT failed to remove {pos.symbol} from book — force-removing")
-                with self._state.state_lock:
-                    self._state.positions.pop(pos.slot_id, None)
+                
+            if exit_qty >= pos.remaining_qty:
+                # Safety check: verify position was actually removed
+                if self._state.positions.slot(pos.slot_id):
+                    err(f"[CLEANUP] PAPER EXIT failed to remove {pos.symbol} from book — force-removing")
+                    with self._state.state_lock:
+                        self._state.positions.pop(pos.slot_id, None)
             return
 
         broker_filled = {}
@@ -7550,17 +7548,16 @@ class OrderManager:
                 order_id=order_id,
                 reason=norm_reason,
                 created_at=get_ist_now(),
-                exit_qty=pos.remaining_qty,
+                exit_qty=sellable_qty,
             )
         filled = self.poll_order_status(order_id)
         if not filled:
             # Order submitted but fill could not be confirmed within the poll window.
             # Leave pending_exits intact so check_pending_exits() reconciles on the
             # next strategy cycle; position and exit_pending stay as-is.
-            inf(
-                f"[ORDER] Exit fill unconfirmed for {underlying} (order {order_id}) "
-                f"— leaving in pending_exits for reconciliation"
-            )
+            inf(f"[ORDER] Exit fill unconfirmed for {underlying} (order {order_id}) — leaving in pending_exits for reconciliation")
+            if sellable_qty < pos.remaining_qty:
+                pos.exit_pending = False
             return
 
         data           = filled.get("data") or filled
@@ -7570,23 +7567,56 @@ class OrderManager:
 
         # F76: REST API never populates filled_qty — treat 0 as fully filled when ep>0
         if filled_qty > 0 and order_qty > 0 and filled_qty < order_qty:
-            inf(
-                f"[ORDER] Exit partial fill for {underlying}: {filled_qty}/{order_qty} — "
-                f"leaving in pending_exits for full reconciliation"
-            )
+            inf(f"[ORDER] Exit partial fill for {underlying}: {filled_qty}/{order_qty} — leaving in pending_exits for full reconciliation")
+            if sellable_qty < pos.remaining_qty:
+                pos.exit_pending = False
             return
 
         with self._state.state_lock:
             self._state.pending_exits.pop(pos.slot_id, None)
 
-        pnl = _calc_pnl(pos, executed_price)
-        self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
-                            exit_price_source="broker_fill")
+        pnl = _calc_pnl(pos, executed_price, qty=sellable_qty)
+        
+        if sellable_qty < pos.remaining_qty:
+            for tr in list(pos.open_tranches):
+                is_in_flight = False
+                with self._pending_tranche_exits_lock:
+                    if f"{pos.underlying}_{tr.tranche_id}" in self._pending_tranche_exits:
+                        is_in_flight = True
+                if not is_in_flight and not tr.is_exit_placed:
+                    tr.is_exit_placed = True
+                    tr.exit_price = executed_price
+                    tr.exit_reason = norm_reason
+                    tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
+                    self._risk.record_exit(tr_pnl)
+                    _pts_loss = max(0.0, pos.entry_premium - executed_price)
+                    self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                    tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
+                    self._journal.write(tr_rec)
+                    
+                    for attr_name in ("sl_order_id", "tgt_order_id"):
+                        oid = getattr(tr, attr_name, None)
+                        if oid:
+                            try:
+                                self.client.cancelorder(order_id=oid, strategy=self.config.broker.strategy_name)
+                            except Exception:
+                                pass
+                            finally:
+                                setattr(tr, attr_name, None)
+            
+            inf(f"[ORDER] Partial full-exit for {underlying}: {sellable_qty}/{pos.remaining_qty} "
+                "— leaving position open for in-flight tranches to land")
+            with self._state.exit_lock:
+                self._state.exit_queue.discard(pos.slot_id)
+            pos.exit_pending = False
+        else:
+            self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
+                                exit_price_source="broker_fill")
 
         direction_emoji = "🔺 UP" if pos.option_type.upper() == "CE" else "🔻 DN"
         emoji = "✅ PROFIT" if pnl >= 0 else "❌ LOSS"
         risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
-        risk_amt = risk_pts * pos.remaining_qty
+        risk_amt = risk_pts * sellable_qty
         r_multiple = pnl / risk_amt if risk_amt > 0 else 0.0
         hold_mins = max(0, int((get_ist_now() - pos.entry_time).total_seconds() / 60))
         self._notify(
@@ -7696,12 +7726,45 @@ class OrderManager:
                 status         = str(raw.get("order_status", "")).lower()
                 executed_price = float(raw.get("average_price", 0) or 0)
                 if status == "complete" and executed_price:
-                    pnl = _calc_pnl(pos, executed_price)
+                    pnl = _calc_pnl(pos, executed_price, qty=pending_exit.exit_qty)
                     pnl_sign = "✅" if pnl >= 0 else "❌"
                     norm_reason = ExitReason.normalize(pending_exit.reason)
-                    self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
-                                        exit_price_source="broker_fill",
-                                        opt_symbol=opt_sym, pop_pending_exit=True)
+                    
+                    if pending_exit.exit_qty < pos.remaining_qty:
+                        for tr in list(pos.open_tranches):
+                            is_in_flight = False
+                            with self._pending_tranche_exits_lock:
+                                if f"{pos.underlying}_{tr.tranche_id}" in self._pending_tranche_exits:
+                                    is_in_flight = True
+                            if not is_in_flight and not tr.is_exit_placed:
+                                tr.is_exit_placed = True
+                                tr.exit_price = executed_price
+                                tr.exit_reason = norm_reason
+                                tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
+                                self._risk.record_exit(tr_pnl)
+                                _pts_loss = max(0.0, pos.entry_premium - executed_price)
+                                self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                                tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
+                                self._journal.write(tr_rec)
+                                for attr_name in ("sl_order_id", "tgt_order_id"):
+                                    oid = getattr(tr, attr_name, None)
+                                    if oid:
+                                        try:
+                                            self.client.cancelorder(order_id=oid, strategy=self.config.broker.strategy_name)
+                                        except Exception:
+                                            pass
+                                        finally:
+                                            setattr(tr, attr_name, None)
+                        with self._state.exit_lock:
+                            self._state.exit_queue.discard(pos.slot_id)
+                        pos.exit_pending = False
+                        with self._state.state_lock:
+                            self._state.pending_exits.pop(slot_id, None)
+                    else:
+                        self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
+                                            exit_price_source="broker_fill",
+                                            opt_symbol=opt_sym, pop_pending_exit=True)
+                    
                     inf(f"[PENDING] EXIT {order_id} complete for {underlying} @ \u20b9{executed_price:.2f} | P&L \u20b9{pnl:.2f} | reason={norm_reason}")
                     self._notify(
                         f"{pnl_sign} {self.config.broker.strategy_name} EXIT confirmed\n"
@@ -7808,6 +7871,7 @@ class OptionsBuyerEdgeBot:
 
     def __init__(self, cfg: BotConfig):
         self.config = cfg
+        self._last_strategy_heartbeat: float = 0.0
         # Verbosity: 0=False (errors only, default) | 1=True (connection/auth/subscription) | 2=Debug (LTP/Quote/Depth updates)
         api_kwargs: dict = dict(api_key=cfg.broker.api_key, host=cfg.broker.api_host, verbose=2)
         if cfg.broker.ws_url:
@@ -7886,13 +7950,69 @@ class OptionsBuyerEdgeBot:
 
         # ── 2. Exit completion (NEW) ──────────────────────────────────
         if not handled:
+            pending_exit = None
+            slot_id_to_pop = None
             with self.state.state_lock:
-                pending_exit = self.state.pending_exits.get(order_id)
+                for slot_id, p_exit in self.state.pending_exits.items():
+                    if p_exit.order_id == order_id:
+                        pending_exit = p_exit
+                        slot_id_to_pop = slot_id
+                        break
             if pending_exit:
                 handled = True
                 if os_status in ("complete", "filled", "executed"):
-                    inf(f"[ORDER-STREAM] Exit confirmed: {order_id} "
-                        f"{event.get('symbol', '')}")
+                    inf(f"[ORDER-STREAM] Exit confirmed: {order_id} {event.get('symbol', '')} — accelerating cleanup")
+                    executed_price = float(event.get("average_price", 0) or 0)
+                    if executed_price > 0:
+                        with self.state.state_lock:
+                            pos = self.state.positions.slot(slot_id_to_pop)
+                        if pos:
+                            pnl = _calc_pnl(pos, executed_price, qty=pending_exit.exit_qty)
+                            norm_reason = ExitReason.normalize(pending_exit.reason)
+                            
+                            if pending_exit.exit_qty < pos.remaining_qty:
+                                for tr in list(pos.open_tranches):
+                                    is_in_flight = False
+                                    with self._pending_tranche_exits_lock:
+                                        if f"{pos.underlying}_{tr.tranche_id}" in self._pending_tranche_exits:
+                                            is_in_flight = True
+                                    if not is_in_flight and not tr.is_exit_placed:
+                                        tr.is_exit_placed = True
+                                        tr.exit_price = executed_price
+                                        tr.exit_reason = norm_reason
+                                        tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
+                                        self.risk.record_exit(tr_pnl)
+                                        _pts_loss = max(0.0, pos.entry_premium - executed_price)
+                                        self.state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                                        tr_rec = TradeAnalytics.build_tranche(underlying=pos.underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
+                                        self.journal.write(tr_rec)
+                                        for attr_name in ("sl_order_id", "tgt_order_id"):
+                                            oid = getattr(tr, attr_name, None)
+                                            if oid:
+                                                try:
+                                                    self.client.cancelorder(order_id=oid, strategy=self.config.broker.strategy_name)
+                                                except Exception:
+                                                    pass
+                                                finally:
+                                                    setattr(tr, attr_name, None)
+                                with self.state.exit_lock:
+                                    self.state.exit_queue.discard(pos.slot_id)
+                                pos.exit_pending = False
+                                with self.state.state_lock:
+                                    self.state.pending_exits.pop(slot_id_to_pop, None)
+                            else:
+                                self._finalize_exit(pos.underlying, pos, executed_price, pnl, norm_reason,
+                                                    exit_price_source="broker_fill",
+                                                    opt_symbol=pos.symbol, pop_pending_exit=True)
+                                                    
+                            pnl_sign = "✅" if pnl >= 0 else "❌"
+                            self._notify(
+                                f"{pnl_sign} {self.config.broker.strategy_name} EXIT confirmed [Stream]\n"
+                                f"{pos.underlying} {pos.option_type} | {pos.symbol}\n"
+                                f"Exit ₹{executed_price:.2f} | Entry ₹{pos.entry_premium:.2f} | P&L ₹{pnl:.2f}\n"
+                                f"Daily P&L ₹{self.risk.daily_pnl:.0f}",
+                                8 if pnl < 0 else 6,
+                            )
 
         # ── 3. Protection order fill (NEW — LIMIT / SL-M matched to positions) ──
         if not handled and os_status in ("complete", "filled", "executed"):
@@ -7907,8 +8027,7 @@ class OptionsBuyerEdgeBot:
                     ):
                         # Position-level match (single-tranche path)
                         if getattr(pos, attr_name, None) == order_id:
-                            inf(f"[ORDER-STREAM] Protection fill detected: "
-                                f"{attr_name} {order_id} → handling immediately")
+                            inf(f"[ORDER-STREAM] Protection fill detected: {attr_name} {order_id} → handling immediately")
                             self.orders._handle_broker_order_fill(
                                 underlying, pos, attr_name, order_id,
                                 raw_reason, executed_price,
@@ -7917,8 +8036,7 @@ class OptionsBuyerEdgeBot:
                         # Tranche-level match (multi-tranche path)
                         for tr in (pos.tranches or []):
                             if getattr(tr, attr_name, None) == order_id:
-                                inf(f"[ORDER-STREAM] Protection fill detected: "
-                                    f"{attr_name} t={tr.tranche_id} {order_id} → handling immediately")
+                                inf(f"[ORDER-STREAM] Protection fill detected: {attr_name} t={tr.tranche_id} {order_id} → handling immediately")
                                 self.orders._handle_broker_order_fill(
                                     underlying, pos, attr_name, order_id,
                                     raw_reason, executed_price, tr=tr,
@@ -7937,7 +8055,7 @@ class OptionsBuyerEdgeBot:
         try:
             # self.client.whatsapp(message=message)
             self.client.telegram(username=self.config.broker.openalgo_username, message=message, priority=priority)
-        except Exception as exc: err(f"[ALERT] Send error: ", exc)
+        except Exception as exc: err("[ALERT] Send error: ", exc)
 
     def _verify_registration(self) -> None:
         """Check strategy is recognized by the platform. Standalone scripts skip registration."""
@@ -8004,8 +8122,7 @@ class OptionsBuyerEdgeBot:
                         continue
                     if oid not in known_ids:
                         orphan_orders_skipped += 1
-                        inf(f"[STARTUP] Unrecognized order {oid} for {o_sym} — "
-                            f"not in local order history, skipping cancellation for safety")
+                        inf(f"[STARTUP] Unrecognized order {oid} for {o_sym} — not in local order history, skipping cancellation for safety")
                         continue
                     try:
                         resp_c = self.client.cancelorder(order_id=oid, strategy=cfg.broker.strategy_name)
@@ -8154,7 +8271,7 @@ class OptionsBuyerEdgeBot:
                             pos.broker_protection = True
                             _advance_stage(pos, LifecycleStage.INITIAL_PROTECTED)
 
-        except Exception as exc: err(f"[STARTUP] positionbook error: ", exc)
+        except Exception as exc: err("[STARTUP] positionbook error: ", exc)
 
     def _check_max_hold(self) -> None:
         """Exit positions held > max_hold_minutes (theta decay guard). 0=disabled."""
@@ -8210,7 +8327,7 @@ class OptionsBuyerEdgeBot:
                     exit_price_source="estimated", record_type="orphan_cleanup",
                 )
                 inf(f"[CLEANUP] Force-removing stale position {pos.symbol} ({pos.slot_id}) — "
-                    f"exit already processed, wrote orphan_cleanup row. If PnL seems missing check broker.")
+                    "exit already processed, wrote orphan_cleanup row. If PnL seems missing check broker.")
                 _advance_stage(pos, LifecycleStage.CLOSED)
                 self.state.positions.pop(pos.slot_id, None)
                 self.state.pending_opposite_exit.discard(pos.underlying)
@@ -8257,7 +8374,7 @@ class OptionsBuyerEdgeBot:
                 sign  = "+" if pnl >= 0 else ""
                 self._send_alert(f"{emoji} {pos.underlying} {side} | PNL: ₹{sign}{pnl:.0f} | Hold: {hold_str}", 3)
                 
-        except Exception as exc: err(f"[PNL REPORT] Error checking active PNL: ", exc)
+        except Exception as exc: err("[PNL REPORT] Error checking active PNL: ", exc)
 
     def _check_naked_shorts(self) -> None:
         if self.config.broker.paper_trade or not hasattr(self.client, "positionbook"):
@@ -8281,15 +8398,15 @@ class OptionsBuyerEdgeBot:
                 tracked = any(pos.symbol == sym for pos in self.state.positions.all_positions())
                 err(f"[SAFETY] NAKED SHORT DETECTED: {sym} qty={qty} @ ₹{avg:.2f} tracked_by_strategy={tracked}")
                 self._send_alert(
-                    f"🚨🚨 NAKED SHORT DETECTED 🚨🚨\n"
+                    "🚨🚨 NAKED SHORT DETECTED 🚨🚨\n"
                     f"{sym}  qty={qty} @ ₹{avg:.2f}\n"
                     f"Strategy tracking this symbol: {'yes' if tracked else 'NO — untracked'}\n"
-                    f"Not auto-corrected — square off at the broker manually.",
+                    "Not auto-corrected — square off at the broker manually.",
                     10,
                 )
             self._naked_short_alerted &= current_shorts
         except Exception as exc:
-            err(f"[SAFETY] naked-short check error: ", exc)
+            err("[SAFETY] naked-short check error: ", exc)
 
     def _is_market_hours(self) -> bool:
         hm = int(get_ist_now().strftime("%H%M"))
@@ -8308,7 +8425,7 @@ class OptionsBuyerEdgeBot:
         inf(f"  FNO Exchange    : {cfg.market.fno_exchange}")
         inf(f"  Min Score       : {cfg.entry.min_score} | Max Trap: {cfg.entry.max_trap}")
         inf(f"  SL Points       : {cfg.entry.premium_stop_pts} (Phase A hard SL fallback)")
-        inf(f"  Phase A SL      : moneyness-adapted from entry_delta or fallback to PREMIUM_STOP_PTS")
+        inf("  Phase A SL      : moneyness-adapted from entry_delta or fallback to PREMIUM_STOP_PTS")
         _max_pts_str = f" (hard cap {cfg.trail.activate_at_max_pts:.0f}pts)" if cfg.trail.activate_at_max_pts > 0 else ""
         inf(
             f"  Phase B Trail   : tracking={cfg.trail.tracking_mode}  method={cfg.trail.sl_method}  "
@@ -8343,14 +8460,14 @@ class OptionsBuyerEdgeBot:
         _os_plat = " [platform:READY]" if cfg.broker.order_updates_enabled else " [platform:UNAVAIL]"
         inf(f"  Order Stream    : {'ENABLED' if cfg.broker.order_stream_enabled else 'disabled'}{_os_auto}{_os_plat}")
         inf("-" * 70)
-        inf(f"  [RISK GATES]")
+        inf("  [RISK GATES]")
         inf(f"  Max Trades/Day  : {cfg.risk.max_trades_per_session or 'unlimited'}")
         inf(f"  Max Consec Loss : {cfg.risk.max_consecutive_losses}")
         inf(f"  Daily Loss Limit: ₹{cfg.risk.max_daily_loss_amount:.0f}"
               + (f" | {cfg.risk.max_daily_loss_pct:.1f}%" if cfg.risk.max_daily_loss_pct > 0 else ""))
         inf(f"  Daily Profit Tgt: {'disabled' if cfg.risk.max_daily_profit_amount <= 0 else f'₹{cfg.risk.max_daily_profit_amount:.0f}'}")
         inf(f"  Entry Cooldown  : {cfg.risk.entry_cooldown_secs}s per underlying")
-        inf(f"  [TIMING]")
+        inf("  [TIMING]")
         inf(f"  No New Entries  : after {cfg.market.no_new_trade_after} IST")
         inf(f"  EOD Square-Off  : {cfg.market.square_off_time} IST")
         inf(f"  Max Hold Time   : {'disabled' if cfg.market.max_hold_minutes <= 0 else f'{cfg.market.max_hold_minutes}m per trade'}")
@@ -8359,7 +8476,7 @@ class OptionsBuyerEdgeBot:
         if cfg.journal.known_order_ids_path:
             inf(f"  Known Order IDs : {os.path.abspath(cfg.journal.known_order_ids_path)}")
         if cfg.broker.paper_trade:
-            inf(f"\n  *** PAPER TRADE MODE — no real orders will be sent ***")
+            inf("\n  *** PAPER TRADE MODE — no real orders will be sent ***")
         inf("=" * 70)
 
     def scan_underlying(self, symbol: str) -> None:
@@ -8451,7 +8568,7 @@ class OptionsBuyerEdgeBot:
 
         df_spot = self.fetcher.fetch_spot_candles(symbol)
 
-        strikes = sorted(set(r["strike"] for r in smoothed))
+        strikes = sorted({r["strike"] for r in smoothed})
         atm_k   = min(strikes, key=lambda x: abs(x - spot))
         atm_row = next((r for r in smoothed if r.get("strike") == atm_k), {})
         atm_ce_ltp  = float(atm_row.get("ce_ltp", 0) or 0)
@@ -8837,23 +8954,14 @@ class OptionsBuyerEdgeBot:
         # Block entry entirely if broker_sl_orders=False (no fallback protection at all).
         if not self.ws.is_connected():
             if not cfg.broker.broker_sl_orders:
-                inf(
-                    f"[SCAN] {symbol}: entry BLOCKED — WS disconnected and broker_sl_orders=False. "
-                    f"No protection available."
-                )
+                inf(f"[SCAN] {symbol}: entry BLOCKED — WS disconnected and broker_sl_orders=False. No protection available.")
                 _log_greeks_perf("ws-dead-no-broker-sl", sep_count=79)
                 return
-            inf(
-                f"[RISK] {symbol}: WS disconnected — entry allowed (broker SL-M active). "
-                f"Trail/target hit detection blind until WS recovers."
-            )
+            inf(f"[RISK] {symbol}: WS disconnected — entry allowed (broker SL-M active). Trail/target hit detection blind until WS recovers.")
 
         # All guards passed — close the scan block then log intent
         _log_greeks_perf("entry-preflight", sep_count=79)
-        inf(
-            f"[SCAN] {symbol}: placing {direction} entry | strike {best.get('strike')} "
-            f"| {opt_symbol} x{qty}"
-        )
+        inf(f"[SCAN] {symbol}: placing {direction} entry | strike {best.get('strike')} | {opt_symbol} x{qty}")
 
         entry_allowed, entry_reason = self.risk.check_entry_gates(symbol)
         if not entry_allowed:
@@ -8962,7 +9070,7 @@ class OptionsBuyerEdgeBot:
     def _watchdog_loop(self, timeout: float) -> None:
         while True:
             time.sleep(timeout)
-            elapsed = time.time() - getattr(self, "_last_strategy_heartbeat", 0.0)
+            elapsed = time.time() - self._last_strategy_heartbeat
             if elapsed < timeout:
                 continue
             ts = f"{get_ist_now():%H:%M:%S}"
@@ -8971,15 +9079,16 @@ class OptionsBuyerEdgeBot:
                 frame = getattr(t, "_thread__target", None) or getattr(t, "_target", None)
                 ident = t.ident
                 try:
-                    _f = sys._current_frames().get(ident)
-                    if _f:
-                        stack = "".join(traceback.format_stack(_f))
-                        stacks.append(f"Thread[{t.name}](ident={ident}):\n{stack}")
+                    if ident is not None:
+                        _f = sys._current_frames().get(ident)
+                        if _f:
+                            stack = "".join(traceback.format_stack(_f))
+                            stacks.append(f"Thread[{t.name}](ident={ident}, target={frame}):\n{stack}")
                 except Exception:
                     pass
             stack_dump = "\n---\n".join(stacks) if stacks else "(no stack frames captured)"
             err(
-                f"[WATCHDOG] Strategy heartbeat stale for {elapsed:.0f}s (> {timeout:.0f}s timeout)\n"
+                f"[WATCHDOG] [{ts}] Strategy heartbeat stale for {elapsed:.0f}s (> {timeout:.0f}s timeout)\n"
                 f"--- THREAD DUMP ---\n{stack_dump}\n--- END DUMP ---"
             )
 
@@ -9061,7 +9170,7 @@ class OptionsBuyerEdgeBot:
                 else:
                     inf("[STRATEGY] Outside market hours — skipping signal scan")
 
-            except Exception as exc: err(f"[STRATEGY ERROR] ", exc)
+            except Exception as exc: err("[STRATEGY ERROR] ", exc)
 
             self.state.bucket_counter += 1
 
@@ -9080,7 +9189,6 @@ class OptionsBuyerEdgeBot:
     def _test_websocket(self) -> None:
         """Smoke-test: connect → authenticate → subscribe → await ticks. Prints PASS/FAIL before live feed starts."""
         import asyncio as _aio
-        import json as _json
         try:
             import websockets as _websockets
         except ImportError:
@@ -9111,9 +9219,9 @@ class OptionsBuyerEdgeBot:
             else:
                 _rest_msg = _rest_data.get("message", str(_rest_data))
                 inf(f"[WS-TEST] WARN: REST API key check failed: {_rest_msg}")
-                inf(f"[WS-TEST]       If REST also returns 'Invalid API key', the key in OPENALGO_API_KEY is wrong.")
+                inf("[WS-TEST]       If REST also returns 'Invalid API key', the key in OPENALGO_API_KEY is wrong.")
                 inf(f"[WS-TEST]       Get the correct key from: {cfg.broker.api_host}/apikey")
-        except Exception as _rest_exc: err(f"[WS-TEST] REST check skipped: ", _rest_exc)
+        except Exception as _rest_exc: err("[WS-TEST] REST check skipped: ", _rest_exc)
 
         inf(f"[WS-TEST] Testing {ws_url} ...")
 
@@ -9122,28 +9230,27 @@ class OptionsBuyerEdgeBot:
                 async with _websockets.connect(ws_url, open_timeout=10) as ws:
                     inf("[WS-TEST] Transport OK — WebSocket handshake succeeded")
 
-                    await ws.send(_json.dumps({
+                    await ws.send(json.dumps({
                         "action": "authenticate",
                         "api_key": cfg.broker.api_key,
                     }))
                     raw = await _aio.wait_for(ws.recv(), timeout=10)
-                    resp = _json.loads(raw)
+                    resp = json.loads(raw)
                     status = resp.get("status") or resp.get("type", "")
                     if status not in ("success", "authenticated"):
                         code = resp.get("code", "")
                         inf(f"[WS-TEST] FAIL — auth rejected: {resp}")
                         if code == "AUTHENTICATION_ERROR" or "Invalid API key" in resp.get("message", ""):
                             inf(
-                                f"[WS-TEST] HINT: The API key in OPENALGO_API_KEY does not match"
-                                f" any key stored in the OpenAlgo database."
-                                f"\n[WS-TEST]       1. Log in to your OpenAlgo dashboard"
-                                f"\n[WS-TEST]       2. Go to API Key page (Account → API Key)"
-                                f"\n[WS-TEST]       3. Copy the key and set OPENALGO_API_KEY=<copied-key> in your .env"
+                                "[WS-TEST] HINT: The API key in OPENALGO_API_KEY does not match any key stored in the OpenAlgo database."
+                                "\n[WS-TEST]       1. Log in to your OpenAlgo dashboard"
+                                "\n[WS-TEST]       2. Go to API Key page (Account → API Key)"
+                                "\n[WS-TEST]       3. Copy the key and set OPENALGO_API_KEY=<copied-key> in your .env"
                             )
                         return
-                    inf(f"[WS-TEST] Auth OK")
+                    inf("[WS-TEST] Auth OK")
 
-                    await ws.send(_json.dumps({
+                    await ws.send(json.dumps({
                         "action": "subscribe",
                         "symbols": [TEST_SYMBOL],
                         "mode": "ltp",
@@ -9156,7 +9263,7 @@ class OptionsBuyerEdgeBot:
                         remaining = deadline - _aio.get_event_loop().time()
                         try:
                             raw = await _aio.wait_for(ws.recv(), timeout=min(5, remaining))
-                            msg = _json.loads(raw)
+                            msg = json.loads(raw)
                             # Skip subscribe-ack messages
                             if msg.get("action") == "subscribe" or msg.get("type") == "subscribed":
                                 continue
@@ -9169,10 +9276,7 @@ class OptionsBuyerEdgeBot:
                             inf(f"[WS-TEST] (no tick yet, {remaining:.0f}s remaining...)")
 
                     if tick_count == 0:
-                        inf(
-                            f"[WS-TEST] WARNING — connected & authenticated but 0 ticks "
-                            f"in {TICK_WAIT}s. Market may be closed or WS server has no feed."
-                        )
+                        inf(f"[WS-TEST] WARNING — connected & authenticated but 0 ticks in {TICK_WAIT}s. Market may be closed or WS server has no feed.")
                     else:
                         inf(f"[WS-TEST] PASS — received {tick_count} tick(s) ✓")
 
@@ -9189,18 +9293,18 @@ class OptionsBuyerEdgeBot:
                         _hint = (
                             f"\n[WS-TEST] HINT: '{ws_url}' is wrong for an HTTPS host."
                             f"\n[WS-TEST]       Remote server → set  WEBSOCKET_URL=wss://{_ws_domain}/ws"
-                            f"\n[WS-TEST]       Same server   → set  WEBSOCKET_URL=ws://127.0.0.1:8765"
+                            "\n[WS-TEST]       Same server   → set  WEBSOCKET_URL=ws://127.0.0.1:8765"
                         )
                 elif "InvalidStatus" in _exc_type or "HTTP 200" in _emsg or "HTTP 4" in _emsg:
                     _hint = (
-                        f"\n[WS-TEST] HINT: The server returned an HTTP response instead of upgrading to WebSocket."
+                        "\n[WS-TEST] HINT: The server returned an HTTP response instead of upgrading to WebSocket."
                         f"\n[WS-TEST]       This means the reverse proxy (Caddy/nginx) is NOT routing '{ws_url}'"
-                        f"\n[WS-TEST]       to the OpenAlgo WebSocket server on port 8765."
-                        f"\n[WS-TEST]       Fix: Add a /ws → localhost:8765 block in your Caddyfile:"
-                        f"\n[WS-TEST]         @websocket path /ws /ws/*"
+                        "\n[WS-TEST]       to the OpenAlgo WebSocket server on port 8765."
+                        "\n[WS-TEST]       Fix: Add a /ws → localhost:8765 block in your Caddyfile:"
+                        "\n[WS-TEST]         @websocket path /ws /ws/*"
                         f"\n[WS-TEST]         handle @websocket {{ reverse_proxy localhost:8765 }}"
-                        f"\n[WS-TEST]       Then reload Caddy: sudo systemctl reload caddy"
-                        f"\n[WS-TEST]       Until then, use ws://127.0.0.1:8765 if running on the same server."
+                        "\n[WS-TEST]       Then reload Caddy: sudo systemctl reload caddy"
+                        "\n[WS-TEST]       Until then, use ws://127.0.0.1:8765 if running on the same server."
                     )
                 err(f"[WS-TEST] FAIL — {_exc_type}: {exc}{_hint}", exc)
 
