@@ -23,6 +23,20 @@ Act as a compiler engineer. Run exhaustive multi-layer structural analysis on th
 
 ---
 
+## Auditing Verification Pormpts
+
+### Last-Context Integrity Check
+```text
+Review all changes made so far and verify their correctness end-to-end, using the last valid message and available context to determine the correct scope of review. Explicitly check for anything that was skipped, left incomplete, or silently dropped, and surface it clearly rather than assuming it was handled.
+```
+
+### Continuity & Correctness Audit
+```text
+Review all changes made so far and verify their correctness end-to-end. Explicitly check for anything that was skipped, left incomplete, or silently dropped during prior "Continue" responses, and surface it clearly rather than assuming it was handled.
+```
+
+---
+
 ## New Online Auditing Pormpts
 
 ### A
