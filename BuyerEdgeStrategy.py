@@ -3935,7 +3935,7 @@ class DataFetcher:
                     )
             elif isinstance(error_msg, str) and ("UDAPI10005," in error_msg or "Too Many Request Sent" in error_msg):
                 err(f"{symbol}@{exchange}: broker rate limit (UDAPI10005): {response}")
-                if self._notify and not hasattr(self, '_rate_limit_notified'):
+                if self._notify and not self._rate_limit_notified:
                     self._rate_limit_notified = True
                     self._notify(
                         f"⚠️ Upstox rate limit hit (UDAPI10005) for {symbol}.\n"
