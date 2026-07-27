@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F77 (F28, F49–F51 reserved; F65–F70 unused) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64, F71–F93 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -68,12 +68,12 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F77 (F28, F49–F51 reserved; F65–F70 unused)
+# Closed Findings:               F1–F64, F71–F93 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
-# Remaining Work:                Signal architecture steps 1, 4 (see OPEN OBSERVATIONS) + min_score calibration
+# Remaining Work:                Signal architecture steps 1, 4 (see OPEN OBSERVATIONS) + min_score calibration + F94
 #
 # OPEN OBSERVATIONS
 # ------------------------------------------------------------------------------
@@ -93,6 +93,10 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #     pre-Step-3 threshold semantics — deliberately not auto-applied to a live parameter.
 #   ⬢ clear_oi_state() unused: method defined on SignalEngine but never called —
 #     cross-session OI buffer carry-over depends on daily process restart.
+#   ⬢ F94: _handle_order_stream_event priority-2 exit dispatch was non-functional
+#     (copied into bot, referenced 5 OrderManager-only attrs — now routed through self.orders).
+#   ⬢ F95: check_trailing_stops unconditional spot_ltp gate froze premium trail
+#     whenever spot feed went stale; gate moved inside spot-consuming branches only.
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
 # telegram() correctly omits strategy= (SDK has no such param).
@@ -195,7 +199,37 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F87 ✓ Fixed (P1): place_exit() blindly finalized entire positions on partial exits when tranches were in-flight, stranding pending orders and skipping P&L/journal accounting.
 # F88 ✓ Fixed (P2): Order-stream dispatcher missed streamed exit fills because it keyed pending_exits by order_id instead of slot_id.
 # F89 ✓ Fixed (P1): Partial exits leaked slot_id in exit_queue permanently, disabling all future fast WS-tick exits (trail/SL) for the residual tranche. Added exit_queue.discard().
-
+# F90 ✓ Fixed (CRITICAL): OptionsBuyerEdgeBot._handle_order_stream_event priority-2 (exit completion) branch was
+#       transplanted from OrderManager and dereferenced five attributes the orchestrator does not own —
+#       self._pending_tranche_exits_lock, self._pending_tranche_exits, self.journal, self._finalize_exit, self._notify.
+#       AST ownership check confirms OptionsBuyerEdgeBot has no bases and defines none of them; all five live on
+#       OrderManager (_journal at L6039, _pending_tranche_exits at L6040-6041, _finalize_exit at L6305, _notify at L6038).
+#       Every streamed exit fill matching a pending_exits entry therefore raised AttributeError, was swallowed by the
+#       _strategy_thread catch-all, and aborted the remainder of that cycle (check_pending_*, check_broker_order_fills,
+#       verify_sl_orders_active, trail engine, all scans) before falling back to REST polling. F88 fixed the slot_id
+#       keying that reaches this block but the block itself had never executed. Latent only because order_updates_enabled
+#       defaults FALSE (platform-injected), so subscribe_orders() is normally never called. Fixed by routing through
+#       self.orders.* and self._send_alert (which IS OrderManager._notify — wired at L7888).
+# F91 ✓ Fixed (HIGH): _process_premium_trail read _lock_floor at the _lock_type/LOCKED-stage site while leaving it
+#       unbound on the non-ATR + tgt <= entry_premium path — UnboundLocalError confirmed by executing the transcribed
+#       branch logic. Reachable two ways: PREMIUM_TARGET_PTS=0 (EntryConfig.validate() has no check on
+#       premium_target_pts, so tgt == executed passes validation) and startup restore, which overwrites pos.tgt from a
+#       broker LIMIT price guarded only by > 0, not > entry_premium. Sibling code already treats this state as expected —
+#       _compute_raw_activation_threshold (L4333) carries an explicit `if pos.tgt > ep else 999.0` sentinel for it.
+#       Fired after pos.sl was already assigned, so the SL landed but LifecycleStage.LOCKED was skipped and the cycle
+#       aborted. Fixed by binding _lock_floor = ep on that path (breakeven IS the floor there, matching the existing max()).
+# F92 ✓ Fixed (HIGH): check_trailing_stops computed _needs_spot (key_level / spot modes only) and built the [DATA-MISS]
+#       _missing list from it, then 50 lines later unconditionally re-derived spot_ltp and did `if spot_ltp is None: continue`.
+#       The recompute was a no-op (spot_ltp resolved at L4380, never reassigned in between) and the gate defeated the
+#       guard above it. _process_premium_trail takes no spot argument and references zero spot-derived names (AST-verified),
+#       so in the DEFAULT config (tracking_mode=premium, sl_method=atr) a stale spot feed silently froze the premium trail
+#       with no diagnostic — _missing was empty, so [DATA-MISS] never fired. Fixed by moving the None-gate inside the two
+#       spot-consuming branches only, preserving the _needs_spot intent and type narrowing.
+# F93 ✓ Fixed (MEDIUM): fetch_quote UDAPI10005 branch guarded on `not hasattr(self, '_rate_limit_notified')`, but the
+#       attribute is initialized in __init__ (L3689), so hasattr was always True and the broker rate-limit Telegram alert
+#       could never fire. Also violated this file's own CODING CONVENTIONS ban on lazy hasattr patterns. The sibling
+#       auth-error branch (L3894) uses the correct `not self._auth_error_notified` form. Fixed to match.
+#
 # ==============================================================================
 # CODING CONVENTIONS
 # ==============================================================================
@@ -7973,8 +8007,8 @@ class OptionsBuyerEdgeBot:
                             if pending_exit.exit_qty < pos.remaining_qty:
                                 for tr in list(pos.open_tranches):
                                     is_in_flight = False
-                                    with self._pending_tranche_exits_lock:
-                                        if f"{pos.underlying}_{tr.tranche_id}" in self._pending_tranche_exits:
+                                    with self.orders._pending_tranche_exits_lock:
+                                        if f"{pos.underlying}_{tr.tranche_id}" in self.orders._pending_tranche_exits:
                                             is_in_flight = True
                                     if not is_in_flight and not tr.is_exit_placed:
                                         tr.is_exit_placed = True
@@ -7985,7 +8019,7 @@ class OptionsBuyerEdgeBot:
                                         _pts_loss = max(0.0, pos.entry_premium - executed_price)
                                         self.state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
                                         tr_rec = TradeAnalytics.build_tranche(underlying=pos.underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
-                                        self.journal.write(tr_rec)
+                                        self.orders._journal.write(tr_rec)
                                         for attr_name in ("sl_order_id", "tgt_order_id"):
                                             oid = getattr(tr, attr_name, None)
                                             if oid:
@@ -8000,13 +8034,13 @@ class OptionsBuyerEdgeBot:
                                 pos.exit_pending = False
                                 with self.state.state_lock:
                                     self.state.pending_exits.pop(slot_id_to_pop, None)
-                            else:
-                                self._finalize_exit(pos.underlying, pos, executed_price, pnl, norm_reason,
+else:
+                                self.orders._finalize_exit(pos.underlying, pos, executed_price, pnl, norm_reason,
                                                     exit_price_source="broker_fill",
                                                     opt_symbol=pos.symbol, pop_pending_exit=True)
-                                                    
+
                             pnl_sign = "✅" if pnl >= 0 else "❌"
-                            self._notify(
+                            self._send_alert(
                                 f"{pnl_sign} {self.config.broker.strategy_name} EXIT confirmed [Stream]\n"
                                 f"{pos.underlying} {pos.option_type} | {pos.symbol}\n"
                                 f"Exit ₹{executed_price:.2f} | Entry ₹{pos.entry_premium:.2f} | P&L ₹{pnl:.2f}\n"
