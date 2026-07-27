@@ -4473,10 +4473,13 @@ class TrailSLEngine:
                     _signal_trail_boost = 1.0 + (_sig_strength * 0.5)
             
             # ── Mode Processing ────────
-            spot_ltp = _spot_snap.spot_ltp if _spot_snap else None
-            if spot_ltp is None:
-                continue
+            # spot_ltp resolved above (L4380) and never reassigned since. Only the
+            # spot-consuming modes may gate on it — premium trail never reads spot,
+            # so an unconditional gate here silently froze the default-config trail
+            # whenever the spot feed went stale, with no [DATA-MISS] log (F92).
             if cfg.trail.sl_method == "key_level":
+                if spot_ltp is None:
+                    continue
                 self._process_key_level_trail(underlying, pos, spot_ltp, confirmed_close)
             elif cfg.trail.tracking_mode == "premium":
                 self._process_premium_trail(
@@ -4488,6 +4491,8 @@ class TrailSLEngine:
                     _signal_trail_boost,
                 )
             elif cfg.trail.tracking_mode == "spot":
+                if spot_ltp is None:
+                    continue
                 self._process_spot_trail(underlying, pos, spot_ltp, _trail_conv_adj, _signal_trail_boost)
 
             # ── Record activation analytics on first detection ────────
@@ -4693,7 +4698,11 @@ class TrailSLEngine:
                     self._last_pl_pct[pos.slot_id] = _pct_of_target
                     new_sl = max(new_sl, _lock_floor)
                 else:
-                    new_sl = max(new_sl, ep)
+                    # No positive target gain (tgt <= ep, e.g. PREMIUM_TARGET_PTS=0 or a
+                    # restored broker LIMIT at/below entry). Breakeven IS the floor here —
+                    # bind it explicitly so the _lock_type read below stays defined (F91).
+                    _lock_floor = ep
+                    new_sl = max(new_sl, _lock_floor)
 
             _min_improvement = confirmed_close * cfg.trail.atr_min_ratchet_improvement_pct / 100.0
             if new_sl > pos.sl + _min_improvement:
