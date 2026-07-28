@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F93 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64, F71–F93, F100 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -68,7 +68,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F93 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open)
+# Closed Findings:               F1–F64, F71–F93, F100 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
@@ -202,6 +202,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F91 ✓ Fixed (HIGH): _process_premium_trail left _lock_floor unbound on the non-ATR + tgt ≤ ep path — UnboundLocalError skipped LOCKED stage after SL already landed. Fixed by binding _lock_floor = ep on that path.
 # F92 ✓ Fixed (HIGH): check_trailing_stops had an unconditional spot_ltp gate after red herring computation — stale spot feed silently froze the premium trail with no diagnostic. Fixed by moving the None-gate inside only the key_level and spot branches.
 # F93 ✓ Fixed (MEDIUM): fetch_quote UDAPI10005 guard used hasattr() for an __init__-initialized attribute — rate-limit alert could never fire. Fixed to match sibling auth-error branch pattern.
+# F100 ✓ Fixed (CRITICAL): Cancel/fill race in cancel_broker_orders — concurrent cancel overwrote order_status after fill, status endpoints said 'cancelled' and place_exit sent duplicate SELL creating naked short. Fixed with tradebook cross-check at cancel + broker-net-qty backstop in place_exit.
 #
 # ==============================================================================
 # CODING CONVENTIONS
@@ -6519,13 +6520,7 @@ class OrderManager:
                     }
                     dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
                 elif broker_stat in ("cancelled", "canceled", "rejected") and attr_name not in broker_filled:
-                    # F100: a 'cancelled' verdict here is NOT proof of no-fill. The
-                    # execution engine can fill an order and write order_status='complete'
-                    # while a concurrent cancel overwrites that same row with 'cancelled'
-                    # — the trade and the position mutation both survive. Every status
-                    # endpoint then reports 'cancelled' for an order that really filled,
-                    # and the caller places a duplicate SELL, going net short.
-                    # The trade row is the one artefact the cancel never touches.
+                    # F100: cancel raced fill — cancelled status is not proof of no-fill; trade row proves fill.
                     _tb_price = self._fill_from_tradebook(oid, pos.symbol)
                     if _tb_price and _tb_price > 0:
                         broker_filled[attr_name] = {
@@ -6548,16 +6543,10 @@ class OrderManager:
         return broker_filled
 
     def _fill_from_tradebook(self, order_id: str, symbol: str) -> float | None:
-        """Authoritative fill lookup for one order_id, independent of order_status (F100).
+        """Authoritative fill lookup by order_id, independent of order_status (F100).
 
-        orderstatus()/orderbook() report the order ROW, whose terminal status can be
-        overwritten to 'cancelled' by a concurrent cancel that raced the execution
-        engine. The TRADE row is created before the status write and is never rolled
-        back by cancel_order(), so a trade keyed to this order_id proves a fill even
-        when every status endpoint says 'cancelled'.
-
-        Returns the quantity-weighted average fill price, or None when no trade
-        exists (the genuine no-fill case) or the lookup is unavailable.
+        The trade row is written before order_status and survives concurrent cancel — returns
+        qty-weighted avg price when a trade exists for this order_id, None otherwise.
         """
         if not order_id or not hasattr(self.client, "tradebook"):
             return None
@@ -6583,11 +6572,9 @@ class OrderManager:
             return None
 
     def _broker_net_qty(self, symbol: str) -> int | None:
-        """Net position quantity held at the broker for an exact symbol (F100).
+        """Net broker position qty for a symbol, used to clamp exit size (F100).
 
-        Ground truth for 'how much do I actually own' — used to clamp exit size so a
-        protective order that filled inside the cancel window can never be sold twice.
-        Returns None when the lookup is unavailable (caller falls back to prior behaviour).
+        Returns None on failure (caller falls back), 0 if no position, int qty otherwise.
         """
         if not hasattr(self.client, "positionbook"):
             return None
@@ -7585,25 +7572,10 @@ class OrderManager:
             pos.exit_pending = False
             return
 
-        # F100 (defence in depth): never sell more than the broker actually holds.
-        # Backstop for when the tradebook cross-check in cancel_broker_orders is
-        # unavailable or the fill lands after the cancel returns.
-        #
-        # positionbook is ACCOUNT-WIDE, not strategy-scoped (findings-master §1.3/§1.8,
-        # re-verified against openalgo source: restx_api/positionbook.py has no strategy
-        # reference; sandbox get_positions filters on user_id only). That splits what this
-        # reading can justify:
-        #   • Suppressing the SELL is always sound. The broker nets MIS positions per
-        #     symbol, so account_qty <= 0 means there is genuinely nothing to sell and
-        #     selling would open a real short. Naked-short risk is an ACCOUNT-level
-        #     property, which is exactly what this number measures.
-        #   • Booking the exit is NOT sound. The qty may be netted to zero by another
-        #     strategy's position on the same symbol, so it is not proof that OUR order
-        #     filled. Only the order_id-keyed tradebook check can prove that, per §1.8
-        #     ("cross-check against order IDs your bot actually placed — not symbol
-        #     matching"). If it had found a fill we would have returned already.
-        # So: always suppress, never finalize here. Leave the slot tracked and let the
-        # next reconciliation cycle resolve it against real evidence.
+        # F100 defence in depth: never sell more than the broker holds. positionbook is account-wide,
+        # not strategy-scoped — suppressing the SELL is always sound (naked-short risk is account-level),
+        # but booking the exit is NOT (qty may be netted by another strategy). Always suppress, never
+        # finalize here; leave the slot tracked for the next reconciliation cycle.
         if not cfg.broker.paper_trade:
             _held = self._broker_net_qty(pos.symbol)
             if _held is not None:
