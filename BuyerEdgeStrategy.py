@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F93, F96–F100 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64, F71–F93, F96–F99 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -68,7 +68,9 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F93, F96–F100 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
+# Closed Findings:               F1–F64, F71–F93, F96–F99 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
+# F100 — reconciled-fill gate (F100): Open — see session log for discussion
+# External Audit:                F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
@@ -205,8 +207,10 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F94 ✓ Fixed (HIGH): Session-adjusted min_score reached SignalEngine.score() but not StrikeSelector.select_best() or conviction scalars — power-hour signals that passed EXECUTE (eased bar) got rejected by select_best; morning gate overstated conviction 3.3x. Fixed by plumbing effective_min_score through select_best(), entry_conviction, and trail opposition gate.
 # F96 ✓ Fixed (HIGH): Startup optiongreeks delta read at top level always yielded 0.0, mapping every restored position to Deep-OTM (tgt_mult 0.5, act_mult 2.0) — delta is nested at greeks.delta. Fixed with correct nested path and status check; zero delta maps to Unknown band.
 # F97 ✓ Fixed (MEDIUM): Consecutive win/loss streak counted tranches, not trades — a 3-tranche stop-out booked 3 consecutive losses, halving the session after 2.7 trades; scale-out booking a winning trade as a loss. Fixed by accumulating per-slot realized P&L across partial exits and settling the streak once per trade via closes_position flag and close_trade().
-# F98 ✓ Fixed (MEDIUM): Strike-loss guard over-counted point loss on multi-tranche positions — record_strike_loss() called per tranche with full (entry - exit) pts_loss, and _finalize_exit recorded full loss for the final slice. Fixed by weighting all 10 call sites (8 tranche exits by tr.qty/pos.qty, apply_confirmed_partial_exit by filled_qty/pos.qty, _finalize_exit by remaining_qty/pos.qty) so every partial-exit slice sums to the position's real point loss.
+# F98 ✓ Fixed (MEDIUM): Strike-loss guard over-counted point loss on multi-tranche positions — record_strike_loss() called per tranche with full (entry - exit) pts_loss, and _finalize_exit recorded full loss for the final slice.
+# F98b ✓ Fixed (MEDIUM): Weighting approach for F98 was also broken — apply_confirmed_partial_exit decrements pos.core.qty right after record_strike_loss, so the denominator shrinks across repeated partial fills (1.83× on 3 fills, 2.83× on 9). Fixed by replacing all 10 weighted record_strike_loss calls with an accrue/settle pattern: accrue_strike_loss() banks pts×qty and qty per slot; settle_strike_loss() commits the qty-weighted average once at the 3 close seams (_finalize_exit, all-tranches-broker-filled, _cleanup_stale_positions). The old record_strike_loss() is now only used by the strike-pain dashboard (query-only).
 # F99 ✓ Fixed (HIGH): ExitReason.normalize() not idempotent — double-normalize collapsed every WS-triggered exit to OTHER, starving the exit-type expectancy database. Fixed with _ENUM_VALUES pass-through, _RAW_PREFIX_TO_ENUM prefix matching, DEEP_OTM enum, and missing opposite_side_signal mapping.
+# F100 — reconciled-fill gate: defence in depth — never sell more than the broker holds. No fix needed; field issue noted for awareness.
 #
 # ==============================================================================
 # CODING CONVENTIONS
@@ -2628,6 +2632,7 @@ class BotState:
         self._chain_smooth_bars = chain_smooth_bars
         self.entry_in_flight: dict[str, int] = {}
         self._strike_loss_pts: dict[str, float] = {}
+        self._pending_strike_loss: dict[str, list] = {}  # slot_id → [(pts_loss, qty), ...]  (F98b)
         self.bucket_counter: int = 0
         self.pending_opposite_exit: set[str] = set()
         self.latest_signals: dict[str, tuple[SignalResult, float]] = {}
@@ -2675,6 +2680,34 @@ class BotState:
         with self.state_lock:
             self._strike_loss_pts[key] = self._strike_loss_pts.get(key, 0.0) + pts_loss
 
+    def accrue_strike_loss(self, slot_id: str, option_symbol: str, direction: str,
+                           pts_loss: float, qty: int) -> None:
+        """Accrue a partial-exit loss under a slot id for deferred settlement (F98b).
+        Banks (key, pts_loss × qty, qty) so settle_strike_loss() can compute the
+        qty-weighted average once at trade close."""
+        if pts_loss <= 0 or qty <= 0:
+            return
+        key = f"{option_symbol}|{direction}"
+        with self.state_lock:
+            self._pending_strike_loss.setdefault(slot_id, []).append((key, pts_loss * qty, qty))
+
+    def settle_strike_loss(self, slot_id: str) -> None:
+        """Commit pending accrue(s) for a slot id as a single qty-weighted
+        record_strike_loss entry, then discard the pending buffer (F98b).
+        No-op if no accrue entries exist for the slot."""
+        pending = self._pending_strike_loss.pop(slot_id, None)
+        if not pending:
+            return
+        # Group by key (all entries for the same slot share a key by construction)
+        by_key: dict[str, tuple[float, int]] = {}
+        for k, w, q in pending:
+            acc_w, acc_q = by_key.get(k, (0.0, 0))
+            by_key[k] = (acc_w + w, acc_q + q)
+        with self.state_lock:
+            for key, (total_weighted, total_qty) in by_key.items():
+                if total_qty > 0:
+                    self._strike_loss_pts[key] = self._strike_loss_pts.get(key, 0.0) + total_weighted / total_qty
+
     def strike_cum_loss_pts(self, option_symbol: str, direction: str) -> float:
         key = f"{option_symbol}|{direction}"
         with self.state_lock:
@@ -2682,6 +2715,7 @@ class BotState:
 
     def reset_strike_loss_pts(self) -> None:
         self._strike_loss_pts.clear()
+        self._pending_strike_loss.clear()
 
 
 def _smooth_greeks(history: deque, lookback: int | None = None,
@@ -6301,8 +6335,8 @@ class OrderManager:
         tr_pnl = _calc_pnl(pos, price, qty=filled_qty)
         self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
         _pts_loss = max(0.0, pos.entry_premium - price)
-        self._state.record_strike_loss(opt_sym, pos.option_type,
-                                      _pts_loss * filled_qty / max(1, pos.qty))
+        self._state.accrue_strike_loss(pos.slot_id, opt_sym, pos.option_type,
+                                       _pts_loss, filled_qty)
         tr_exit_record = TradeAnalytics.build_tranche(
             underlying=underlying, pos=pos, tr=filled_slice,
             paper_trade=self.config.broker.paper_trade,
@@ -6413,8 +6447,9 @@ class OrderManager:
         opt_sym = opt_symbol or pos.symbol
         self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=True)
         _pts_loss = max(0.0, pos.entry_premium - executed_price)
-        self._state.record_strike_loss(opt_sym, pos.option_type,
-                                      _pts_loss * pos.remaining_qty / max(1, pos.qty))
+        self._state.accrue_strike_loss(pos.slot_id, opt_sym, pos.option_type,
+                                       _pts_loss, pos.remaining_qty)
+        self._state.settle_strike_loss(pos.slot_id)
         reason_str = reason.value if isinstance(reason, ExitReason) else str(reason)
         self._write_journal(underlying, pos, executed_price, pnl, reason_str,
                             exit_price_source=exit_price_source)
@@ -6759,8 +6794,8 @@ class OrderManager:
             )
             self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
             _pts_loss = max(0.0, pos.entry_premium - executed_price)
-            self._state.record_strike_loss(pos.symbol, pos.option_type,
-                                                      _pts_loss * tr.qty / max(1, pos.qty))
+            self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type,
+                                           _pts_loss, tr.qty)
             tranche_record = TradeAnalytics.build_tranche(
                 underlying=underlying, pos=pos, tr=tr,
                 paper_trade=self.config.broker.paper_trade,
@@ -7437,8 +7472,8 @@ class OrderManager:
                 f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
             self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
             _pts_loss = max(0.0, pos.entry_premium - executed_price)
-            self._state.record_strike_loss(pos.symbol, pos.option_type,
-                                                      _pts_loss * tr.qty / max(1, pos.qty))
+            self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type,
+                                           _pts_loss, tr.qty)
             tr_exit_record = TradeAnalytics.build_tranche(
                 underlying=underlying, pos=pos, tr=tr,
                 paper_trade=cfg.broker.paper_trade,
