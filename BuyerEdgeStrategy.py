@@ -93,10 +93,25 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #     pre-Step-3 threshold semantics — deliberately not auto-applied to a live parameter.
 #   ⬢ clear_oi_state() unused: method defined on SignalEngine but never called —
 #     cross-session OI buffer carry-over depends on daily process restart.
-#   ⬢ F94: _handle_order_stream_event priority-2 exit dispatch was non-functional
-#     (copied into bot, referenced 5 OrderManager-only attrs — now routed through self.orders).
-#   ⬢ F95: check_trailing_stops unconditional spot_ltp gate froze premium trail
-#     whenever spot feed went stale; gate moved inside spot-consuming branches only.
+#   ⬢ F94 (HIGH, patch ready, NOT applied — shifts live trade selection): _effective_min_score()
+#     reaches SignalEngine.score() via min_score_override and V2-A6 (L8773), but StrikeSelector.select_best()
+#     (L5062/5071/5081), the scan_underlying entry_conviction scalar (L8895), and the V2-A3 trail boost
+#     (L4436) all still read raw cfg.entry.min_score. Two measured consequences at min_score=40:
+#       · Power hour (effective 32): scores 32–39 pass the EXECUTE gate, then select_best rejects them as
+#         "insufficient edge" and scan_underlying silently falls through to StrikeSelector.simple_otm —
+#         a fixed ±OTM_OFFSET pick with no delta targeting, no liquidity ranking and no asym quality gate.
+#         The eased threshold therefore degrades strike quality instead of widening participation.
+#       · Morning gate (effective 60): a score of 65 yields conviction 0.417 instead of 0.125 (3.3x
+#         overstated), relaxing the asym gate to 36.7 vs 39.0 and widening target delta / SL sizing —
+#         the opposite of the stricter discipline the morning factor exists to enforce.
+#     Fix is to thread effective_min_score into select_best() and the conviction scalars. Deferred under the
+#     same rule as F83: live trade-selection parameters are not changed without explicit review.
+#
+#   ⬢ F95 (research, not a defect): _compute_oi_wall (L3091) returns {+0.5, 0, -0.5, -1} — it has no +1
+#     branch. Both -1 cases are individually standard (spot >= call wall = overhead resistance; spot <= put
+#     wall = support broken), but there is no bullish-breakout case, so the spec contributes at most
+#     +0.5/14 of FAST_MAX against -1.0/14, a standing directional skew in a long-only buyer model.
+#     Scoring-model gap rather than a coding error — belongs to CALIBRATION / RESEARCH, not a patch.
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
 # telegram() correctly omits strategy= (SDK has no such param).
