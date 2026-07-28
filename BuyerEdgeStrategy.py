@@ -7528,8 +7528,8 @@ class OrderManager:
                     f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
                 self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                self._state.record_strike_loss(pos.symbol, pos.option_type,
-                                                      _pts_loss * tr.qty / max(1, pos.qty))
+                self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type,
+                                               _pts_loss, tr.qty)
                 tr_exit_record = TradeAnalytics.build_tranche(
                     underlying=underlying, pos=pos, tr=tr,
                     paper_trade=cfg.broker.paper_trade,
@@ -7581,8 +7581,8 @@ class OrderManager:
                         tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
                         self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                         _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                        self._state.record_strike_loss(pos.symbol, pos.option_type,
-                                                      _pts_loss * tr.qty / max(1, pos.qty))
+                        self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type,
+                                                       _pts_loss, tr.qty)
                         tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=True)
                         self._journal.write(tr_rec)
                 with self._state.exit_lock:
@@ -7643,8 +7643,8 @@ class OrderManager:
                         tr_pnl = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price > 0 else 0.0
                         self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                         _pts_loss = max(0.0, pos.entry_premium - tr.exit_price)
-                        self._state.record_strike_loss(pos.symbol, pos.option_type,
-                                                      _pts_loss * tr.qty / max(1, pos.qty))
+                        self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type,
+                                                       _pts_loss, tr.qty)
                         tr_exit_record = TradeAnalytics.build_tranche(
                             underlying=underlying, pos=pos, tr=tr,
                             paper_trade=cfg.broker.paper_trade,
@@ -7655,6 +7655,7 @@ class OrderManager:
                 # All tranches exited via broker fills — cleanup without _finalize_exit
                 # to avoid double-recording P&L and duplicate full-exit journal row.
                 # This path bypasses closing record_exit() — settle streak here (F97).
+                self._state.settle_strike_loss(pos.slot_id)
                 self._risk.close_trade(pos.slot_id)
                 opt_sym = pos.symbol
                 self._ws.unsubscribe(self.config.market.fno_exchange, opt_sym)
@@ -7810,8 +7811,8 @@ class OrderManager:
                     tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
                     self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                     _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                    self._state.record_strike_loss(pos.symbol, pos.option_type,
-                                                      _pts_loss * tr.qty / max(1, pos.qty))
+                    self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type,
+                                                   _pts_loss, tr.qty)
                     tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
                     self._journal.write(tr_rec)
                     
@@ -7964,8 +7965,8 @@ class OrderManager:
                                 tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
                                 self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                                self._state.record_strike_loss(pos.symbol, pos.option_type,
-                                                      _pts_loss * tr.qty / max(1, pos.qty))
+                                self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type,
+                                                               _pts_loss, tr.qty)
                                 tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
                                 self._journal.write(tr_rec)
                                 for attr_name in ("sl_order_id", "tgt_order_id"):
@@ -8205,8 +8206,8 @@ class OptionsBuyerEdgeBot:
                                         tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
                                         self.risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                                         _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                                        self.state.record_strike_loss(pos.symbol, pos.option_type,
-                                                            _pts_loss * tr.qty / max(1, pos.qty))
+                                        self.state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type,
+                                                                       _pts_loss, tr.qty)
                                         tr_rec = TradeAnalytics.build_tranche(underlying=pos.underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
                                         self.orders._journal.write(tr_rec)
                                         for attr_name in ("sl_order_id", "tgt_order_id"):
@@ -8560,6 +8561,8 @@ class OptionsBuyerEdgeBot:
                 _advance_stage(pos, LifecycleStage.CLOSED)
                 # F97: bypasses both _finalize_exit and all-tranches close_trade() —
                 # settle per-slot P&L or it leaks. No-op on already-settled slots.
+                # F98b: settle pending strike loss accrue(s) before cleanup.
+                self.state.settle_strike_loss(pos.slot_id)
                 self.risk.close_trade(pos.slot_id)
                 self.state.positions.pop(pos.slot_id, None)
                 self.state.pending_opposite_exit.discard(pos.underlying)
