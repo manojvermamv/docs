@@ -8013,7 +8013,7 @@ class OptionsBuyerEdgeBot:
                             pnl = _calc_pnl(pos, executed_price, qty=pending_exit.exit_qty)
                             norm_reason = ExitReason.normalize(pending_exit.reason)
                             
-                            if pending_exit.exit_qty < pos.remaining_qty:
+if pending_exit.exit_qty < pos.remaining_qty:
                                 for tr in list(pos.open_tranches):
                                     is_in_flight = False
                                     with self.orders._pending_tranche_exits_lock:
@@ -8038,12 +8038,12 @@ class OptionsBuyerEdgeBot:
                                                     pass
                                                 finally:
                                                     setattr(tr, attr_name, None)
-                                with self.state.exit_lock:
-                                    self.state.exit_queue.discard(pos.slot_id)
-                                pos.exit_pending = False
-                                with self.state.state_lock:
-                                    self.state.pending_exits.pop(slot_id_to_pop, None)
-else:
+                                    with self.state.exit_lock:
+                                        self.state.exit_queue.discard(pos.slot_id)
+                                    pos.exit_pending = False
+                                    with self.state.state_lock:
+                                        self.state.pending_exits.pop(slot_id_to_pop, None)
+                            else:
                                 self.orders._finalize_exit(pos.underlying, pos, executed_price, pnl, norm_reason,
                                                     exit_price_source="broker_fill",
                                                     opt_symbol=pos.symbol, pop_pending_exit=True)
