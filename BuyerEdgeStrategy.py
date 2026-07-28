@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F93, F96, F99–F100 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64, F71–F93, F96–F100 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -68,7 +68,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F93, F96, F99–F100 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open)
+# Closed Findings:               F1–F64, F71–F93, F96–F100 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
@@ -93,7 +93,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #     pre-Step-3 threshold semantics — deliberately not auto-applied to a live parameter.
 #   ⬢ clear_oi_state() unused: method defined on SignalEngine but never called —
 #     cross-session OI buffer carry-over depends on daily process restart.
-#   ⬢ F94 (HIGH, patch ready, NOT applied): _effective_min_score() reaches SignalEngine.score() but StrikeSelector.select_best() and conviction scalars still read raw cfg.entry.min_score — power hour scores 32-39 pass EXECUTE then get rejected by select_best; morning gate overstates conviction 3.3x. Deferred: same rule as F83 — live trade-selection parameters not changed without explicit review.
+#   ✓ F94 Fixed (HIGH): _effective_min_score() reaches SignalEngine.score() but StrikeSelector.select_best() and conviction scalars still read raw cfg.entry.min_score — power hour scores 32-39 pass EXECUTE then get rejected by select_best; morning gate overstates conviction 3.3x. Fixed by plumbing effective_min_score through select_best(), entry_conviction, and trail opposition gate.
 #
 #   ⬢ F95 (research, not a defect): _compute_oi_wall has no +1 bullish-breakout case — returns at most +0.5/14 against -1.0/14, a standing directional skew. Scoring-model gap, not a coding defect.
 #
@@ -202,7 +202,10 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F91 ✓ Fixed (HIGH): _process_premium_trail left _lock_floor unbound on the non-ATR + tgt ≤ ep path — UnboundLocalError skipped LOCKED stage after SL already landed. Fixed by binding _lock_floor = ep on that path.
 # F92 ✓ Fixed (HIGH): check_trailing_stops had an unconditional spot_ltp gate after red herring computation — stale spot feed silently froze the premium trail with no diagnostic. Fixed by moving the None-gate inside only the key_level and spot branches.
 # F93 ✓ Fixed (MEDIUM): fetch_quote UDAPI10005 guard used hasattr() for an __init__-initialized attribute — rate-limit alert could never fire. Fixed to match sibling auth-error branch pattern.
+# F94 ✓ Fixed (HIGH): Session-adjusted min_score reached SignalEngine.score() but not StrikeSelector.select_best() or conviction scalars — power-hour signals that passed EXECUTE (eased bar) got rejected by select_best; morning gate overstated conviction 3.3x. Fixed by plumbing effective_min_score through select_best(), entry_conviction, and trail opposition gate.
 # F96 ✓ Fixed (HIGH): Startup optiongreeks delta read at top level always yielded 0.0, mapping every restored position to Deep-OTM (tgt_mult 0.5, act_mult 2.0) — delta is nested at greeks.delta. Fixed with correct nested path and status check; zero delta maps to Unknown band.
+# F97 ✓ Fixed (MEDIUM): Consecutive win/loss streak counted tranches, not trades — a 3-tranche stop-out booked 3 consecutive losses, halving the session after 2.7 trades; scale-out booking a winning trade as a loss. Fixed by accumulating per-slot realized P&L across partial exits and settling the streak once per trade via closes_position flag and close_trade().
+# F98 ✓ Fixed (MEDIUM): Strike-loss guard triple-counted point loss on multi-tranche positions — record_strike_loss() called per tranche with full (entry - exit) pts_loss. Fixed by weighting each call by tr.qty / pos.qty so partial-exit slices sum to the position's real point loss.
 # F99 ✓ Fixed (HIGH): ExitReason.normalize() not idempotent — double-normalize collapsed every WS-triggered exit to OTHER, starving the exit-type expectancy database. Fixed with _ENUM_VALUES pass-through, _RAW_PREFIX_TO_ENUM prefix matching, DEEP_OTM enum, and missing opposite_side_signal mapping.
 #
 # ==============================================================================
@@ -4466,9 +4469,7 @@ class TrailSLEngine:
             if _sig_data and time.time() - _sig_data[1] < cfg.market.signal_check_interval * 3:
                 _sig_result = _sig_data[0]
                 _sig_dir = _sig_result.direction
-                # F94: same session-adjusted bar the signal was judged against, so a
-                # power-hour opposing signal that qualified as EXECUTE also counts as
-                # opposition here instead of being ignored by the raw floor.
+                # F94: same session-adjusted bar the signal was judged against.
                 _sig_min, _ = _effective_min_score(get_ist_now(), cfg)
                 if _sig_dir and _sig_dir != pos.option_type and abs(_sig_result.score) >= _sig_min:
                     _sig_strength = abs(_sig_result.score) / 100.0
@@ -5094,12 +5095,8 @@ class StrikeSelector:
         Returns None if no qualifying strike found.
         """
         cfg = self._config
-        # F94: the session-adjusted bar, not the raw config floor. scan_underlying
-        # gates EXECUTE on _effective_min_score() but used to hand us nothing, so
-        # power-hour signals (eased bar) were rejected here as "insufficient edge"
-        # and silently fell through to simple_otm — no delta targeting, no liquidity
-        # ranking, no quality gate. Morning-gate signals had the inverse problem:
-        # conviction was computed off the lower raw floor and came out overstated.
+        # F94: session-adjusted bar from _effective_min_score, not the raw config floor.
+        # Without it select_best rejected power-hour signals that passed EXECUTE and overstated morning conviction.
         _min_score = int(min_score) if min_score is not None else cfg.entry.min_score
         _min_score = max(1, min(100, _min_score))
 
@@ -5495,17 +5492,9 @@ class RiskManager:
                     closes_position: bool = True):
         """Call after a confirmed exit fill. Updates daily P&L and loss streak.
 
-        F97: the streak counts TRADES, not the slices a trade was exited in. A
-        tranche-split position calls this once per tranche, so the old
-        unconditional streak update booked a single 3-tranche stop-out as three
-        consecutive losses — tripping MAX_CONSECUTIVE_LOSSES=8 after 2.7 trades
-        instead of 8, and inflating adaptive sizing 3x as fast on a win.
-
-        Pass closes_position=False for a partial (tranche) exit: daily P&L and the
-        drawdown-rate history still update — those are correctly qty-weighted and
-        must stay live — but the streak does not. Per-slot realized P&L accumulates
-        instead, so the streak fires once on the closing call against the trade's
-        true NET outcome (scale-out wins can offset a runner loss).
+        F97: streak counts TRADES, not tranche slices. Partial exits
+        (closes_position=False) accumulate per-slot realized P&L without touching
+        the streak; the closing call settles once against the net trade outcome.
         """
         with self._state.state_lock:
             self._daily_pnl += pnl
@@ -7628,9 +7617,7 @@ class OrderManager:
             if pos.remaining_qty == 0:
                 # All tranches exited via broker fills — cleanup without _finalize_exit
                 # to avoid double-recording P&L and duplicate full-exit journal row.
-                # This path never reaches a closes_position=True record_exit(), so the
-                # streak must be settled explicitly against accumulated per-slot P&L,
-                # or a fully scaled-out trade counts as neither win nor loss (F97).
+                # This path bypasses closing record_exit() — settle streak here (F97).
                 self._risk.close_trade(pos.slot_id)
                 opt_sym = pos.symbol
                 self._ws.unsubscribe(self.config.market.fno_exchange, opt_sym)
@@ -8534,11 +8521,8 @@ class OptionsBuyerEdgeBot:
                 inf(f"[CLEANUP] Force-removing stale position {pos.symbol} ({pos.slot_id}) — "
                     "exit already processed, wrote orphan_cleanup row. If PnL seems missing check broker.")
                 _advance_stage(pos, LifecycleStage.CLOSED)
-                # F97: the one removal path that bypasses both _finalize_exit and the
-                # all-tranches close_trade() call. Without this, per-slot realized P&L
-                # accumulated by partial exits would leak and the trade would count as
-                # neither win nor loss. close_trade() is a no-op once a slot is already
-                # settled, so the normal path is unaffected.
+                # F97: bypasses both _finalize_exit and all-tranches close_trade() —
+                # settle per-slot P&L or it leaks. No-op on already-settled slots.
                 self.risk.close_trade(pos.slot_id)
                 self.state.positions.pop(pos.slot_id, None)
                 self.state.pending_opposite_exit.discard(pos.underlying)
