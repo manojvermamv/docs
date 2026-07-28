@@ -68,8 +68,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F93, F96–F99 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
-# F100 — reconciled-fill gate (F100): Open — see session log for discussion
+# Closed Findings:               F1–F64, F71–F93, F96–F101 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
 # External Audit:                F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
@@ -210,7 +209,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F98 ✓ Fixed (MEDIUM): Strike-loss guard over-counted point loss on multi-tranche positions — record_strike_loss() called per tranche with full (entry - exit) pts_loss, and _finalize_exit recorded full loss for the final slice.
 # F98b ✓ Fixed (MEDIUM): Weighting approach for F98 was also broken — apply_confirmed_partial_exit decrements pos.core.qty right after record_strike_loss, so the denominator shrinks across repeated partial fills (1.83× on 3 fills, 2.83× on 9). Fixed by replacing all 10 weighted record_strike_loss calls with an accrue/settle pattern: accrue_strike_loss() banks pts×qty and qty per slot; settle_strike_loss() commits the qty-weighted average once at the 3 close seams (_finalize_exit, all-tranches-broker-filled, _cleanup_stale_positions). The old record_strike_loss() is now only used by the strike-pain dashboard (query-only).
 # F99 ✓ Fixed (HIGH): ExitReason.normalize() not idempotent — double-normalize collapsed every WS-triggered exit to OTHER, starving the exit-type expectancy database. Fixed with _ENUM_VALUES pass-through, _RAW_PREFIX_TO_ENUM prefix matching, DEEP_OTM enum, and missing opposite_side_signal mapping.
-# F100 — reconciled-fill gate: defence in depth — never sell more than the broker holds. No fix needed; field issue noted for awareness.
+# F100 ✓ Fixed (CRITICAL): Cancel/fill race sent a duplicate SELL and left an untracked -30 naked short (live 28JUL 11:22:33) — openalgo sandbox _execute_order writes the trade then sets status='complete' with no row lock, while a concurrent cancel_order overwrites it with 'cancelled', so the fill survives but every status endpoint denies it. Fixed with _fill_from_tradebook() cross-checking a cancelled verdict by order_id (the trade row is never rewritten) and _broker_net_qty() clamping or suppressing the SELL; layer 2 may suppress but never books, since positionbook is account-wide. Upstream fix still open.
 # F101 ✓ Fixed (HIGH): The tradebook cross-check never covered multi-tranche positions — cancel_broker_orders
 #       routes is_multi to _cancel_tranche_orders before that check runs, so a raced SL-M fill still read as
 #       'cancelled'. The net-qty gate stopped it going short, but the slot then looped on suppressed SELLs and
