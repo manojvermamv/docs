@@ -523,8 +523,9 @@ class ExitReason:
     MANUAL              = "MANUAL"
     SIGNAL_FLIP         = "SIGNAL_FLIP"
     BROKER_FILLED       = "BROKER_FILLED"
+    DEEP_OTM            = "DEEP_OTM"
     OTHER               = "OTHER"
-    
+
     # Internal mapping from raw reason strings to normalized enum
     _RAW_TO_ENUM = {
         "premium_sl_hit": PREMIUM_TRAIL,
@@ -541,22 +542,56 @@ class ExitReason:
         "Bot Shutdown": MANUAL,
         "manual": MANUAL,
         "opposite_signal_sync": SIGNAL_FLIP,
+        "opposite_side_signal": SIGNAL_FLIP,
         "signal_reversal": SIGNAL_FLIP,
     }
-    
+
+    # Raw reasons that embed runtime detail in the string itself, so they can never
+    # match _RAW_TO_ENUM by equality — matched by prefix instead (F99).
+    #   _check_max_hold      -> f"MaxHoldTime({minutes}m)"
+    #   _check_premium_trail -> f"DeepOTM_delta_{delta:.3f}"
+    _RAW_PREFIX_TO_ENUM = (
+        ("MaxHoldTime",    MAX_HOLD),
+        ("DeepOTM_delta_", DEEP_OTM),
+    )
+
+    # Every normalized value, for the idempotence check in normalize().
+    _ENUM_VALUES = frozenset({
+        BROKER_SL, BROKER_TARGET, PREMIUM_TRAIL, SPOT_TRAIL, MAX_HOLD, EOD,
+        FORCE_UNTRACK_EST, FORCE_UNTRACK_UNKNOWN, MANUAL, SIGNAL_FLIP,
+        BROKER_FILLED, DEEP_OTM, OTHER,
+    })
+
     @classmethod
     def normalize(cls, raw_reason: str) -> str:
-        """Map raw exit reason to normalized enum value."""
-        return cls._RAW_TO_ENUM.get(raw_reason, cls.OTHER)
-    
+        """Map a raw exit reason to its normalized enum value.
+
+        IDEMPOTENT BY CONTRACT: normalize(normalize(x)) == normalize(x).
+
+        The exit path normalizes twice — WebSocketManager._trigger_exit normalizes
+        before handing the reason to place_exit, which normalizes again. Because the
+        old lookup only knew raw->enum, the second pass found "PREMIUM_TRAIL" absent
+        from _RAW_TO_ENUM and collapsed it to OTHER. Every WS-triggered exit
+        (premium SL, target, spot trail, deep-OTM) therefore journalled as OTHER,
+        starving the exit-type expectancy database this class exists to feed (F99).
+        """
+        if not raw_reason:
+            return cls.OTHER
+        # Already normalized — pass straight through. This is what makes it idempotent.
+        if raw_reason in cls._ENUM_VALUES:
+            return raw_reason
+        mapped = cls._RAW_TO_ENUM.get(raw_reason)
+        if mapped:
+            return mapped
+        for _prefix, _enum_val in cls._RAW_PREFIX_TO_ENUM:
+            if raw_reason.startswith(_prefix):
+                return _enum_val
+        return cls.OTHER
+
     @classmethod
     def all_values(cls) -> list[str]:
-        """Return all normalized enum values."""
-        return [
-            cls.BROKER_SL, cls.BROKER_TARGET, cls.SIGNAL_FLIP, cls.PREMIUM_TRAIL, cls.SPOT_TRAIL,
-            cls.MAX_HOLD, cls.EOD, cls.FORCE_UNTRACK_EST, cls.FORCE_UNTRACK_UNKNOWN,
-            cls.MANUAL, cls.OTHER
-        ]
+        """Return all normalized enum values (single source: _ENUM_VALUES)."""
+        return sorted(cls._ENUM_VALUES)
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -8282,13 +8317,31 @@ class OptionsBuyerEdgeBot:
                 # NOTE: entry_conviction defaults to 0.0 (not persisted), making trail
                 # activation more conservative post-restart (later trail activation).
                 # Try to recover delta from option greeks for accurate tgt/act_mult.
+                # F96: delta lives at resp["greeks"]["delta"], NOT at the top level —
+                # verified across all 4 return paths of openalgo
+                # services/option_greeks_service.py, the documented response in
+                # restx_api/option_greeks.py, and SDK 1.0.47 (a pure passthrough that
+                # does not flatten). Reading it at the top level always yielded 0.0,
+                # and get_moneyness_multipliers(0.0) falls through every band to
+                # Deep-OTM — silently halving tgt (mult 0.5) and doubling the trail
+                # activation buffer (mult 2.0) on EVERY position restored after a
+                # restart. Perversely the exception path (None -> "Unknown", 1.0/1.0)
+                # produced better state than a successful call.
+                # A missing/zero delta now stays None so it maps to the neutral
+                # "Unknown" band rather than the most conservative Deep-OTM one.
+                # underlying_symbol/underlying_exchange are intentionally omitted:
+                # restx_api/option_greeks.py documents both as optional and
+                # auto-detected.
                 _restore_delta = None
                 try:
                     _greeks = self.client.optiongreeks(symbol=sym, exchange=cfg.market.fno_exchange)
-                    if isinstance(_greeks, dict):
-                        _restore_delta = float(_greeks.get("delta", 0) or 0)
-                except Exception:
-                    pass
+                    if isinstance(_greeks, dict) and _greeks.get("status") == "success":
+                        _restore_delta = float((_greeks.get("greeks") or {}).get("delta", 0) or 0) or None
+                    elif isinstance(_greeks, dict):
+                        dbg(f"[STARTUP] optiongreeks for {sym} returned "
+                            f"status={_greeks.get('status')!r} — restoring with neutral moneyness")
+                except Exception as _g_exc:
+                    err(f"[STARTUP] optiongreeks failed for {sym}", _g_exc)
                 _mm_label, _, tgt_mult, act_mult = EntryStopLossPolicy.get_moneyness_multipliers(_restore_delta)
                 pos = OptionPosition.build(
                     underlying=underlying,
