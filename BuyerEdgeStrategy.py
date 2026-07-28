@@ -4466,7 +4466,11 @@ class TrailSLEngine:
             if _sig_data and time.time() - _sig_data[1] < cfg.market.signal_check_interval * 3:
                 _sig_result = _sig_data[0]
                 _sig_dir = _sig_result.direction
-                if _sig_dir and _sig_dir != pos.option_type and abs(_sig_result.score) >= cfg.entry.min_score:
+                # F94: same session-adjusted bar the signal was judged against, so a
+                # power-hour opposing signal that qualified as EXECUTE also counts as
+                # opposition here instead of being ignored by the raw floor.
+                _sig_min, _ = _effective_min_score(get_ist_now(), cfg)
+                if _sig_dir and _sig_dir != pos.option_type and abs(_sig_result.score) >= _sig_min:
                     _sig_strength = abs(_sig_result.score) / 100.0
                     _trail_conv_adj *= 1.0 - (_sig_strength * 0.4)
                     _signal_trail_boost = 1.0 + (_sig_strength * 0.5)
@@ -5075,6 +5079,7 @@ class StrikeSelector:
         iv_rank: float | None,
         signal_score: float = 50.0,
         gex_levels: dict[str, Any] | None = None,
+        min_score: int | None = None,
     ) -> dict | None:
         """
         Conviction-driven strike selection.
@@ -5089,6 +5094,14 @@ class StrikeSelector:
         Returns None if no qualifying strike found.
         """
         cfg = self._config
+        # F94: the session-adjusted bar, not the raw config floor. scan_underlying
+        # gates EXECUTE on _effective_min_score() but used to hand us nothing, so
+        # power-hour signals (eased bar) were rejected here as "insufficient edge"
+        # and silently fell through to simple_otm — no delta targeting, no liquidity
+        # ranking, no quality gate. Morning-gate signals had the inverse problem:
+        # conviction was computed off the lower raw floor and came out overstated.
+        _min_score = int(min_score) if min_score is not None else cfg.entry.min_score
+        _min_score = max(1, min(100, _min_score))
 
         # ── Guard: empty input ────────────────────────────────────────────────
         if not chain_rows or not spot:
@@ -5101,8 +5114,8 @@ class StrikeSelector:
 
         # ── Guard: insufficient signal conviction ─────────────────────────────
         abs_score = abs(signal_score)
-        if abs_score < cfg.entry.min_score:
-            inf(f"[STRIKE] Signal score {signal_score:.0f} < min {cfg.entry.min_score} — insufficient edge")
+        if abs_score < _min_score:
+            inf(f"[STRIKE] Signal score {signal_score:.0f} < min {_min_score} — insufficient edge")
             return None
 
         # ── Conviction scalar ─────────────────────────────────────────────────
@@ -5110,7 +5123,7 @@ class StrikeSelector:
         # minimum delta at the weakest tradeable signal, not a theoretical floor
         # at score=0 which can never be reached after the min_score gate above.
         conviction = min(
-            (abs_score - cfg.entry.min_score) / max(100.0 - cfg.entry.min_score, 1.0),
+            (abs_score - _min_score) / max(100.0 - _min_score, 1.0),
             1.0,
         )
 
@@ -5119,8 +5132,8 @@ class StrikeSelector:
         # 50 - 100 score → STRIKE_DELTA_PIVOT(0.50) to STRIKE_DELTA_MAX(0.70)   (ATM → mild ITM)
         if abs_score <= STRIKE_SCORE_PIVOT:
             # Map [min_score, SCORE_PIVOT] -> [BASE, PIVOT]
-            score_range = max(STRIKE_SCORE_PIVOT - cfg.entry.min_score, 1.0)
-            fraction = max(0.0, abs_score - cfg.entry.min_score) / score_range
+            score_range = max(STRIKE_SCORE_PIVOT - _min_score, 1.0)
+            fraction = max(0.0, abs_score - _min_score) / score_range
             target_delta = STRIKE_DELTA_BASE + fraction * (STRIKE_DELTA_PIVOT - STRIKE_DELTA_BASE)
         else:
             # Map [SCORE_PIVOT, 100] -> [PIVOT, MAX]
@@ -5342,6 +5355,7 @@ class RiskManager:
         self._funds_cache_ttl:   float = 60.0  # re-poll interval; between refreshes uses pnl delta
         self._pnl_at_last_fetch: float = 0.0
         self._pnl_history: deque[tuple[float, float]] = deque()  # (unix_timestamp, cumulative_pnl)
+        self._slot_realized: dict[str, float] = {}   # slot_id -> realized P&L across partial exits (F97)
 
     def available_capital(self) -> float:
         """Cached funds() call: re-polls broker every _funds_cache_ttl seconds.
@@ -5388,6 +5402,7 @@ class RiskManager:
                 self._state.reset_market_caches()
                 self._state.reset_strike_loss_pts()
                 self._pnl_history.clear()
+                self._slot_realized.clear()
 
     def check_entry_gates(self, symbol: str = "") -> tuple[bool, str]:
         """Tier 1 + Tier 2: Full gate check before placing an entry order."""
@@ -5464,8 +5479,34 @@ class RiskManager:
             self._session_trade_count += 1
             self._last_entry_times[symbol] = time.monotonic()
 
-    def record_exit(self, pnl: float):
-        """Call after a confirmed exit fill. Updates daily P&L and loss streak."""
+    def _apply_streak(self, trade_pnl: float) -> None:
+        """Update the consecutive win/loss streak for ONE completed trade.
+        Caller must hold state_lock."""
+        if trade_pnl < 0:
+            self._session_consecutive_losses += 1
+            self._session_consecutive_wins = 0
+            inf(f"[RISK] Loss streak: {self._session_consecutive_losses} | "
+                  f"Daily P&L ₹{self._daily_pnl:.0f}")
+        else:
+            self._session_consecutive_losses = 0
+            self._session_consecutive_wins += 1
+
+    def record_exit(self, pnl: float, *, slot_id: str | None = None,
+                    closes_position: bool = True):
+        """Call after a confirmed exit fill. Updates daily P&L and loss streak.
+
+        F97: the streak counts TRADES, not the slices a trade was exited in. A
+        tranche-split position calls this once per tranche, so the old
+        unconditional streak update booked a single 3-tranche stop-out as three
+        consecutive losses — tripping MAX_CONSECUTIVE_LOSSES=8 after 2.7 trades
+        instead of 8, and inflating adaptive sizing 3x as fast on a win.
+
+        Pass closes_position=False for a partial (tranche) exit: daily P&L and the
+        drawdown-rate history still update — those are correctly qty-weighted and
+        must stay live — but the streak does not. Per-slot realized P&L accumulates
+        instead, so the streak fires once on the closing call against the trade's
+        true NET outcome (scale-out wins can offset a runner loss).
+        """
         with self._state.state_lock:
             self._daily_pnl += pnl
             now_ts = time.time()
@@ -5473,14 +5514,21 @@ class RiskManager:
             cutoff = now_ts - (self.config.risk.drawdown_rate_window_mins * 60)
             while self._pnl_history and self._pnl_history[0][0] < cutoff:
                 self._pnl_history.popleft()
-            if pnl < 0:
-                self._session_consecutive_losses += 1
-                self._session_consecutive_wins = 0
-                inf(f"[RISK] Loss streak: {self._session_consecutive_losses} | "
-                      f"Daily P&L ₹{self._daily_pnl:.0f}")
-            else:
-                self._session_consecutive_losses = 0
-                self._session_consecutive_wins += 1
+            if slot_id:
+                self._slot_realized[slot_id] = self._slot_realized.get(slot_id, 0.0) + pnl
+            if not closes_position:
+                return
+            trade_pnl = self._slot_realized.pop(slot_id, pnl) if slot_id else pnl
+            self._apply_streak(trade_pnl)
+
+    def close_trade(self, slot_id: str) -> None:
+        """Flush streak accounting for a position closed entirely via partial exits —
+        a path that never reaches a closes_position=True record_exit() (F97).
+        No-op when the slot has already been settled."""
+        with self._state.state_lock:
+            if slot_id not in self._slot_realized:
+                return
+            self._apply_streak(self._slot_realized.pop(slot_id))
 
     def effective_lot_multiplier(self, base_multiplier: int) -> int:
         """Adaptive lot sizing (U9). Disabled by default for safety."""
@@ -6262,7 +6310,7 @@ class OrderManager:
             exit_reason=reason.value if isinstance(reason, ExitReason) else str(reason),
         )
         tr_pnl = _calc_pnl(pos, price, qty=filled_qty)
-        self._risk.record_exit(tr_pnl)
+        self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
         _pts_loss = max(0.0, pos.entry_premium - price)
         self._state.record_strike_loss(opt_sym, pos.option_type, _pts_loss)
         tr_exit_record = TradeAnalytics.build_tranche(
@@ -6373,7 +6421,7 @@ class OrderManager:
             Also pop from pending_exits under the state lock (pending-exit paths).
         """
         opt_sym = opt_symbol or pos.symbol
-        self._risk.record_exit(pnl)
+        self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=True)
         _pts_loss = max(0.0, pos.entry_premium - executed_price)
         self._state.record_strike_loss(opt_sym, pos.option_type, _pts_loss)
         reason_str = reason.value if isinstance(reason, ExitReason) else str(reason)
@@ -6718,9 +6766,10 @@ class OrderManager:
                 f"₹{executed_price:.2f} × {tr.qty} | P&L ₹{pnl:.0f} | "
                 f"remaining_qty={pos.remaining_qty}"
             )
-            self._risk.record_exit(pnl)
+            self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
             _pts_loss = max(0.0, pos.entry_premium - executed_price)
-            self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+            self._state.record_strike_loss(pos.symbol, pos.option_type,
+                                                      _pts_loss * tr.qty / max(1, pos.qty))
             tranche_record = TradeAnalytics.build_tranche(
                 underlying=underlying, pos=pos, tr=tr,
                 paper_trade=self.config.broker.paper_trade,
@@ -7395,9 +7444,10 @@ class OrderManager:
             pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
             dbg(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
                 f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
-            self._risk.record_exit(pnl)
+            self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
             _pts_loss = max(0.0, pos.entry_premium - executed_price)
-            self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+            self._state.record_strike_loss(pos.symbol, pos.option_type,
+                                                      _pts_loss * tr.qty / max(1, pos.qty))
             tr_exit_record = TradeAnalytics.build_tranche(
                 underlying=underlying, pos=pos, tr=tr,
                 paper_trade=cfg.broker.paper_trade,
@@ -7450,9 +7500,10 @@ class OrderManager:
                 pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
                 dbg(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
                     f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
-                self._risk.record_exit(pnl)
+                self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                self._state.record_strike_loss(pos.symbol, pos.option_type,
+                                                      _pts_loss * tr.qty / max(1, pos.qty))
                 tr_exit_record = TradeAnalytics.build_tranche(
                     underlying=underlying, pos=pos, tr=tr,
                     paper_trade=cfg.broker.paper_trade,
@@ -7502,9 +7553,10 @@ class OrderManager:
                         tr.exit_price = executed_price
                         tr.exit_reason = norm_reason
                         tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
-                        self._risk.record_exit(tr_pnl)
+                        self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                         _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                        self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                        self._state.record_strike_loss(pos.symbol, pos.option_type,
+                                                      _pts_loss * tr.qty / max(1, pos.qty))
                         tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=True)
                         self._journal.write(tr_rec)
                 with self._state.exit_lock:
@@ -7563,9 +7615,10 @@ class OrderManager:
                         tr.exit_reason = ExitReason.BROKER_FILLED
                         tr.exit_price = info.get("executed", 0)
                         tr_pnl = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price > 0 else 0.0
-                        self._risk.record_exit(tr_pnl)
+                        self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                         _pts_loss = max(0.0, pos.entry_premium - tr.exit_price)
-                        self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                        self._state.record_strike_loss(pos.symbol, pos.option_type,
+                                                      _pts_loss * tr.qty / max(1, pos.qty))
                         tr_exit_record = TradeAnalytics.build_tranche(
                             underlying=underlying, pos=pos, tr=tr,
                             paper_trade=cfg.broker.paper_trade,
@@ -7574,7 +7627,11 @@ class OrderManager:
                         dbg(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — P&L ₹{tr_pnl:.0f}")
             if pos.remaining_qty == 0:
                 # All tranches exited via broker fills — cleanup without _finalize_exit
-                # to avoid double-recording P&L and duplicate full-exit journal row
+                # to avoid double-recording P&L and duplicate full-exit journal row.
+                # This path never reaches a closes_position=True record_exit(), so the
+                # streak must be settled explicitly against accumulated per-slot P&L,
+                # or a fully scaled-out trade counts as neither win nor loss (F97).
+                self._risk.close_trade(pos.slot_id)
                 opt_sym = pos.symbol
                 self._ws.unsubscribe(self.config.market.fno_exchange, opt_sym)
                 if not self._state.positions.has_siblings(pos.slot_id):
@@ -7727,9 +7784,10 @@ class OrderManager:
                     tr.exit_price = executed_price
                     tr.exit_reason = norm_reason
                     tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
-                    self._risk.record_exit(tr_pnl)
+                    self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                     _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                    self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                    self._state.record_strike_loss(pos.symbol, pos.option_type,
+                                                      _pts_loss * tr.qty / max(1, pos.qty))
                     tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
                     self._journal.write(tr_rec)
                     
@@ -7880,9 +7938,10 @@ class OrderManager:
                                 tr.exit_price = executed_price
                                 tr.exit_reason = norm_reason
                                 tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
-                                self._risk.record_exit(tr_pnl)
+                                self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                                self._state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                                self._state.record_strike_loss(pos.symbol, pos.option_type,
+                                                      _pts_loss * tr.qty / max(1, pos.qty))
                                 tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
                                 self._journal.write(tr_rec)
                                 for attr_name in ("sl_order_id", "tgt_order_id"):
@@ -8120,9 +8179,10 @@ class OptionsBuyerEdgeBot:
                                         tr.exit_price = executed_price
                                         tr.exit_reason = norm_reason
                                         tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
-                                        self.risk.record_exit(tr_pnl)
+                                        self.risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                                         _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                                        self.state.record_strike_loss(pos.symbol, pos.option_type, _pts_loss)
+                                        self.state.record_strike_loss(pos.symbol, pos.option_type,
+                                                            _pts_loss * tr.qty / max(1, pos.qty))
                                         tr_rec = TradeAnalytics.build_tranche(underlying=pos.underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
                                         self.orders._journal.write(tr_rec)
                                         for attr_name in ("sl_order_id", "tgt_order_id"):
@@ -8474,6 +8534,12 @@ class OptionsBuyerEdgeBot:
                 inf(f"[CLEANUP] Force-removing stale position {pos.symbol} ({pos.slot_id}) — "
                     "exit already processed, wrote orphan_cleanup row. If PnL seems missing check broker.")
                 _advance_stage(pos, LifecycleStage.CLOSED)
+                # F97: the one removal path that bypasses both _finalize_exit and the
+                # all-tranches close_trade() call. Without this, per-slot realized P&L
+                # accumulated by partial exits would leak and the trade would count as
+                # neither win nor loss. close_trade() is a no-op once a slot is already
+                # settled, so the normal path is unaffected.
+                self.risk.close_trade(pos.slot_id)
                 self.state.positions.pop(pos.slot_id, None)
                 self.state.pending_opposite_exit.discard(pos.underlying)
                 with self.state.exit_lock:
@@ -8984,6 +9050,7 @@ class OptionsBuyerEdgeBot:
             symbol, smoothed, spot, direction, iv_rank_val,
             signal_score=result.score,
             gex_levels=gex_levels,
+            min_score=effective_min_score,
         )
         if best is None:
             best = StrikeSelector.simple_otm(smoothed, spot, direction, cfg.market.otm_offset)
@@ -9038,7 +9105,7 @@ class OptionsBuyerEdgeBot:
         # ── Conviction scalar (single source of truth for all adaptive risk) ──────
         # Maps [min_score, 100] → [0.0, 1.0]. Used for SL, BE, and trail adaptation.
         entry_conviction = max(0.0, min(
-            (abs(result.score) - cfg.entry.min_score) / max(100.0 - cfg.entry.min_score, 1.0),
+            (abs(result.score) - effective_min_score) / max(100.0 - effective_min_score, 1.0),
             1.0,
         ))
 
