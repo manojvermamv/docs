@@ -8009,7 +8009,7 @@ class OptionsBuyerEdgeBot:
                     if executed_price > 0:
                         with self.state.state_lock:
                             pos = self.state.positions.slot(slot_id_to_pop)
-if pos:
+                        if pos:
                             pnl = _calc_pnl(pos, executed_price, qty=pending_exit.exit_qty)
                             norm_reason = ExitReason.normalize(pending_exit.reason)
                             
