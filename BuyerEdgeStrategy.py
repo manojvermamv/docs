@@ -75,7 +75,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
 # Production Blockers:           None known
-# Remaining Work:                Signal architecture steps 1, 4 (see OPEN OBSERVATIONS) + min_score calibration + F94
+# Remaining Work:                Signal architecture steps 1, 4 (see OPEN OBSERVATIONS) + min_score calibration
 #
 # OPEN OBSERVATIONS
 # ------------------------------------------------------------------------------
@@ -211,6 +211,11 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F98b ✓ Fixed (MEDIUM): Weighting approach for F98 was also broken — apply_confirmed_partial_exit decrements pos.core.qty right after record_strike_loss, so the denominator shrinks across repeated partial fills (1.83× on 3 fills, 2.83× on 9). Fixed by replacing all 10 weighted record_strike_loss calls with an accrue/settle pattern: accrue_strike_loss() banks pts×qty and qty per slot; settle_strike_loss() commits the qty-weighted average once at the 3 close seams (_finalize_exit, all-tranches-broker-filled, _cleanup_stale_positions). The old record_strike_loss() is now only used by the strike-pain dashboard (query-only).
 # F99 ✓ Fixed (HIGH): ExitReason.normalize() not idempotent — double-normalize collapsed every WS-triggered exit to OTHER, starving the exit-type expectancy database. Fixed with _ENUM_VALUES pass-through, _RAW_PREFIX_TO_ENUM prefix matching, DEEP_OTM enum, and missing opposite_side_signal mapping.
 # F100 — reconciled-fill gate: defence in depth — never sell more than the broker holds. No fix needed; field issue noted for awareness.
+# F101 ✓ Fixed (HIGH): The tradebook cross-check never covered multi-tranche positions — cancel_broker_orders
+#       routes is_multi to _cancel_tranche_orders before that check runs, so a raced SL-M fill still read as
+#       'cancelled'. The net-qty gate stopped it going short, but the slot then looped on suppressed SELLs and
+#       _cleanup_stale_positions could not reap it (that path requires exit_pending=True). Added the same
+#       _fill_from_tradebook() cross-check to the per-tranche post-cancel loop.
 #
 # ==============================================================================
 # CODING CONVENTIONS
@@ -284,7 +289,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #     Constraint: Retail API idempotency keys unavailable; residual duplicate-order tail-risk accepted.
 #
 # 11. Execution & Signal Engine
-#     Current: Five-layer confirmation composite score (-100 to +100). SignalEngine with INDICATOR_REGISTRY (4 specs) and STATISTIC_REGISTRY (10 specs). StrikeSelector with delta-band primary / OTM hard-sl fallback.
+#     Current: Five-layer confirmation composite score (-100 to +100). SignalEngine with INDICATOR_REGISTRY (4 specs) and STATISTIC_REGISTRY (12 specs). StrikeSelector with delta-band primary / OTM hard-sl fallback.
 #     Verified: Entry gating (max positions, opposite-side, same-direction conviction gate, strike cumulative-loss guard). Session time gates (morning/normal/power hour). Signal-aware position management — V2-A6 parallel exit on opposing signal, V2-A1 diagnostic logging, V2-A5 tranche deterioration exit. Post-cutoff slot resolution.
 #
 # ==============================================================================
@@ -592,7 +597,7 @@ class ExitReason:
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║  SECTION 3 — CONFIGURATION          8 sub-configs + BotConfig        ║
+# ║  SECTION 3 — CONFIGURATION          9 sub-configs + BotConfig        ║
 # ║    BrokerConfig / MarketConfig / EntryConfig / RiskConfig            ║
 # ║    TrailConfig / JournalConfig / PositionConfig / TrancheConfig      ║
 # ╚══════════════════════════════════════════════════════════════════════╝
@@ -2695,7 +2700,10 @@ class BotState:
         """Commit pending accrue(s) for a slot id as a single qty-weighted
         record_strike_loss entry, then discard the pending buffer (F98b).
         No-op if no accrue entries exist for the slot."""
-        pending = self._pending_strike_loss.pop(slot_id, None)
+        # pop under the same lock accrue_strike_loss writes through, else a concurrent
+        # accrue can setdefault a fresh list after the pop and orphan that slice.
+        with self.state_lock:
+            pending = self._pending_strike_loss.pop(slot_id, None)
         if not pending:
             return
         # Group by key (all entries for the same slot share a key by construction)
@@ -6547,6 +6555,25 @@ class OrderManager:
                             "tranche_id":  tr.tranche_id,
                         }
                         dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled for {underlying} t={tr.tranche_id}: {oid} @ {executed_price}")
+                    elif broker_stat in ("cancelled", "canceled", "rejected") and key not in broker_filled:
+                        # F101: cancel_broker_orders routes multi-tranche here before its own
+                        # tradebook check runs, so a raced fill still read as cancelled. The
+                        # trade row survives the cancel; the order status does not.
+                        _tb_price = self._fill_from_tradebook(oid, pos.symbol)
+                        if _tb_price and _tb_price > 0:
+                            broker_filled[key] = {
+                                "order_id":    oid,
+                                "executed":    _tb_price,
+                                "order_status": "complete",
+                                "tranche_id":  tr.tranche_id,
+                            }
+                            err(f"[ORDER] CANCEL/FILL RACE {attr_name} {oid} t={tr.tranche_id}: broker says "
+                                f"'{broker_stat}' but tradebook shows a fill @ ₹{_tb_price:.2f} — treating as FILLED")
+                            self._notify(
+                                f"⚠️ Cancel/fill race — {underlying} tranche {tr.tranche_id}\n"
+                                f"{attr_name} {oid} reported '{broker_stat}', filled @ ₹{_tb_price:.2f}\n"
+                                "Tranche closed on the broker fill; duplicate exit suppressed.", 8,
+                            )
                 setattr(tr, attr_name, None)
         pos.sl_order_id = None  # F62: clear flat alias — per-tranche loop clears tr.sl_order_id, but pos.sl_order_id (direct broker field, not a property delegation) would remain stale for multi-tranche positions that survived restart
         return broker_filled
