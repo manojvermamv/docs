@@ -6053,6 +6053,7 @@ class OrderManager:
         self._fetcher = fetcher
         self._notify = notify
         self._journal = JournalWriter(self.config.journal.trade_journal_path)
+        self._reconcile_alerted: set[str] = set()  # slot_ids already alerted for suppressed-SELL (F100)
         self._pending_tranche_exits: dict[str, str] = {}  # key=f"{underlying}_{tr.tranche_id}" → order_id
         self._pending_tranche_exits_lock: threading.Lock = threading.Lock()
         self._known_order_ids_lock: threading.Lock = threading.Lock()
@@ -6517,10 +6518,90 @@ class OrderManager:
                         "order_status": broker_stat,
                     }
                     dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
+                elif broker_stat in ("cancelled", "canceled", "rejected") and attr_name not in broker_filled:
+                    # F100: a 'cancelled' verdict here is NOT proof of no-fill. The
+                    # execution engine can fill an order and write order_status='complete'
+                    # while a concurrent cancel overwrites that same row with 'cancelled'
+                    # — the trade and the position mutation both survive. Every status
+                    # endpoint then reports 'cancelled' for an order that really filled,
+                    # and the caller places a duplicate SELL, going net short.
+                    # The trade row is the one artefact the cancel never touches.
+                    _tb_price = self._fill_from_tradebook(oid, pos.symbol)
+                    if _tb_price and _tb_price > 0:
+                        broker_filled[attr_name] = {
+                            "order_id":    oid,
+                            "executed":    _tb_price,
+                            "order_status": "complete",
+                        }
+                        err(f"[ORDER] CANCEL/FILL RACE on {attr_name} {oid}: broker reports "
+                            f"'{broker_stat}' but tradebook shows a fill @ ₹{_tb_price:.2f} — "
+                            f"treating as FILLED, suppressing duplicate SELL")
+                        self._notify(
+                            f"⚠️ Cancel/fill race detected — {underlying}\n"
+                            f"{attr_name} {oid} reported '{broker_stat}' but filled @ ₹{_tb_price:.2f}\n"
+                            "Duplicate exit suppressed; position closed on the broker fill.",
+                            8,
+                        )
         pos.sl_order_id  = None
         pos.tgt_order_id = None
         pos.broker_protection = False
         return broker_filled
+
+    def _fill_from_tradebook(self, order_id: str, symbol: str) -> float | None:
+        """Authoritative fill lookup for one order_id, independent of order_status (F100).
+
+        orderstatus()/orderbook() report the order ROW, whose terminal status can be
+        overwritten to 'cancelled' by a concurrent cancel that raced the execution
+        engine. The TRADE row is created before the status write and is never rolled
+        back by cancel_order(), so a trade keyed to this order_id proves a fill even
+        when every status endpoint says 'cancelled'.
+
+        Returns the quantity-weighted average fill price, or None when no trade
+        exists (the genuine no-fill case) or the lookup is unavailable.
+        """
+        if not order_id or not hasattr(self.client, "tradebook"):
+            return None
+        try:
+            resp = self.client.tradebook()
+            if not isinstance(resp, dict) or resp.get("status") != "success":
+                return None
+            qty_sum = 0.0
+            notional = 0.0
+            for t in (resp.get("data") or []):
+                if str(t.get("orderid", "")) != str(order_id):
+                    continue
+                if symbol and t.get("symbol") and t.get("symbol") != symbol:
+                    continue
+                q = abs(float(t.get("quantity", 0) or 0))
+                px = float(t.get("average_price", 0) or t.get("price", 0) or 0)
+                if q > 0 and px > 0:
+                    qty_sum += q
+                    notional += q * px
+            return (notional / qty_sum) if qty_sum > 0 else None
+        except Exception as exc:
+            err(f"[ORDER] tradebook fill lookup failed for {order_id}: ", exc)
+            return None
+
+    def _broker_net_qty(self, symbol: str) -> int | None:
+        """Net position quantity held at the broker for an exact symbol (F100).
+
+        Ground truth for 'how much do I actually own' — used to clamp exit size so a
+        protective order that filled inside the cancel window can never be sold twice.
+        Returns None when the lookup is unavailable (caller falls back to prior behaviour).
+        """
+        if not hasattr(self.client, "positionbook"):
+            return None
+        try:
+            resp = self.client.positionbook()
+            if not isinstance(resp, dict) or resp.get("status") != "success":
+                return None
+            for p in (resp.get("data") or []):
+                if p.get("symbol") == symbol:
+                    return int(p.get("quantity", 0) or 0)
+            return 0
+        except Exception as exc:
+            err(f"[ORDER] positionbook lookup failed for {symbol}: ", exc)
+            return None
 
     def modify_broker_sl(self, underlying: str, new_trigger: float, slot_id: str | None = None) -> bool:
         """Modify broker SL-M trigger price. Returns True if the broker accepted the change."""
@@ -7503,6 +7584,51 @@ class OrderManager:
                 self._state.exit_queue.discard(pos.slot_id)
             pos.exit_pending = False
             return
+
+        # F100 (defence in depth): never sell more than the broker actually holds.
+        # Backstop for when the tradebook cross-check in cancel_broker_orders is
+        # unavailable or the fill lands after the cancel returns.
+        #
+        # positionbook is ACCOUNT-WIDE, not strategy-scoped (findings-master §1.3/§1.8,
+        # re-verified against openalgo source: restx_api/positionbook.py has no strategy
+        # reference; sandbox get_positions filters on user_id only). That splits what this
+        # reading can justify:
+        #   • Suppressing the SELL is always sound. The broker nets MIS positions per
+        #     symbol, so account_qty <= 0 means there is genuinely nothing to sell and
+        #     selling would open a real short. Naked-short risk is an ACCOUNT-level
+        #     property, which is exactly what this number measures.
+        #   • Booking the exit is NOT sound. The qty may be netted to zero by another
+        #     strategy's position on the same symbol, so it is not proof that OUR order
+        #     filled. Only the order_id-keyed tradebook check can prove that, per §1.8
+        #     ("cross-check against order IDs your bot actually placed — not symbol
+        #     matching"). If it had found a fill we would have returned already.
+        # So: always suppress, never finalize here. Leave the slot tracked and let the
+        # next reconciliation cycle resolve it against real evidence.
+        if not cfg.broker.paper_trade:
+            _held = self._broker_net_qty(pos.symbol)
+            if _held is not None:
+                if _held <= 0:
+                    err(f"[ORDER] SELL SUPPRESSED for {underlying}: broker account qty for "
+                        f"{pos.symbol} is {_held}, strategy expected {sellable_qty}. "
+                        f"Nothing to sell — sending it would open a short. Position stays "
+                        f"tracked; retrying next cycle.")
+                    if pos.slot_id not in self._reconcile_alerted:
+                        self._reconcile_alerted.add(pos.slot_id)
+                        self._notify(
+                            f"⚠️ Duplicate exit BLOCKED — {underlying}\n"
+                            f"{pos.symbol} broker qty={_held}, strategy expected {sellable_qty}\n"
+                            "No SELL sent (would go short). Position still tracked — will retry.\n"
+                            "If this repeats, reconcile the account manually.",
+                            8,
+                        )
+                    with self._state.exit_lock:
+                        self._state.exit_queue.discard(pos.slot_id)
+                    pos.exit_pending = False
+                    return
+                if _held < sellable_qty:
+                    inf(f"[ORDER] Clamping exit qty for {underlying}: broker holds {_held}, "
+                        f"strategy expected {sellable_qty} — selling {_held}")
+                    sellable_qty = _held
 
         executed_price = 0.0
         order_id       = None
