@@ -93,25 +93,9 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #     pre-Step-3 threshold semantics — deliberately not auto-applied to a live parameter.
 #   ⬢ clear_oi_state() unused: method defined on SignalEngine but never called —
 #     cross-session OI buffer carry-over depends on daily process restart.
-#   ⬢ F94 (HIGH, patch ready, NOT applied — shifts live trade selection): _effective_min_score()
-#     reaches SignalEngine.score() via min_score_override and V2-A6 (L8773), but StrikeSelector.select_best()
-#     (L5062/5071/5081), the scan_underlying entry_conviction scalar (L8895), and the V2-A3 trail boost
-#     (L4436) all still read raw cfg.entry.min_score. Two measured consequences at min_score=40:
-#       · Power hour (effective 32): scores 32–39 pass the EXECUTE gate, then select_best rejects them as
-#         "insufficient edge" and scan_underlying silently falls through to StrikeSelector.simple_otm —
-#         a fixed ±OTM_OFFSET pick with no delta targeting, no liquidity ranking and no asym quality gate.
-#         The eased threshold therefore degrades strike quality instead of widening participation.
-#       · Morning gate (effective 60): a score of 65 yields conviction 0.417 instead of 0.125 (3.3x
-#         overstated), relaxing the asym gate to 36.7 vs 39.0 and widening target delta / SL sizing —
-#         the opposite of the stricter discipline the morning factor exists to enforce.
-#     Fix is to thread effective_min_score into select_best() and the conviction scalars. Deferred under the
-#     same rule as F83: live trade-selection parameters are not changed without explicit review.
+#   ⬢ F94 (HIGH, patch ready, NOT applied): _effective_min_score() reaches SignalEngine.score() but StrikeSelector.select_best() and conviction scalars still read raw cfg.entry.min_score — power hour scores 32-39 pass EXECUTE then get rejected by select_best; morning gate overstates conviction 3.3x. Deferred: same rule as F83 — live trade-selection parameters not changed without explicit review.
 #
-#   ⬢ F95 (research, not a defect): _compute_oi_wall (L3091) returns {+0.5, 0, -0.5, -1} — it has no +1
-#     branch. Both -1 cases are individually standard (spot >= call wall = overhead resistance; spot <= put
-#     wall = support broken), but there is no bullish-breakout case, so the spec contributes at most
-#     +0.5/14 of FAST_MAX against -1.0/14, a standing directional skew in a long-only buyer model.
-#     Scoring-model gap rather than a coding error — belongs to CALIBRATION / RESEARCH, not a patch.
+#   ⬢ F95 (research, not a defect): _compute_oi_wall has no +1 bullish-breakout case — returns at most +0.5/14 against -1.0/14, a standing directional skew. Scoring-model gap, not a coding defect.
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
 # telegram() correctly omits strategy= (SDK has no such param).
@@ -214,36 +198,10 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F87 ✓ Fixed (P1): place_exit() blindly finalized entire positions on partial exits when tranches were in-flight, stranding pending orders and skipping P&L/journal accounting.
 # F88 ✓ Fixed (P2): Order-stream dispatcher missed streamed exit fills because it keyed pending_exits by order_id instead of slot_id.
 # F89 ✓ Fixed (P1): Partial exits leaked slot_id in exit_queue permanently, disabling all future fast WS-tick exits (trail/SL) for the residual tranche. Added exit_queue.discard().
-# F90 ✓ Fixed (CRITICAL): OptionsBuyerEdgeBot._handle_order_stream_event priority-2 (exit completion) branch was
-#       transplanted from OrderManager and dereferenced five attributes the orchestrator does not own —
-#       self._pending_tranche_exits_lock, self._pending_tranche_exits, self.journal, self._finalize_exit, self._notify.
-#       AST ownership check confirms OptionsBuyerEdgeBot has no bases and defines none of them; all five live on
-#       OrderManager (_journal at L6039, _pending_tranche_exits at L6040-6041, _finalize_exit at L6305, _notify at L6038).
-#       Every streamed exit fill matching a pending_exits entry therefore raised AttributeError, was swallowed by the
-#       _strategy_thread catch-all, and aborted the remainder of that cycle (check_pending_*, check_broker_order_fills,
-#       verify_sl_orders_active, trail engine, all scans) before falling back to REST polling. F88 fixed the slot_id
-#       keying that reaches this block but the block itself had never executed. Latent only because order_updates_enabled
-#       defaults FALSE (platform-injected), so subscribe_orders() is normally never called. Fixed by routing through
-#       self.orders.* and self._send_alert (which IS OrderManager._notify — wired at L7888).
-# F91 ✓ Fixed (HIGH): _process_premium_trail read _lock_floor at the _lock_type/LOCKED-stage site while leaving it
-#       unbound on the non-ATR + tgt <= entry_premium path — UnboundLocalError confirmed by executing the transcribed
-#       branch logic. Reachable two ways: PREMIUM_TARGET_PTS=0 (EntryConfig.validate() has no check on
-#       premium_target_pts, so tgt == executed passes validation) and startup restore, which overwrites pos.tgt from a
-#       broker LIMIT price guarded only by > 0, not > entry_premium. Sibling code already treats this state as expected —
-#       _compute_raw_activation_threshold (L4333) carries an explicit `if pos.tgt > ep else 999.0` sentinel for it.
-#       Fired after pos.sl was already assigned, so the SL landed but LifecycleStage.LOCKED was skipped and the cycle
-#       aborted. Fixed by binding _lock_floor = ep on that path (breakeven IS the floor there, matching the existing max()).
-# F92 ✓ Fixed (HIGH): check_trailing_stops computed _needs_spot (key_level / spot modes only) and built the [DATA-MISS]
-#       _missing list from it, then 50 lines later unconditionally re-derived spot_ltp and did `if spot_ltp is None: continue`.
-#       The recompute was a no-op (spot_ltp resolved at L4380, never reassigned in between) and the gate defeated the
-#       guard above it. _process_premium_trail takes no spot argument and references zero spot-derived names (AST-verified),
-#       so in the DEFAULT config (tracking_mode=premium, sl_method=atr) a stale spot feed silently froze the premium trail
-#       with no diagnostic — _missing was empty, so [DATA-MISS] never fired. Fixed by moving the None-gate inside the two
-#       spot-consuming branches only, preserving the _needs_spot intent and type narrowing.
-# F93 ✓ Fixed (MEDIUM): fetch_quote UDAPI10005 branch guarded on `not hasattr(self, '_rate_limit_notified')`, but the
-#       attribute is initialized in __init__ (L3689), so hasattr was always True and the broker rate-limit Telegram alert
-#       could never fire. Also violated this file's own CODING CONVENTIONS ban on lazy hasattr patterns. The sibling
-#       auth-error branch (L3894) uses the correct `not self._auth_error_notified` form. Fixed to match.
+# F90 ✓ Fixed (CRITICAL): Order-stream exit dispatch referenced 5 OrderManager-only attrs from the bot — every streamed fill raised AttributeError and aborted the cycle. Fixed by routing through self.orders.* and self._send_alert.
+# F91 ✓ Fixed (HIGH): _process_premium_trail left _lock_floor unbound on the non-ATR + tgt ≤ ep path — UnboundLocalError skipped LOCKED stage after SL already landed. Fixed by binding _lock_floor = ep on that path.
+# F92 ✓ Fixed (HIGH): check_trailing_stops had an unconditional spot_ltp gate after red herring computation — stale spot feed silently froze the premium trail with no diagnostic. Fixed by moving the None-gate inside only the key_level and spot branches.
+# F93 ✓ Fixed (MEDIUM): fetch_quote UDAPI10005 guard used hasattr() for an __init__-initialized attribute — rate-limit alert could never fire. Fixed to match sibling auth-error branch pattern.
 #
 # ==============================================================================
 # CODING CONVENTIONS
