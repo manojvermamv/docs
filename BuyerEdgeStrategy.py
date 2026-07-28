@@ -205,7 +205,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F94 ✓ Fixed (HIGH): Session-adjusted min_score reached SignalEngine.score() but not StrikeSelector.select_best() or conviction scalars — power-hour signals that passed EXECUTE (eased bar) got rejected by select_best; morning gate overstated conviction 3.3x. Fixed by plumbing effective_min_score through select_best(), entry_conviction, and trail opposition gate.
 # F96 ✓ Fixed (HIGH): Startup optiongreeks delta read at top level always yielded 0.0, mapping every restored position to Deep-OTM (tgt_mult 0.5, act_mult 2.0) — delta is nested at greeks.delta. Fixed with correct nested path and status check; zero delta maps to Unknown band.
 # F97 ✓ Fixed (MEDIUM): Consecutive win/loss streak counted tranches, not trades — a 3-tranche stop-out booked 3 consecutive losses, halving the session after 2.7 trades; scale-out booking a winning trade as a loss. Fixed by accumulating per-slot realized P&L across partial exits and settling the streak once per trade via closes_position flag and close_trade().
-# F98 ✓ Fixed (MEDIUM): Strike-loss guard triple-counted point loss on multi-tranche positions — record_strike_loss() called per tranche with full (entry - exit) pts_loss. Fixed by weighting each call by tr.qty / pos.qty so partial-exit slices sum to the position's real point loss.
+# F98 ✓ Fixed (MEDIUM): Strike-loss guard over-counted point loss on multi-tranche positions — record_strike_loss() called per tranche with full (entry - exit) pts_loss, and _finalize_exit recorded full loss for the final slice. Fixed by weighting all 10 call sites (8 tranche exits by tr.qty/pos.qty, apply_confirmed_partial_exit by filled_qty/pos.qty, _finalize_exit by remaining_qty/pos.qty) so every partial-exit slice sums to the position's real point loss.
 # F99 ✓ Fixed (HIGH): ExitReason.normalize() not idempotent — double-normalize collapsed every WS-triggered exit to OTHER, starving the exit-type expectancy database. Fixed with _ENUM_VALUES pass-through, _RAW_PREFIX_TO_ENUM prefix matching, DEEP_OTM enum, and missing opposite_side_signal mapping.
 #
 # ==============================================================================
@@ -6301,7 +6301,8 @@ class OrderManager:
         tr_pnl = _calc_pnl(pos, price, qty=filled_qty)
         self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
         _pts_loss = max(0.0, pos.entry_premium - price)
-        self._state.record_strike_loss(opt_sym, pos.option_type, _pts_loss)
+        self._state.record_strike_loss(opt_sym, pos.option_type,
+                                      _pts_loss * filled_qty / max(1, pos.qty))
         tr_exit_record = TradeAnalytics.build_tranche(
             underlying=underlying, pos=pos, tr=filled_slice,
             paper_trade=self.config.broker.paper_trade,
@@ -6412,7 +6413,8 @@ class OrderManager:
         opt_sym = opt_symbol or pos.symbol
         self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=True)
         _pts_loss = max(0.0, pos.entry_premium - executed_price)
-        self._state.record_strike_loss(opt_sym, pos.option_type, _pts_loss)
+        self._state.record_strike_loss(opt_sym, pos.option_type,
+                                      _pts_loss * pos.remaining_qty / max(1, pos.qty))
         reason_str = reason.value if isinstance(reason, ExitReason) else str(reason)
         self._write_journal(underlying, pos, executed_price, pnl, reason_str,
                             exit_price_source=exit_price_source)
