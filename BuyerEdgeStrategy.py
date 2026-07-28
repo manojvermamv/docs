@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F93, F100 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64, F71–F93, F96, F99–F100 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -68,7 +68,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F93, F100 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open)
+# Closed Findings:               F1–F64, F71–F93, F96, F99–F100 (F28, F49–F51 reserved; F65–F70 unused; F94–F95 open)
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
 # Structural Defects:            None known
@@ -202,7 +202,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F91 ✓ Fixed (HIGH): _process_premium_trail left _lock_floor unbound on the non-ATR + tgt ≤ ep path — UnboundLocalError skipped LOCKED stage after SL already landed. Fixed by binding _lock_floor = ep on that path.
 # F92 ✓ Fixed (HIGH): check_trailing_stops had an unconditional spot_ltp gate after red herring computation — stale spot feed silently froze the premium trail with no diagnostic. Fixed by moving the None-gate inside only the key_level and spot branches.
 # F93 ✓ Fixed (MEDIUM): fetch_quote UDAPI10005 guard used hasattr() for an __init__-initialized attribute — rate-limit alert could never fire. Fixed to match sibling auth-error branch pattern.
-# F100 ✓ Fixed (CRITICAL): Cancel/fill race in cancel_broker_orders — concurrent cancel overwrote order_status after fill, status endpoints said 'cancelled' and place_exit sent duplicate SELL creating naked short. Fixed with tradebook cross-check at cancel + broker-net-qty backstop in place_exit.
+# F96 ✓ Fixed (HIGH): Startup optiongreeks delta read at top level always yielded 0.0, mapping every restored position to Deep-OTM (tgt_mult 0.5, act_mult 2.0) — delta is nested at greeks.delta. Fixed with correct nested path and status check; zero delta maps to Unknown band.
+# F99 ✓ Fixed (HIGH): ExitReason.normalize() not idempotent — double-normalize collapsed every WS-triggered exit to OTHER, starving the exit-type expectancy database. Fixed with _ENUM_VALUES pass-through, _RAW_PREFIX_TO_ENUM prefix matching, DEEP_OTM enum, and missing opposite_side_signal mapping.
 #
 # ==============================================================================
 # CODING CONVENTIONS
@@ -564,20 +565,9 @@ class ExitReason:
 
     @classmethod
     def normalize(cls, raw_reason: str) -> str:
-        """Map a raw exit reason to its normalized enum value.
-
-        IDEMPOTENT BY CONTRACT: normalize(normalize(x)) == normalize(x).
-
-        The exit path normalizes twice — WebSocketManager._trigger_exit normalizes
-        before handing the reason to place_exit, which normalizes again. Because the
-        old lookup only knew raw->enum, the second pass found "PREMIUM_TRAIL" absent
-        from _RAW_TO_ENUM and collapsed it to OTHER. Every WS-triggered exit
-        (premium SL, target, spot trail, deep-OTM) therefore journalled as OTHER,
-        starving the exit-type expectancy database this class exists to feed (F99).
-        """
+        """Map a raw exit reason to its normalized enum value. Idempotent by contract."""
         if not raw_reason:
             return cls.OTHER
-        # Already normalized — pass straight through. This is what makes it idempotent.
         if raw_reason in cls._ENUM_VALUES:
             return raw_reason
         mapped = cls._RAW_TO_ENUM.get(raw_reason)
@@ -8317,21 +8307,9 @@ class OptionsBuyerEdgeBot:
                 # NOTE: entry_conviction defaults to 0.0 (not persisted), making trail
                 # activation more conservative post-restart (later trail activation).
                 # Try to recover delta from option greeks for accurate tgt/act_mult.
-                # F96: delta lives at resp["greeks"]["delta"], NOT at the top level —
-                # verified across all 4 return paths of openalgo
-                # services/option_greeks_service.py, the documented response in
-                # restx_api/option_greeks.py, and SDK 1.0.47 (a pure passthrough that
-                # does not flatten). Reading it at the top level always yielded 0.0,
-                # and get_moneyness_multipliers(0.0) falls through every band to
-                # Deep-OTM — silently halving tgt (mult 0.5) and doubling the trail
-                # activation buffer (mult 2.0) on EVERY position restored after a
-                # restart. Perversely the exception path (None -> "Unknown", 1.0/1.0)
-                # produced better state than a successful call.
-                # A missing/zero delta now stays None so it maps to the neutral
-                # "Unknown" band rather than the most conservative Deep-OTM one.
-                # underlying_symbol/underlying_exchange are intentionally omitted:
-                # restx_api/option_greeks.py documents both as optional and
-                # auto-detected.
+                # F96: delta is at greeks.delta, never top-level. Top-level read always
+                # yielded 0.0 -> Deep-OTM (tgt_mult 0.5, act_mult 2.0). Zero delta now
+                # maps to None -> neutral Unknown band (1.0/1.0).
                 _restore_delta = None
                 try:
                     _greeks = self.client.optiongreeks(symbol=sym, exchange=cfg.market.fno_exchange)
