@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F93, F96–F99 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓
+# Closed Findings    : F1–F64, F71–F93, F96–F99 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓ · Review P1-a…P1-e ✓ P2-a ✓ P2-f ✓ P2-g ✓ P2-h ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -54,6 +54,8 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #   ✓ Startup recovery & broker position reconstruction
 #   ✓ Broker order reconciliation (pending entries/exits, SL self-heal)
 #   ✓ Exit attribution & R-multiple journal analytics
+#   ✓ Chain snapshot research log (raw chain + greeks + full score breakdown,
+#     every scan outcome, for offline backtesting — CHAIN_SNAPSHOT_ENABLED)
 #
 # Flows validated:
 #   ✓ Startup flow (positionbook restore, orphan cancel, WS resubscribe)
@@ -96,6 +98,21 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #     cross-session OI buffer carry-over depends on daily process restart.
 #   ✓ F94 Fixed (HIGH): _effective_min_score() reaches SignalEngine.score() but StrikeSelector.select_best() and conviction scalars still read raw cfg.entry.min_score — power hour scores 32-39 pass EXECUTE then get rejected by select_best; morning gate overstates conviction 3.3x. Fixed by plumbing effective_min_score through select_best(), entry_conviction, and trail opposition gate.
 #
+#   ⬢ P3-a (OPEN, LOW — verified dead read, benign today): fetch_option_chain sets
+#     ce_oi_chg/pe_oi_chg from `ce.get("oi_change")`, but openalgo's option-chain response
+#     has no such field. Verified against openalgo/services/option_chain_service.py:497-537 —
+#     the leg carries exactly {symbol,label,ltp,bid,ask,bid_qty,ask_qty,open,high,low,
+#     prev_close,volume,oi,lotsize,tick_size}; `oi_change` appears nowhere in the chain path
+#     (only in the unrelated services/oi_profile_service.py and some WS streaming adapters).
+#     So the RAW chain's oi_chg fields are permanently 0.0 in production.
+#     Benign today only because smooth_chain_rows() overwrites them with a derived value
+#     (EWA(oi) - oldest raw oi across the window), and that derived value is what actually
+#     feeds Call OI Flow (2) + Put OI Flow (2) + OI Velocity (1) = 5 of 14 fast points.
+#     Two consequences worth knowing: (1) on the FIRST scan after startup the history holds a
+#     single bar, smooth_chain_rows returns early, and those 5 points score 0/neutral until the
+#     window fills — expected warm-up, not a fault; (2) the signal is a within-session window
+#     delta, NOT the day-over-day OI change the "Call Buying"/"Call Writing" labels
+#     conventionally imply. Either delete the dead read or source a real OI-change field.
 #   ⬢ F95 (research, not a defect): _compute_oi_wall has no +1 bullish-breakout case — returns at most +0.5/14 against -1.0/14, a standing directional skew. Scoring-model gap, not a coding defect.
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
@@ -210,6 +227,100 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F98b ✓ Fixed (MEDIUM): Weighting approach for F98 was also broken — apply_confirmed_partial_exit decrements pos.core.qty right after record_strike_loss, so the denominator shrinks across repeated partial fills (1.83× on 3 fills, 2.83× on 9). Fixed by replacing all 10 weighted record_strike_loss calls with an accrue/settle pattern: accrue_strike_loss() banks pts×qty and qty per slot; settle_strike_loss() commits the qty-weighted average once at the 3 close seams (_finalize_exit, all-tranches-broker-filled, _cleanup_stale_positions). The old record_strike_loss() is now only used by the strike-pain dashboard (query-only).
 # F99 ✓ Fixed (HIGH): ExitReason.normalize() not idempotent — double-normalize collapsed every WS-triggered exit to OTHER, starving the exit-type expectancy database. Fixed with _ENUM_VALUES pass-through, _RAW_PREFIX_TO_ENUM prefix matching, DEEP_OTM enum, and missing opposite_side_signal mapping.
 # F100 ✓ Fixed (CRITICAL): Cancel/fill race sent a duplicate SELL and left an untracked -30 naked short (live 28JUL 11:22:33) — openalgo sandbox _execute_order writes the trade then sets status='complete' with no row lock, while a concurrent cancel_order overwrites it with 'cancelled', so the fill survives but every status endpoint denies it. Fixed with _fill_from_tradebook() cross-checking a cancelled verdict by order_id (the trade row is never rewritten) and _broker_net_qty() clamping or suppressing the SELL; layer 2 may suppress but never books, since positionbook is account-wide. Upstream fix still open.
+# P2-h ✓ Fixed (HIGH): The exit_pending test-and-set was guarded by TWO DIFFERENT locks in
+#       different places. _trigger_exit (WS SL/target) claims a position under state_lock; the EOD
+#       square-off loop in _strategy_thread claimed it under exit_lock. Guarding one invariant with
+#       two locks gives no mutual exclusion at all — a WS stop tick arriving at square-off time can
+#       pass its guard while the square-off loop passes its own, and both call place_exit for the
+#       same slot. That is the duplicate-SELL / naked-short hazard of F100, reachable every day at
+#       15:13. Modelled at 300 concurrent trials: 300/300 double-claims before, 0/300 after.
+#       Fixed by moving the EOD claim to state_lock. Also dropped the pointless nested exit_lock in
+#       _check_max_hold: the write there is already covered by state_lock and that path never
+#       touches exit_queue (which is the only thing exit_lock guards), so it was pure deadlock
+#       surface. Codified as DESIGN INVARIANTS §10 and enforced by tests/test_lock_discipline.py,
+#       which fails on both this and P2-g when run against the revisions that contained them.
+# P2-g ✓ Fixed (CRITICAL, found while fixing P2-f): _cleanup_stale_positions ran its whole reap
+#       loop INSIDE `with self.state.state_lock:` while calling settle_strike_loss() and
+#       close_trade(), both of which re-acquire state_lock — a plain threading.Lock, so
+#       non-reentrant. The strategy thread blocked on itself the first time any position was
+#       reaped (the F59 failure mode). Unrecoverable and total: _cleanup_stale_positions is the
+#       FIRST call in _strategy_thread, so the hang stops pending entry/exit reconciliation,
+#       broker-fill checks, SL verification, EOD square-off, max-hold, trailing and scanning
+#       together — only the WS thread and the broker's own SL-M keep working. Reproduced with a
+#       6s watchdog against the committed revision. Fixed by snapshotting `stale` under the lock
+#       and reaping outside it (the pattern _check_max_hold already uses), re-acquiring only for
+#       the positions.pop / pending_opposite_exit mutations. This also stops the journal write
+#       and the tradebook/quote calls from running under the global state lock.
+# P2-f ✓ Fixed (MEDIUM): _cleanup_stale_positions wrote an orphan_cleanup journal row and called
+#       close_trade(), but never record_exit() — so a position orphaned BEFORE any exit was
+#       booked contributed nothing to _daily_pnl, _pnl_history or the win/loss streak. The
+#       journal showed the loss; the risk engine did not, so max_daily_loss,
+#       max_consecutive_losses and the drawdown-rate limit all under-counted, silently.
+#       Fixed with RiskManager.record_orphan_estimate(), made idempotent via a _settled_slots
+#       ledger because that path is reachable BOTH from exits that already booked (an exception
+#       between _finalize_exit's record_exit and positions.pop) and from exits that never did
+#       (an exception in place_exit between cancel_broker_orders and the pending_exits write).
+#       It adds to _slot_realized so the existing close_trade() settles the streak once against
+#       partials + estimate together. The exit-price estimate was also improved: the old
+#       `pos.sl or pos.entry_premium` assumes a stop-out, and post-P1-d pos.sl can legitimately
+#       be MIN_SL_TRIGGER (0.05), which would book a near-total loss on a position that may have
+#       exited near entry. New ladder: unambiguous tradebook SELL (matched by symbol + exact qty,
+#       since an orphan has no order_id left and positionbook/tradebook are account-wide) ->
+#       last known LTP -> assumed stop -> entry (flat). Estimated bookings emit a priority-7
+#       alert when negative, because they are counted against real loss limits without being
+#       confirmed fills.
+# P2-a ✓ Fixed (HIGH): The exit path booked an unpopulated average_price as a real fill —
+#       pnl = (0 - entry_premium) * qty, a phantom full-premium loss. Not an edge case:
+#       openalgo/services/orderstatus_service.py:182-246 initialises average_price = 0.0 and
+#       populates it ONLY from a separate tradebook lookup gated on order_status == "complete";
+#       on a miss or a race it logs "No trade found for OrderID {orderid} in tradebook" and still
+#       returns status=success + order_status=complete + average_price=0.0. place_entry already
+#       refused a zero price ("Executed price is zero ... cannot register position"); the exit and
+#       protection-fill paths did not. Blast radius went beyond P&L: a 0 exit price also banked the
+#       FULL premium into accrue_strike_loss, tripping max_strike_cum_loss_pts (default 60) on the
+#       first occurrence and blocking re-entry on a strike that never lost that much.
+#       Fixed with _resolve_fill_price(): orderstatus average_price -> tradebook row (independent of
+#       order_status, same source F100/F101 already trust) -> None. Callers never book a guess:
+#       place_exit defers to pending_exits, the broker-fill branches fall back to last known LTP
+#       tagged exit_price_source="estimated", and both strike-loss accrual sites skip rather than
+#       bank a phantom loss. Applied at the 6 exit-booking sites; the 3 already-guarded sites
+#       (_exit_non_runner_tranche, check_pending_exits, order-stream) were left as-is.
+#       Verified before/after: pre-fix booked -3000 even when the tradebook HELD the correct
+#       price (-225) and banked 200pts of strike loss against a 60pt cap.
+# P1-a ✓ Fixed (CRITICAL): A non-positive WS tick reached _check_premium_trail, satisfied
+#       `ltp <= pos.sl` and fired an unconditional MARKET SELL. Not hypothetical — upstream broker
+#       streaming adapters default a MISSING price field to 0.0 rather than omitting it
+#       (openalgo/broker/aliceblue/streaming/aliceblue_mapping.py:139, dhan/streaming/dhan_adapter.py:836,
+#       angel/streaming/angel_adapter.py:768, deltaexchange/streaming/delta_adapter.py:469), so a
+#       partial/heartbeat frame arrives as ltp=0.0. The old `inner.get("ltp") or data.get("ltp")` masked
+#       it only by accident (root carries no "ltp" key on the nested wire shape confirmed at
+#       websocket_proxy/server.py:1949) and did not mask the flat-payload fallback path or negatives.
+#       Fixed with a None-aware read plus an explicit `ltp <= 0` reject at the WS boundary (before the
+#       snapshot write), and defence-in-depth guards in check_trailing_stops and _check_premium_trail.
+# P1-b ✓ Fixed (CRITICAL): base_score divides fast_raw by the budget of the specs that were AVAILABLE
+#       this scan, so a degraded feed inflates conviction — fast_raw=3 scores 21 at full coverage
+#       (FAST_MAX=14) but 50 when greeks/GEX/IV drop out (FAST_MAX=6). _fetch_option_greeks_cached
+#       returns None on a rate-limit miss, i.e. exactly when the market is moving fastest, so thinner
+#       evidence read as higher conviction. Fixed with registry-derived NOMINAL_FAST_MAX and a
+#       cfg.signal.min_fast_coverage gate (default 0.70) forcing NO_TRADE below the floor.
+# P1-c ✓ Fixed (HIGH): register_filled_entry scales the TARGET by moneyness (tgt_mult) but the SL
+#       ceiling was flat, so (1) the 30pt cap discarded the delta-adaptive base for any premium above
+#       ~75, leaving EntryStopLossPolicy's sl_width_pct table inert in production, and (2) identical
+#       config produced R:R 0.83 on Deep-OTM and 3.33 on Deep-ITM. Fixed by scaling the absolute
+#       ceiling by the same tgt_mult, making R:R invariant across moneyness. Delta unavailable →
+#       mult 1.0 → identical to pre-fix behaviour.
+# P1-d ✓ Fixed (CRITICAL): A stop wider than the fill drove sl negative. The OpenAlgo API rejects that
+#       at the schema layer (restx_api/schemas.py OrderSchema.trigger_price → validate.Range(min=0)),
+#       so the SL-M was never placed, verify_sl_orders_active retried it every cycle forever, and
+#       `ltp <= pos.sl` could never fire — the position ran with no stop of any kind. A 0.0 trigger is
+#       accepted by the schema but can never fire on a long option (a SELL needs ltp <= trigger,
+#       sandbox/order_manager.py:396), so the floor must be positive: MIN_SL_TRIGGER. Applied at both
+#       construction sites (register_filled_entry and the startup restore path).
+# P1-e ✓ Fixed (HIGH): place_exit cancels SL-M + LIMIT before sending the replacement SELL. When the
+#       SELL was not submitted it returned with protection still cancelled; the only thing that
+#       restored it was verify_sl_orders_active() on the next strategy cycle (default 60s), and only
+#       because exit_pending is reset on that path (the sweep skips exit_pending slots). Fixed by
+#       re-arming protection in the same call, with a priority-9 alert if the re-arm also fails.
 # F101 ✓ Fixed (HIGH): The tradebook cross-check never covered multi-tranche positions — cancel_broker_orders
 #       routes is_multi to _cancel_tranche_orders before that check runs, so a raced SL-M fill still read as
 #       'cancelled'. The net-qty gate stopped it going short, but the slot then looped on suppressed SELLs and
@@ -345,7 +456,35 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #    premium_stop_pts (X points)  =  "What's my simple default SL when no data?"
 #    max_sl_pts (0 = premium_stop_pts) =  "What's my absolute never-exceed cap?"
 #    max_sl_premium_ratio (0 = disabled) = "What's my proportional-to-premium ceiling?"
-#    Chain: base → sl_factor → floor(5) → min(abs_ceiling, premium × ratio/100) — applied LAST.
+#    Chain: base → sl_factor → floor(5) → min(abs_ceiling × tgt_mult, premium × ratio/100)
+#           — applied LAST.
+#    The abs_ceiling is scaled by the SAME moneyness tgt_mult that register_filled_entry
+#    applies to the target (P1-c), so R:R is invariant across moneyness:
+#        Deep-OTM 0.5 → 15pts vs tgt +25   ·  ATM 1.0 → 30pts vs tgt +50
+#        Deep-ITM 2.0 → 60pts vs tgt +100                       all R:R 1.67
+#    Delta unavailable → mult 1.0 → identical to the pre-P1-c flat ceiling.
+# 8. SL trigger price is always > 0. A negative trigger is rejected outright by the
+#    OpenAlgo API (restx_api/schemas.py OrderSchema.trigger_price → Range(min=0)) and a
+#    0.0 trigger can never fire on a long option (a SELL needs ltp <= trigger), so
+#    register_filled_entry clamps to MIN_SL_TRIGGER rather than emitting either.
+# 9. Protection is never left cancelled across a failed exit. place_exit() cancels SL-M
+#    and LIMIT before sending the SELL; if the SELL is not submitted, protection is
+#    re-armed in the same call rather than waiting for verify_sl_orders_active().
+# 10. LOCK DISCIPLINE (enforced by tests/test_lock_discipline.py — run it after any change
+#     that adds a `with ... lock:` block):
+#     a. state_lock and exit_lock are plain threading.Lock — NON-REENTRANT. Never call a
+#        method that re-acquires a lock while holding it. Snapshot under the lock, then do
+#        the work outside (see _check_max_hold, _cleanup_stale_positions). Violating this
+#        hangs the calling thread permanently; on the strategy thread that is fatal (P2-g).
+#     b. Hierarchy is state_lock -> exit_lock. Never acquire state_lock while holding
+#        exit_lock.
+#     c. The `exit_pending` TEST-AND-SET that claims a position for exit is guarded by
+#        state_lock, everywhere, without exception. Guarding the same invariant with a
+#        different lock in one place (EOD square-off used exit_lock) provides no mutual
+#        exclusion at all and lets two paths both claim one position -> duplicate SELL (P2-h).
+#        Plain releases (exit_pending = False) are single stores and need no lock.
+#     d. exit_lock guards exit_queue only. If a path does not touch exit_queue it has no
+#        business taking exit_lock.
 #
 # ==============================================================================
 # PRODUCTION READINESS
@@ -520,6 +659,13 @@ CONV_BE_RANGE = 0.20
 
 # Live PNL alert interval in seconds (0 = disabled)
 LIVE_PNL_ALERT_INTERVAL = 60
+
+# Minimum SL-M trigger price (₹). The OpenAlgo API rejects a negative trigger outright
+# (openalgo/restx_api/schemas.py — OrderSchema.trigger_price → validate.Range(min=0)),
+# and while 0.0 passes validation it can never fire on a long option: a SELL trigger
+# requires ltp <= trigger (openalgo/sandbox/order_manager.py:396) and premium cannot
+# reach zero. So a stop wider than the fill must clamp to a small POSITIVE value, not 0.
+MIN_SL_TRIGGER = 0.05
 
 
 class ExitReason:
@@ -1164,6 +1310,29 @@ class JournalConfig:
         return []
 
 
+# ── 3g — ChainSnapshotConfig ─────────────────────────────────────────────
+@dataclass
+class ChainSnapshotConfig:
+    """Per-scan option-chain research log — the raw chain, greeks and score
+    breakdown behind every EXECUTE/WATCH/NO_TRADE decision, for offline
+    backtesting. Independent of JournalConfig: the journal records fills,
+    this records what the strategy SAW, on every scan, not just trades."""
+    enabled:  bool = True
+    dir_path: str  = "/app/strategies/data/chain_snapshots"
+
+    @classmethod
+    def from_env(cls) -> "ChainSnapshotConfig":
+        defaults = cls()
+        return cls(
+            enabled=os.getenv("CHAIN_SNAPSHOT_ENABLED", str(defaults.enabled)).lower() in ("1", "true", "yes"),
+            dir_path=os.getenv("CHAIN_SNAPSHOT_DIR", defaults.dir_path),
+        )
+
+    @staticmethod
+    def validate() -> list[str]:
+        return []
+
+
 # ── 3h — PositionConfig ─────────────────────────────────────────────────
 @dataclass
 class PositionConfig:
@@ -1296,6 +1465,13 @@ class SignalConfig:
     slow_disagree_weight:       float = 0.5   # how strongly full disagreement dampens (0-1)
     slow_disagree_floor:        float = 0.5   # multiplier can never drop below this
 
+    # ── P1-b: data-coverage floor ──
+    # Minimum share of NOMINAL_FAST_MAX that must be available before a score is
+    # tradeable. Below it the normalized score is arithmetically inflated (a smaller
+    # denominator) and says more about feed health than about the market, so the
+    # signal is forced to NO_TRADE. 0.0 disables the gate (pre-fix behaviour).
+    min_fast_coverage:          float = 0.70
+
     @classmethod
     def from_env(cls) -> "SignalConfig":
         defaults = cls()
@@ -1322,6 +1498,8 @@ class SignalConfig:
                 os.getenv("SLOW_DISAGREE_WEIGHT", str(defaults.slow_disagree_weight))),
             slow_disagree_floor=float(
                 os.getenv("SLOW_DISAGREE_FLOOR", str(defaults.slow_disagree_floor))),
+            min_fast_coverage=float(
+                os.getenv("MIN_FAST_COVERAGE", str(defaults.min_fast_coverage))),
         )
 
     def validate(self) -> list[str]:
@@ -1346,6 +1524,8 @@ class SignalConfig:
             errs.append(f"SLOW_DISAGREE_WEIGHT={self.slow_disagree_weight} must be in [0, 1.0]")
         if not 0 <= self.slow_disagree_floor <= 1.0:
             errs.append(f"SLOW_DISAGREE_FLOOR={self.slow_disagree_floor} must be in [0, 1.0]")
+        if not 0 <= self.min_fast_coverage <= 1.0:
+            errs.append(f"MIN_FAST_COVERAGE={self.min_fast_coverage} must be in [0, 1.0]")
         return errs
 
 
@@ -1360,6 +1540,7 @@ class BotConfig:
     risk:     RiskConfig     = field(default_factory=RiskConfig)
     trail:    TrailConfig    = field(default_factory=TrailConfig)
     journal:  JournalConfig  = field(default_factory=JournalConfig)
+    chain_snapshot: ChainSnapshotConfig = field(default_factory=ChainSnapshotConfig)
     position: PositionConfig = field(default_factory=PositionConfig)
     tranche:  TrancheConfig  = field(default_factory=TrancheConfig)
     signal:   SignalConfig   = field(default_factory=SignalConfig)
@@ -1372,6 +1553,7 @@ class BotConfig:
         risk     = RiskConfig.from_env()
         trail    = TrailConfig.from_env()
         journal  = JournalConfig.from_env()
+        chain_snapshot = ChainSnapshotConfig.from_env()
         position = PositionConfig.from_env()
         tranche  = TrancheConfig.from_env()
         signal   = SignalConfig.from_env()
@@ -1407,14 +1589,14 @@ class BotConfig:
             )
 
         return cls(broker=broker, market=market, entry=entry, risk=risk,
-                   trail=trail, journal=journal,
+                   trail=trail, journal=journal, chain_snapshot=chain_snapshot,
                    position=position, tranche=tranche, signal=signal)
 
     def validate(self) -> None:
         """Aggregate validation from all sub-configs. Raises SystemExit on errors."""
         errors: list[str] = []
         for sc in (self.broker, self.market, self.entry, self.risk,
-                   self.trail, self.journal,
+                   self.trail, self.journal, self.chain_snapshot,
                    self.position, self.tranche, self.signal):
             try:
                 errors.extend(sc.validate())
@@ -1430,7 +1612,7 @@ class BotConfig:
             )
         inf("[CONFIG] All configuration values validated OK")
         for sc in (self.broker, self.market, self.entry, self.risk,
-                   self.trail, self.journal,
+                   self.trail, self.journal, self.chain_snapshot,
                    self.position, self.tranche, self.signal):
             for w in (getattr(sc, "warnings", lambda: [])()):
                 inf(f"[CONFIG] WARNING: {w}")
@@ -1542,6 +1724,7 @@ class SignalResult:
     fast_norm:    float | None = None
     slow_norm:    float | None = None
     confirm_mult: float | None = None
+    fast_coverage: float | None = None   # P1-b data-coverage ratio (FAST_MAX / NOMINAL_FAST_MAX)
 
 
 def get_ist_now() -> datetime:
@@ -2151,6 +2334,61 @@ class JournalWriter:
                 w.writerow(row)
         except OSError as exc:
             err("[JOURNAL] Write error", exc)
+
+
+class ChainSnapshotWriter:
+    """Appends one JSON-Line record per scan to a per-underlying, per-day research
+    log — the raw option chain, greeks and score breakdown behind every scan
+    decision (EXECUTE, WATCH, or the specific rejection reason), for offline
+    backtesting and expectancy analysis.
+
+    Design notes, cross-checked against JournalWriter and the actual call graph
+    (not assumed by analogy):
+
+    - No lock. scan_underlying() — the sole caller — runs from a plain sequential
+      `for symbol in cfg.market.underlyings:` loop on the strategy thread only; it
+      is never invoked from the WS thread or the exit-executor pool. This is a
+      narrower claim than "JournalWriter has no lock so this needs none either" —
+      JournalWriter.write() IS reachable concurrently, from place_exit() via both
+      the strategy thread and the WS-triggered _exit_executor pool (max_workers=5),
+      so it is not actually a safe precedent to copy. Verified via
+      ws.set_exit_callback(orders.place_exit) + _exit_executor.submit(...).
+
+    - JSON-Lines, not CSV: the chain is a variable-length nested array (10-40
+      strikes/scan). CSV would force one row per strike per scan, duplicating
+      every scan-level field on every row for no benefit — JSON-Lines keeps one
+      record per scan and the chain as one field.
+
+    - One file per underlying per day, dated in IST (get_ist_now()), not
+      datetime.now()/UTC. A UTC-dated filename would split one IST trading
+      session across two files at container-local midnight (05:30 IST) — the
+      exact class of bug F21 already fixed at 7 other sites in this file.
+
+    - Best-effort, fail-open: any exception here is logged and swallowed, never
+      raised. This runs once per scan on the strategy thread; a failure here must
+      never abort a scan or interrupt the entry/exit decision it is only
+      observing.
+    """
+
+    def __init__(self, dir_path: str):
+        self.dir_path = os.path.abspath(dir_path)
+
+    def _path_for(self, underlying: str, when: datetime) -> str:
+        # get_ist_now() callers pass an IST-aware `when` — this only formats it.
+        return os.path.join(self.dir_path, f"{underlying}_{when:%Y%m%d}.jsonl")
+
+    def write(self, underlying: str, record: dict) -> None:
+        if not self.dir_path:
+            return
+        try:
+            os.makedirs(self.dir_path, exist_ok=True)
+            path = self._path_for(underlying, get_ist_now())
+            line = json.dumps(record, default=str, separators=(",", ":"))
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception as exc:
+            # Never let a research-log failure touch the scan it is observing.
+            err(f"[CHAIN-SNAPSHOT] Write error for {underlying}: ", exc)
 
 
 class TradeAnalytics:
@@ -3545,6 +3783,18 @@ STATISTIC_REGISTRY: list[StatisticSpec] = [
 ]
 
 
+# P1-b: the full fast-tier score budget when every feed is healthy. score() divides
+# fast_raw by the budget of the specs that were ACTUALLY available this scan, so a
+# shrinking denominator inflates the normalized score — losing greeks/GEX/IV to a rate
+# limit makes thinner evidence read as HIGHER conviction. Comparing the live budget
+# against this nominal gives the coverage ratio the entry gate needs.
+NOMINAL_FAST_MAX: float = sum(
+    spec.score_max
+    for spec in (*INDICATOR_REGISTRY, *STATISTIC_REGISTRY)
+    if spec.tier == "fast" and spec.score_max > 0
+)
+
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  SECTION 6 — SIGNAL ENGINE           OIFlowAnalyzer / SignalEngine   ║
 # ╚══════════════════════════════════════════════════════════════════════╝
@@ -3713,7 +3963,24 @@ class SignalEngine:
         elif effective_min_score > 100:
             effective_min_score = 100
 
-        if trap_score > cfg.entry.max_trap:
+        # P1-b: base_score divides by the AVAILABLE fast budget, so a degraded feed
+        # inflates it — e.g. fast_raw=3 scores 21 at full coverage (FAST_MAX=14) but 50
+        # when greeks/GEX/IV drop out (FAST_MAX=6). _fetch_option_greeks_cached returns
+        # None on a rate-limit miss, which is exactly when the market is moving fastest.
+        # Gate before trap/score so a thin scan can never reach EXECUTE.
+        fast_coverage = (FAST_MAX / NOMINAL_FAST_MAX) if NOMINAL_FAST_MAX > 0 else 0.0
+
+        if fast_coverage < cfg.signal.min_fast_coverage:
+            signal = "NO_TRADE"
+            _missing = [c.label for c in components
+                        if c.tier == "fast" and c.score_max > 0 and not c.available]
+            reasons.insert(
+                0,
+                f"⚠ Data coverage {fast_coverage:.0%} < min {cfg.signal.min_fast_coverage:.0%} "
+                f"(fast budget {FAST_MAX:g}/{NOMINAL_FAST_MAX:g}) — score inflated by a "
+                f"shrunken denominator, not tradeable. Unavailable: {', '.join(_missing) or 'none'}"
+            )
+        elif trap_score > cfg.entry.max_trap:
             signal = "NO_TRADE"
             if trap_reasons:
                 reasons.insert(0, f"⚠ High trap risk: {trap_reasons[0]}")
@@ -3732,7 +3999,8 @@ class SignalEngine:
         _old_raw = fast_raw + slow_raw
         _old_score = int(max(-100, min(100, (_old_raw / (_old_max * PRACTICAL_ALIGNMENT_FACTOR)) * 100))) if _old_max > 0 else 0
         inf(f"[SCORE] fast={fast_raw:.1f}/{FAST_MAX} norm={fast_norm:.3f} "
-            f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} ({_disagree}) → "
+            f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} ({_disagree}) "
+            f"cov={fast_coverage:.0%} → "
             f"final={final_score} min={effective_min_score} signal={signal} old_style={_old_score}")
 
         label = "Bullish" if final_score > 15 else "Bearish" if final_score < -15 else "Neutral"
@@ -3743,6 +4011,7 @@ class SignalEngine:
             trap_score=trap_score, trap_reasons=trap_reasons,
             reasons=list(dict.fromkeys(reasons)), components=components,
             fast_norm=fast_norm, slow_norm=slow_norm, confirm_mult=confirm_mult,
+            fast_coverage=fast_coverage,
         )
 
 
@@ -4481,7 +4750,10 @@ class TrailSLEngine:
             if self._data_skip_logged:
                 self._data_skip_logged.clear()
             confirmed_close = opt_ltp
-            if confirmed_close is None:
+            # P1-a defence in depth: the WS boundary now rejects non-positive ticks,
+            # but the quote-API fallback and any snapshot written before this guard
+            # existed can still hold a 0. A 0 here would poison trail_peak_close.
+            if confirmed_close is None or confirmed_close <= 0:
                 continue
             prior_trail_peak_close = (
                 pos.trail_peak_close
@@ -5394,6 +5666,10 @@ class RiskManager:
         self._pnl_at_last_fetch: float = 0.0
         self._pnl_history: deque[tuple[float, float]] = deque()  # (unix_timestamp, cumulative_pnl)
         self._slot_realized: dict[str, float] = {}   # slot_id -> realized P&L across partial exits (F97)
+        # P2-f: slots whose trade has been settled exactly once. _cleanup_stale_positions is
+        # reachable both from paths that already booked and from paths that never did, so the
+        # orphan estimate needs an explicit "was this settled?" ledger to stay idempotent.
+        self._settled_slots: set[str] = set()
 
     def available_capital(self) -> float:
         """Cached funds() call: re-polls broker every _funds_cache_ttl seconds.
@@ -5441,6 +5717,7 @@ class RiskManager:
                 self._state.reset_strike_loss_pts()
                 self._pnl_history.clear()
                 self._slot_realized.clear()
+                self._settled_slots.clear()
 
     def check_entry_gates(self, symbol: str = "") -> tuple[bool, str]:
         """Tier 1 + Tier 2: Full gate check before placing an entry order."""
@@ -5549,6 +5826,8 @@ class RiskManager:
             if not closes_position:
                 return
             trade_pnl = self._slot_realized.pop(slot_id, pnl) if slot_id else pnl
+            if slot_id:
+                self._settled_slots.add(slot_id)   # P2-f: settled exactly once
             self._apply_streak(trade_pnl)
 
     def close_trade(self, slot_id: str) -> None:
@@ -5558,7 +5837,46 @@ class RiskManager:
         with self._state.state_lock:
             if slot_id not in self._slot_realized:
                 return
+            # P2-f: mark only on the settling path. A no-op here means "nothing to
+            # settle", which is NOT the same as "already settled" — a slot that was
+            # never booked at all must stay eligible for the orphan estimate.
+            self._settled_slots.add(slot_id)
             self._apply_streak(self._slot_realized.pop(slot_id))
+
+    def record_orphan_estimate(self, slot_id: str, est_pnl: float) -> bool:
+        """P2-f: book an ESTIMATED P&L for a position reaped without a confirmed exit.
+
+        _cleanup_stale_positions previously wrote an orphan_cleanup journal row and called
+        close_trade(), but never record_exit() — so a position that was orphaned before any
+        exit was booked contributed nothing to _daily_pnl, _pnl_history or the win/loss
+        streak. The journal showed the loss; the risk engine did not. max_daily_loss,
+        max_consecutive_losses and the drawdown-rate limit all under-counted, and the
+        under-count is silent and unbounded.
+
+        Idempotent by design, because that cleanup path is reachable two ways:
+          - the exit DID book (_finalize_exit calls record_exit before positions.pop, so an
+            exception in between leaves a settled slot in the book) -> must not double-count
+          - the exit never booked (e.g. an exception in place_exit between
+            cancel_broker_orders and the pending_exits write) -> must book
+        Booking unconditionally corrupts the first; skipping unconditionally under-counts
+        the second, and under-counting a loss is the more dangerous direction.
+
+        Adds to _slot_realized rather than settling directly, so the caller's existing
+        close_trade() settles the streak once against partials + this estimate together.
+
+        Returns True when the estimate was booked, False when already settled.
+        """
+        with self._state.state_lock:
+            if slot_id in self._settled_slots:
+                return False
+            self._daily_pnl += est_pnl
+            now_ts = time.time()
+            self._pnl_history.append((now_ts, self._daily_pnl))
+            cutoff = now_ts - (self.config.risk.drawdown_rate_window_mins * 60)
+            while self._pnl_history and self._pnl_history[0][0] < cutoff:
+                self._pnl_history.popleft()
+            self._slot_realized[slot_id] = self._slot_realized.get(slot_id, 0.0) + est_pnl
+            return True
 
     def effective_lot_multiplier(self, base_multiplier: int) -> int:
         """Adaptive lot sizing (U9). Disabled by default for safety."""
@@ -5630,6 +5948,7 @@ class WebSocketManager:
         self._ws_start_time: float = time.time()
         self._telemetry_last_log_time: float = 0.0
         self._raw_cb_count: int = 0
+        self._bad_tick_count: int = 0            # P1-a: non-positive LTP frames rejected at the WS boundary
         self._tick_counts: dict[str, int] = {}
         self._spot_tick_counts: dict[str, int] = {}
         self._order_event_queue: queue.Queue[dict] = queue.Queue(maxsize=500)
@@ -5804,13 +6123,35 @@ class WebSocketManager:
         inner_data = data.get("data") if isinstance(data.get("data"), dict) else data
         
         symbol = inner_data.get("symbol") or data.get("symbol", "")
-        ltp    = inner_data.get("ltp") or data.get("ltp")
-        
+        # None-aware read, not `or`: a legitimate inner ltp of 0 must reach the
+        # positivity guard below and be rejected, not be silently swapped for the
+        # root key (which happens to be absent today — an accident, not a guard).
+        ltp = inner_data.get("ltp")
+        if ltp is None:
+            ltp = data.get("ltp")
+
         if ltp is None:
             return
         try:
             ltp = float(ltp)
         except (TypeError, ValueError):
+            return
+
+        # P1-a: a non-positive premium is never a real option print. Upstream broker
+        # streaming adapters default a MISSING price field to 0.0 rather than omitting
+        # it, so a partial/heartbeat/depth-only frame arrives here as ltp=0.0:
+        #   openalgo/broker/aliceblue/streaming/aliceblue_mapping.py:139
+        #   openalgo/broker/dhan/streaming/dhan_adapter.py:836
+        #   openalgo/broker/angel/streaming/angel_adapter.py:768
+        #   openalgo/broker/deltaexchange/streaming/delta_adapter.py:469
+        # Unguarded, 0.0 satisfies `ltp <= pos.sl` in _check_premium_trail and fires an
+        # unconditional MARKET SELL. Reject before the snapshot write so the bad price
+        # cannot reach the trail engine either.
+        if ltp <= 0:
+            self._bad_tick_count += 1
+            if self._bad_tick_count <= 5 or self._bad_tick_count % 100 == 0:
+                err(f"[WS] Rejected non-positive tick for {symbol or '?'}: ltp={ltp} "
+                    f"(count={self._bad_tick_count}) — no snapshot write, no exit check")
             return
 
         self._last_tick_time = time.time()    # feed heartbeat for watchdog
@@ -5874,6 +6215,9 @@ class WebSocketManager:
 
     def _check_premium_trail(self, underlying: str, pos: OptionPosition, ltp: float) -> None:
         cfg = self.config
+        # P1-a: last line of defence before a MARKET SELL — never act on a bad price.
+        if ltp <= 0:
+            return
         if cfg.entry.delta_exit_threshold > 0 and not pos.exit_pending:
             live_delta = self._get_cached_delta(underlying, pos.symbol)
             if live_delta is not None and live_delta < cfg.entry.delta_exit_threshold:
@@ -6452,8 +6796,15 @@ class OrderManager:
         """
         opt_sym = opt_symbol or pos.symbol
         self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=True)
-        _pts_loss = max(0.0, pos.entry_premium - executed_price)
-        self._state.accrue_strike_loss(pos.slot_id, opt_sym, pos.option_type, _pts_loss, pos.remaining_qty)
+        # P2-a: an unresolved exit price (0) would bank the FULL premium as loss against
+        # this strike+direction, potentially tripping max_strike_cum_loss_pts and blocking
+        # re-entry on a strike that never lost that much. Settle without accruing instead.
+        if executed_price > 0:
+            _pts_loss = max(0.0, pos.entry_premium - executed_price)
+            self._state.accrue_strike_loss(pos.slot_id, opt_sym, pos.option_type, _pts_loss, pos.remaining_qty)
+        else:
+            err(f"[ORDER] {underlying}: exit price unresolved ({executed_price}) — skipping "
+                f"strike-loss accrual rather than banking a phantom full-premium loss")
         self._state.settle_strike_loss(pos.slot_id)
         reason_str = reason.value if isinstance(reason, ExitReason) else str(reason)
         self._write_journal(underlying, pos, executed_price, pnl, reason_str,
@@ -6497,7 +6848,11 @@ class OrderManager:
                         if broker_stat in ("complete", "filled", "executed"):
                             broker_filled[f"{tr.tranche_id}_{attr_name}"] = {
                                 "order_id": oid,
-                                "executed": float(data.get("average_price", 0) or 0),
+                                # P2-a: may be None — consumers resolve or estimate.
+                                "executed": self._resolve_fill_price(
+                                    oid, pos.symbol, data,
+                                    context=f"pre-cancel {attr_name} {underlying} t={tr.tranche_id}",
+                                ),
                                 "order_status": broker_stat,
                                 "tranche_id": tr.tranche_id,
                             }
@@ -6544,7 +6899,13 @@ class OrderManager:
                     dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
                     key = f"{tr.tranche_id}_{attr_name}"
                     if broker_stat in ("complete", "filled", "executed") and key not in broker_filled:
-                        executed_price = float(data.get("average_price", 0) or 0)
+                        # P2-a: symmetric with the cancelled branch below — the tradebook is
+                        # the trusted price source, orderstatus' average_price is not.
+                        # May be None; consumers must not treat that as a zero fill.
+                        executed_price = self._resolve_fill_price(
+                            oid, pos.symbol, data,
+                            context=f"post-cancel {attr_name} {underlying} t={tr.tranche_id}",
+                        )
                         broker_filled[key] = {
                             "order_id":    oid,
                             "executed":    executed_price,
@@ -6599,7 +6960,11 @@ class OrderManager:
                     if broker_stat in ("complete", "filled", "executed"):
                         broker_filled[attr_name] = {
                             "order_id":    oid,
-                            "executed":    float(data.get("average_price", 0) or 0),
+                            # P2-a: may be None — consumers resolve or estimate.
+                            "executed":    self._resolve_fill_price(
+                                oid, pos.symbol, data,
+                                context=f"pre-cancel {attr_name} {underlying}",
+                            ),
                             "order_status": broker_stat,
                         }
                         dbg(f"[ORDER] Broker {attr_name} already filled: {oid}")
@@ -6635,7 +7000,13 @@ class OrderManager:
             if broker_stat is not None:
                 dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
                 if broker_stat in ("complete", "filled", "executed") and attr_name not in broker_filled:
-                    executed_price = float(data.get("average_price", 0) or 0)
+                    # P2-a: symmetric with the cancelled branch below — the tradebook is
+                    # the trusted price source, orderstatus' average_price is not.
+                    # May be None; consumers must not treat that as a zero fill.
+                    executed_price = self._resolve_fill_price(
+                        oid, pos.symbol, data,
+                        context=f"post-cancel {attr_name} {underlying}",
+                    )
                     broker_filled[attr_name] = {
                         "order_id":    oid,
                         "executed":    executed_price,
@@ -6693,6 +7064,97 @@ class OrderManager:
         except Exception as exc:
             err(f"[ORDER] tradebook fill lookup failed for {order_id}: ", exc)
             return None
+
+    def _sell_fill_from_tradebook(self, symbol: str, expect_qty: int) -> float | None:
+        """Qty-weighted avg SELL price for `symbol`, when the tradebook is unambiguous.
+
+        P2-f: an orphaned position has no order_id left to look up (sl_order_id and
+        tgt_order_id being None is a precondition for reaping it), so _fill_from_tradebook
+        cannot be used. This scans by symbol instead.
+
+        Row shape is normalised by openalgo across brokers — symbol / action / quantity /
+        average_price (broker/{upstox,zerodha,angel,dhan}/mapping/order_data.py
+        transform_tradebook_data), so matching on action == SELL is portable.
+
+        Deliberately conservative: positionbook/tradebook are account-wide, not
+        strategy-scoped (documented platform gap), so another strategy's SELL on the same
+        strike could appear here. Returns None unless the summed SELL quantity matches the
+        quantity we expect to have exited, which makes an accidental cross-strategy match
+        unlikely. Caller falls back to a market estimate when this returns None.
+        """
+        if not symbol or expect_qty <= 0 or not hasattr(self.client, "tradebook"):
+            return None
+        try:
+            resp = self.client.tradebook()
+            if not isinstance(resp, dict) or resp.get("status") != "success":
+                return None
+            qty_sum = 0.0
+            notional = 0.0
+            for t in (resp.get("data") or []):
+                if t.get("symbol") != symbol:
+                    continue
+                if str(t.get("action", "")).upper() != "SELL":
+                    continue
+                q = abs(float(t.get("quantity", 0) or 0))
+                px = float(t.get("average_price", 0) or t.get("price", 0) or 0)
+                if q > 0 and px > 0:
+                    qty_sum += q
+                    notional += q * px
+            if qty_sum <= 0:
+                return None
+            if int(round(qty_sum)) != int(expect_qty):
+                dbg(f"[CLEANUP] tradebook SELL qty {qty_sum:g} for {symbol} != expected "
+                    f"{expect_qty} — ambiguous (account-wide book), not using as fill price")
+                return None
+            return notional / qty_sum
+        except Exception as exc:
+            err(f"[CLEANUP] tradebook SELL lookup failed for {symbol}: ", exc)
+            return None
+
+    def _resolve_fill_price(
+        self,
+        order_id: str | None,
+        symbol: str,
+        data: dict | None,
+        *,
+        context: str,
+    ) -> float | None:
+        """Resolve a trustworthy fill price, or None when it cannot be established.
+
+        P2-a: orderstatus' average_price is NOT authoritative and a 0 from it does not
+        mean "filled at zero". openalgo/services/orderstatus_service.py:182-246
+        initialises average_price = 0.0 and populates it only from a SEPARATE tradebook
+        lookup gated on order_status == "complete"; when that lookup misses or races the
+        trade write it logs "No trade found for OrderID {orderid} in tradebook" and
+        still returns status=success + order_status=complete + average_price=0.0.
+
+        Booking that as a fill computes pnl = (0 - entry_premium) * qty — a phantom
+        full-premium loss that trips max_daily_loss, trips the consecutive-loss halt,
+        and corrupts the exit-type expectancy database. place_entry already refuses a
+        zero price ("Executed price is zero ... cannot register position"); the exit
+        and protection-fill paths did not.
+
+        Ladder: orderstatus average_price -> tradebook row (written before order_status
+        and independent of it, F100) -> None. Returning None is deliberate: the callers
+        defer to reconciliation, which is always recoverable, whereas booking a wrong
+        number is not.
+        """
+        px = 0.0
+        if isinstance(data, dict):
+            px = float(data.get("average_price", 0) or 0)
+        if px > 0:
+            return px
+
+        tb_px = self._fill_from_tradebook(order_id, symbol) if order_id else None
+        if tb_px and tb_px > 0:
+            inf(f"[ORDER] {context}: orderstatus average_price=0 for {order_id} — "
+                f"recovered ₹{tb_px:.2f} from tradebook")
+            return tb_px
+
+        err(f"[ORDER] {context}: no trustworthy fill price for {order_id} "
+            f"(orderstatus average_price=0, no matching tradebook row) — refusing to "
+            f"book (0 - entry) as P&L; deferring to reconciliation")
+        return None
 
     def _broker_net_qty(self, symbol: str) -> int | None:
         """Net broker position qty for a symbol, used to clamp exit size (F100).
@@ -6817,8 +7279,16 @@ class OrderManager:
                 f"remaining_qty={pos.remaining_qty}"
             )
             self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
-            _pts_loss = max(0.0, pos.entry_premium - executed_price)
-            self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
+            # P2-a: the P&L above already guards on executed_price > 0, but the strike-loss
+            # accrual did not — an unresolved 0 recorded the FULL premium as loss against
+            # this strike+direction and could trip max_strike_cum_loss_pts, blocking
+            # re-entry on a strike that never actually lost that much. Skip instead.
+            if executed_price > 0:
+                _pts_loss = max(0.0, pos.entry_premium - executed_price)
+                self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
+            else:
+                err(f"[ORDER] {underlying} t={tr.tranche_id}: exit price unresolved — skipping "
+                    f"strike-loss accrual rather than banking a phantom full-premium loss")
             tranche_record = TradeAnalytics.build_tranche(
                 underlying=underlying, pos=pos, tr=tr,
                 paper_trade=self.config.broker.paper_trade,
@@ -6897,7 +7367,12 @@ class OrderManager:
                             data = resp.get("data") or resp
                             broker_stat = str(data.get("order_status", "")).lower()
                             if broker_stat in ("complete", "filled", "executed"):
-                                executed_price = float(data.get("average_price", 0) or 0)
+                                # P2-a: resolve via tradebook, then last LTP. A 0 here would
+                                # book the full premium as strike loss and journal a 0 exit.
+                                executed_price = self._resolve_fill_price(
+                                    oid, pos.symbol, data,
+                                    context=f"protection fill {attr_name} {underlying} t={tr.tranche_id}",
+                                ) or self._resolve_option_ltp(underlying, pos.symbol) or 0.0
                                 self._handle_broker_order_fill(
                                     underlying, pos, attr_name, oid, raw_reason,
                                     executed_price, tr=tr,
@@ -6922,7 +7397,12 @@ class OrderManager:
                     data = resp.get("data") or resp
                     broker_stat = str(data.get("order_status", "")).lower()
                     if broker_stat in ("complete", "filled", "executed"):
-                        executed_price = float(data.get("average_price", 0) or 0)
+                        # P2-a: resolve via tradebook, then last LTP. A 0 here would book
+                        # the full premium as strike loss and journal a 0 exit price.
+                        executed_price = self._resolve_fill_price(
+                            oid, pos.symbol, data,
+                            context=f"protection fill {attr_name} {underlying}",
+                        ) or self._resolve_option_ltp(underlying, pos.symbol) or 0.0
                         self._handle_broker_order_fill(
                             underlying, pos, attr_name, oid, raw_reason, executed_price,
                         )
@@ -7016,7 +7496,17 @@ class OrderManager:
         moneyness, _, tgt_mult, act_mult = EntryStopLossPolicy.get_moneyness_multipliers(entry_delta)
 
         resolved_sl_pts = sl_pts if (sl_pts is not None and sl_pts > 0) else cfg.entry.premium_stop_pts
-        sl  = executed - resolved_sl_pts
+        # P1-d: a stop wider than the fill drove sl negative, which the broker API
+        # rejects at the schema layer — the SL-M was never placed, verify_sl_orders_active
+        # retried it forever, and `ltp <= pos.sl` could never fire. The position ran with
+        # no stop of any kind. Clamp to a positive trigger and say so loudly.
+        sl = executed - resolved_sl_pts
+        if sl < MIN_SL_TRIGGER:
+            err(f"[ORDER] {underlying}: computed SL ₹{sl:.2f} is not a placeable trigger "
+                f"(stop {resolved_sl_pts:.1f}pts >= fill ₹{executed:.2f}) — clamping to "
+                f"₹{MIN_SL_TRIGGER:.2f}. Effective risk is the full premium; review "
+                f"PREMIUM_STOP_PTS/MAX_SL_PTS against this strike's premium.")
+            sl = MIN_SL_TRIGGER
         tgt = executed + (cfg.entry.premium_target_pts * tgt_mult)
         reward_dist = spot * (cfg.entry.spot_reward_pct / 100.0)
 
@@ -7645,11 +8135,29 @@ class OrderManager:
         if not is_multi_tranche:
             for attr_name, info in broker_filled.items():
                 if isinstance(info, dict) and info.get("order_status") in ("complete", "filled", "executed"):
-                    executed_price = info.get("executed", 0)
-                    dbg(f"[ORDER] Broker {attr_name} already filled at ₹{executed_price:.2f} — skipping SELL")
-                    pnl = _calc_pnl(pos, float(executed_price))
-                    self._finalize_exit(underlying, pos, float(executed_price), pnl, norm_reason,
-                                        exit_price_source="broker_fill")
+                    # P2-a: `executed` is None when neither orderstatus nor the tradebook
+                    # could produce a price. The FILL is real (broker says complete), so the
+                    # SELL must still be skipped — but the price must not be booked as 0,
+                    # which would realise a phantom full-premium loss. Fall back to the last
+                    # known LTP and label the journal row estimated, matching the existing
+                    # FORCE_UNTRACK_EST / orphan_cleanup convention.
+                    _px = info.get("executed")
+                    _src = "broker_fill"
+                    if _px is None or float(_px) <= 0:
+                        _px = self._resolve_option_ltp(underlying, pos.symbol)
+                        _src = "estimated"
+                        if _px is None or _px <= 0:
+                            err(f"[ORDER] Broker {attr_name} filled for {underlying} but no price "
+                                f"could be resolved (orderstatus, tradebook and LTP all empty) — "
+                                f"not booking P&L; position stays tracked for reconciliation")
+                            return
+                        err(f"[ORDER] Broker {attr_name} filled for {underlying} at an unknown "
+                            f"price — booking at last LTP ₹{_px:.2f} (ESTIMATED, not a broker fill)")
+                    _px = float(_px)
+                    dbg(f"[ORDER] Broker {attr_name} already filled at ₹{_px:.2f} — skipping SELL")
+                    pnl = _calc_pnl(pos, _px)
+                    self._finalize_exit(underlying, pos, _px, pnl, norm_reason,
+                                        exit_price_source=_src)
                     return
         else:
             for attr_name, info in broker_filled.items():
@@ -7659,10 +8167,25 @@ class OrderManager:
                     if tr and not tr.is_exit_placed:
                         tr.is_exit_placed = True
                         tr.exit_reason = ExitReason.BROKER_FILLED
-                        tr.exit_price = info.get("executed", 0)
-                        tr_pnl = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price > 0 else 0.0
+                        # P2-a: `executed` may be None (no trustworthy price). The old
+                        # `if tr.exit_price > 0 else 0.0` booked a real fill as zero P&L and
+                        # then fed exit_price=0 into the strike-loss accrual as a full-premium
+                        # loss. Fall back to last known LTP so the tranche books a defensible
+                        # number, and skip accrual entirely when even that is unavailable.
+                        _tr_px = info.get("executed")
+                        if _tr_px is None or float(_tr_px) <= 0:
+                            _tr_px = self._resolve_option_ltp(underlying, pos.symbol)
+                            if _tr_px and _tr_px > 0:
+                                err(f"[ORDER] Tranche {tr_id} filled at an unknown price — "
+                                    f"booking at last LTP ₹{_tr_px:.2f} (ESTIMATED)")
+                        tr.exit_price = float(_tr_px) if (_tr_px and _tr_px > 0) else None
+                        if tr.exit_price is None:
+                            err(f"[ORDER] Tranche {tr_id} filled for {underlying} but no price "
+                                f"could be resolved — booking 0 P&L and skipping strike-loss "
+                                f"accrual rather than recording a phantom full-premium loss")
+                        tr_pnl = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price else 0.0
                         self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
-                        _pts_loss = max(0.0, pos.entry_premium - tr.exit_price)
+                        _pts_loss = max(0.0, pos.entry_premium - tr.exit_price) if tr.exit_price else 0.0
                         self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
                         tr_exit_record = TradeAnalytics.build_tranche(
                             underlying=underlying, pos=pos, tr=tr,
@@ -7775,8 +8298,37 @@ class OrderManager:
                     self._state.exit_queue.discard(pos.slot_id)
                 return
 
-            # Order was not submitted — safe to release exit lock so the next SL
-            # trigger from the WS trail can retry the exit on the next tick.
+            # P1-e: cancel_broker_orders() at the top of this call already pulled the
+            # SL-M and the LIMIT target and set sl_order_id/tgt_order_id to None, so the
+            # position is COMPLETELY unprotected at this instant. Before this fix the
+            # only thing that put protection back was verify_sl_orders_active() on the
+            # next strategy cycle (signal_check_interval, default 60s) — and only because
+            # exit_pending is reset below, since that sweep skips exit_pending slots.
+            # Re-arm here so the unprotected window is the length of one placeorder call.
+            if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
+                err(f"[ORDER] Exit order not submitted for {underlying} — protection was "
+                    f"cancelled for this attempt; re-arming SL-M/LIMIT before retry")
+                try:
+                    self._place_protection_orders_sequential(
+                        underlying, pos, pos.symbol, pos.remaining_qty, pos.sl, pos.tgt
+                    )
+                except Exception as _rearm_exc:
+                    err(f"[ORDER] Protection re-arm raised for {underlying}", _rearm_exc)
+                if pos.sl_order_id or pos.tgt_order_id:
+                    pos.broker_protection = True
+                    dbg(f"[ORDER] Protection re-armed for {underlying} "
+                        f"(sl={pos.sl_order_id}, tgt={pos.tgt_order_id})")
+                else:
+                    self._notify(
+                        f"🚨 UNPROTECTED POSITION — {underlying}\n"
+                        f"{pos.symbol} x{pos.remaining_qty}\n"
+                        "Exit order failed AND protection re-arm failed. No SL at the "
+                        "broker right now.\nWill retry next cycle — consider closing manually.",
+                        9,
+                    )
+
+            # Safe to release the exit lock so the next SL trigger from the WS trail can
+            # retry the exit on the next tick.
             dbg(f"[ORDER] Exit order not submitted for {underlying} — releasing for retry")
             with self._state.exit_lock:
                 self._state.exit_queue.discard(pos.slot_id)
@@ -7801,7 +8353,18 @@ class OrderManager:
             return
 
         data           = filled.get("data") or filled
-        executed_price = float(data.get("average_price", 0) or 0)
+        # P2-a: never book (0 - entry) * qty as a realised loss on an unpopulated
+        # average_price. Resolve via tradebook, or defer to reconciliation.
+        _resolved_px   = self._resolve_fill_price(
+            order_id, pos.symbol, data, context=f"exit {underlying}"
+        )
+        if _resolved_px is None:
+            inf(f"[ORDER] Exit fill price unresolved for {underlying} (order {order_id}) — "
+                "leaving in pending_exits for reconciliation")
+            if sellable_qty < pos.remaining_qty:
+                pos.exit_pending = False
+            return
+        executed_price = _resolved_px
         filled_qty     = int(data.get("filled_quantity", 0) or data.get("filled_qty", 0) or 0)
         order_qty      = int(data.get("quantity", 0) or 0)
 
@@ -8126,6 +8689,7 @@ class OptionsBuyerEdgeBot:
         self.strikes        = StrikeSelector(self.fetcher, cfg)
         self.ws             = WebSocketManager(self.client, cfg, self.state)
         self.orders         = OrderManager(self.client, cfg, self.state, self.risk, self.ws, self.fetcher, self._send_alert)
+        self.chain_snapshot_writer = ChainSnapshotWriter(cfg.chain_snapshot.dir_path)
         # Wire callbacks and dependencies to break circular dependency + consolidate API calls
         self.ws.set_fetcher(self.fetcher)       # Reuse DataFetcher cache for delta in trailing SL
         self.ws.set_exit_callback(self.orders.place_exit)
@@ -8422,14 +8986,23 @@ class OptionsBuyerEdgeBot:
                 except Exception as _g_exc:
                     err(f"[STARTUP] optiongreeks failed for {sym}", _g_exc)
                 _mm_label, _, tgt_mult, act_mult = EntryStopLossPolicy.get_moneyness_multipliers(_restore_delta)
+                # P1-d: same unplaceable-trigger clamp as register_filled_entry — a
+                # restored position whose premium is below premium_stop_pts would
+                # otherwise rebuild with a negative SL the broker will not accept.
+                _restore_sl = entry_px - cfg.entry.premium_stop_pts
+                if _restore_sl < MIN_SL_TRIGGER:
+                    err(f"[STARTUP] {sym}: restored SL ₹{_restore_sl:.2f} is not a placeable "
+                        f"trigger (stop {cfg.entry.premium_stop_pts:.1f}pts >= entry "
+                        f"₹{entry_px:.2f}) — clamping to ₹{MIN_SL_TRIGGER:.2f}")
+                    _restore_sl = MIN_SL_TRIGGER
                 pos = OptionPosition.build(
                     underlying=underlying,
                     symbol=sym,
                     entry_premium=entry_px,
                     qty=qty,
                     option_type=opt_type,
-                    sl=entry_px - cfg.entry.premium_stop_pts,
-                    initial_sl=entry_px - cfg.entry.premium_stop_pts,
+                    sl=_restore_sl,
+                    initial_sl=_restore_sl,
                     tgt=entry_px + (cfg.entry.premium_target_pts * tgt_mult),
                     spot_symbol=underlying,
                     spot_entry=restored_spot,
@@ -8534,8 +9107,11 @@ class OptionsBuyerEdgeBot:
             with self.state.state_lock:
                 if pos.exit_pending:
                     continue
-                with self.state.exit_lock:
-                    pos.exit_pending = True
+                # P2-h: the nested exit_lock here protected nothing — the write is already
+                # covered by state_lock, and unlike _trigger_exit this path never touches
+                # exit_queue, which is what exit_lock exists for. Holding a second lock for
+                # no reason only widens the deadlock surface.
+                pos.exit_pending = True
             inf(
                 f"[TIME-EXIT] {ul}: held {held_minutes:.0f}m "
                 f">= max {cfg.market.max_hold_minutes}m — exiting (theta guard)"
@@ -8565,25 +9141,77 @@ class OptionsBuyerEdgeBot:
                 if since is not None and (now - since) < grace:
                     continue
                 stale.append(pos)
-            for pos in stale:
-                _est_exit = pos.sl or pos.entry_premium
-                _est_pnl = _calc_pnl(pos, _est_exit)
-                self.orders._write_journal(
-                    pos.underlying, pos, _est_exit, _est_pnl, "orphan_cleanup",
-                    exit_price_source="estimated", record_type="orphan_cleanup",
-                )
+
+        # P2-f/DEADLOCK: the reap loop below used to run INSIDE the state_lock block
+        # above, but settle_strike_loss() and close_trade() both re-acquire state_lock,
+        # and state_lock is a plain threading.Lock (non-reentrant) — so the strategy
+        # thread blocked on itself the first time any position was reaped. This is the
+        # F59 failure mode, and it is unrecoverable: _cleanup_stale_positions is the
+        # first call in _strategy_thread, so the hang takes down pending-order
+        # reconciliation, trailing, EOD square-off and scanning together (only the WS
+        # thread and the broker's own SL-M survive). Reproduced with a 6s watchdog.
+        # Snapshot under the lock, do the work outside it — the same pattern
+        # _check_max_hold already uses. This also stops the journal write and the
+        # tradebook/quote calls below from running under the global state lock.
+        for pos in stale:
+            # ── P2-f: resolve the exit price before booking anything ──────────
+            # The old estimate was `pos.sl or pos.entry_premium`, which assumes a
+            # stop-out. Post-P1-d pos.sl can legitimately be MIN_SL_TRIGGER (0.05),
+            # which would estimate an almost-total loss on a position that may well
+            # have exited near entry. Prefer real fills, then the last price we
+            # actually saw, and only then the assumed stop.
+            _px_src = "assumed_stop"
+            _est_exit = self.orders._sell_fill_from_tradebook(pos.symbol, pos.remaining_qty)
+            if _est_exit and _est_exit > 0:
+                _px_src = "tradebook_sell"
+            else:
+                _ltp = self.orders._resolve_option_ltp(pos.underlying, pos.symbol)
+                if _ltp and _ltp > 0:
+                    _est_exit, _px_src = _ltp, "last_ltp"
+                elif pos.sl and pos.sl > MIN_SL_TRIGGER:
+                    _est_exit, _px_src = pos.sl, "assumed_stop"
+                else:
+                    _est_exit, _px_src = pos.entry_premium, "entry_flat"
+            _est_pnl = _calc_pnl(pos, _est_exit)
+
+            self.orders._write_journal(
+                pos.underlying, pos, _est_exit, _est_pnl, "orphan_cleanup",
+                exit_price_source="estimated", record_type="orphan_cleanup",
+            )
+            _advance_stage(pos, LifecycleStage.CLOSED)
+            # F97: bypasses both _finalize_exit and all-tranches close_trade() —
+            # settle per-slot P&L or it leaks. No-op on already-settled slots.
+            # F98b: settle pending strike loss accrue(s) before cleanup.
+            self.state.settle_strike_loss(pos.slot_id)
+            # P2-f: the journal row alone left this P&L invisible to max_daily_loss,
+            # max_consecutive_losses and the drawdown-rate limit. Book it (idempotent —
+            # a no-op when the exit already settled), then let close_trade() settle the
+            # streak once against partials + this estimate together.
+            _booked = self.risk.record_orphan_estimate(pos.slot_id, _est_pnl)
+            self.risk.close_trade(pos.slot_id)
+            if _booked:
                 inf(f"[CLEANUP] Force-removing stale position {pos.symbol} ({pos.slot_id}) — "
-                    "exit already processed, wrote orphan_cleanup row. If PnL seems missing check broker.")
-                _advance_stage(pos, LifecycleStage.CLOSED)
-                # F97: bypasses both _finalize_exit and all-tranches close_trade() —
-                # settle per-slot P&L or it leaks. No-op on already-settled slots.
-                # F98b: settle pending strike loss accrue(s) before cleanup.
-                self.state.settle_strike_loss(pos.slot_id)
-                self.risk.close_trade(pos.slot_id)
+                    f"exit was never booked; booked ESTIMATED P&L ₹{_est_pnl:.0f} "
+                    f"@ ₹{_est_exit:.2f} (source={_px_src}) into daily P&L and the "
+                    f"loss streak. Reconcile against the broker if this looks wrong.")
+                if _est_pnl < 0:
+                    self._send_alert(
+                        f"⚠️ Orphaned position booked on ESTIMATE — {pos.underlying}\n"
+                        f"{pos.symbol} x{pos.remaining_qty}\n"
+                        f"Exit ₹{_est_exit:.2f} ({_px_src}) | Entry ₹{pos.entry_premium:.2f}\n"
+                        f"Estimated P&L ₹{_est_pnl:.0f} — counted toward daily loss limits.\n"
+                        "Verify against the broker; this was not a confirmed fill.",
+                        7,
+                    )
+            else:
+                inf(f"[CLEANUP] Force-removing stale position {pos.symbol} ({pos.slot_id}) — "
+                    "exit already booked, wrote orphan_cleanup row only (no double-count).")
+            # Re-acquire for the book mutations only (the helpers above lock internally).
+            with self.state.state_lock:
                 self.state.positions.pop(pos.slot_id, None)
                 self.state.pending_opposite_exit.discard(pos.underlying)
-                with self.state.exit_lock:
-                    self.state.exit_queue.discard(pos.slot_id)
+            with self.state.exit_lock:
+                self.state.exit_queue.discard(pos.slot_id)
 
     def _send_live_pnl_alert(self, open_positions: list[OptionPosition]) -> None:
         """Fetch live positions and dispatch a single-line active PNL alert."""
@@ -8731,7 +9359,29 @@ class OptionsBuyerEdgeBot:
         inf("=" * 70)
 
     def scan_underlying(self, symbol: str) -> None:
-        """Full scan pipeline for one underlying.  Called from strategy thread."""
+        """Full scan pipeline for one underlying.  Called from strategy thread.
+
+        Thin wrapper: the actual pipeline is _scan_underlying_impl(). This layer
+        exists solely so the chain-snapshot research log is written exactly once
+        per scan regardless of which of the pipeline's many early returns fires —
+        `finally` runs on every path, success or return, without re-indenting or
+        duplicating the ~230-line decision pipeline itself.
+        """
+        _ctx: dict[str, Any] = {}
+        try:
+            self._scan_underlying_impl(symbol, _ctx)
+        finally:
+            if self.config.chain_snapshot.enabled:
+                self._write_chain_snapshot(symbol, _ctx)
+
+    def _scan_underlying_impl(self, symbol: str, _ctx: dict[str, Any]) -> None:
+        """Full scan pipeline for one underlying.  Called only from scan_underlying().
+
+        _ctx is an out-parameter: populated with chain/greeks/decision context as
+        the pipeline computes it, read by scan_underlying()'s finally block after
+        this method returns (by any path). Populating a dict the caller already
+        holds needs no return-value plumbing through 13 existing early returns.
+        """
         cfg    = self.config
         state  = self.state
         orders = self.orders
@@ -8772,6 +9422,12 @@ class OptionsBuyerEdgeBot:
                            one call instead of two.
                 sep_char:  Separator character (default: ━).
             """
+            # ChainSnapshotWriter: this closure already runs at every terminal point
+            # in the pipeline (13 sites) with a stage label naming exactly why the
+            # scan ended where it did. Capturing it here — rather than adding a line
+            # at each of those 13 return sites — gives the snapshot an accurate
+            # `outcome` field for free, including every rejection reason.
+            _ctx["outcome"] = stage
             perf = self.fetcher.greeks_perf_snapshot(symbol)
             dbg(
                 f"  [PERF] {symbol} [{stage}] greeks: "
@@ -8811,11 +9467,59 @@ class OptionsBuyerEdgeBot:
         if expiry_used and not expiry:
             expiry = expiry_used
 
+        # ChainSnapshotWriter: capture the RAW chain here. For the absolute fields
+        # (oi / volume / ltp) raw is strictly better than `smoothed` below — EWA
+        # smoothing is reproducible from a raw per-scan log (the deque replays
+        # exactly) while the reverse is not. chain_smooth_bars is recorded so a
+        # replay knows the window width.
+        _ctx["chain_rows_raw"] = chain_rows
+        _ctx["chain_smooth_bars"] = cfg.market.chain_smooth_bars
+        _ctx["expiry"] = expiry
+        _ctx["spot"] = spot
+        _ctx["session_label"] = _session_label
+        _ctx["effective_min_score"] = effective_min_score
+
         chain_hist = state.get_chain_history(symbol)
         chain_hist.append(chain_rows)
         smoothed = OIFlowAnalyzer.smooth_chain_rows(list(chain_hist))
         if not smoothed:
             return
+
+        # ChainSnapshotWriter: the raw chain is NOT sufficient on its own. Verified
+        # against openalgo/services/option_chain_service.py:497-537 — the upstream
+        # chain leg carries {symbol,label,ltp,bid,ask,bid_qty,ask_qty,open,high,low,
+        # prev_close,volume,oi,lotsize,tick_size} and NO oi_change field, so
+        # fetch_option_chain's `ce.get("oi_change")` always yields 0.0 in production.
+        # The only OI-change signal with any content is the one smooth_chain_rows()
+        # derives (EWA(oi) - oldest raw oi across the window), and that value feeds
+        # Call OI Flow (2) + Put OI Flow (2) + OI Velocity (1) = 5 of 14 fast points.
+        # Logging raw alone would record a column of zeros for the inputs to a third
+        # of the fast score. Record the derived fields the scorer actually consumed,
+        # keyed by strike — deliberately only the fields that differ from raw, not a
+        # second copy of symbols/bid/ask.
+        _ctx["chain_derived"] = [
+            {
+                "strike":     r.get("strike"),
+                "ce_oi":      r.get("ce_oi"),      # EWA-smoothed
+                "pe_oi":      r.get("pe_oi"),
+                "ce_ltp":     r.get("ce_ltp"),
+                "pe_ltp":     r.get("pe_ltp"),
+                "ce_volume":  r.get("ce_volume"),
+                "pe_volume":  r.get("pe_volume"),
+                "ce_oi_chg":  r.get("ce_oi_chg"),  # derived; raw is always 0.0
+                "pe_oi_chg":  r.get("pe_oi_chg"),
+                "ce_ltp_chg": r.get("ce_ltp_chg"),
+                "pe_ltp_chg": r.get("pe_ltp_chg"),
+                "ce_oi_dir":  r.get("ce_oi_dir"),
+                "pe_oi_dir":  r.get("pe_oi_dir"),
+                "ce_ltp_dir": r.get("ce_ltp_dir"),
+                "pe_ltp_dir": r.get("pe_ltp_dir"),
+                "ce_vol_dir": r.get("ce_vol_dir"),
+                "pe_vol_dir": r.get("pe_vol_dir"),
+            }
+            for r in smoothed
+        ]
+        _ctx["chain_history_depth"] = len(chain_hist)
 
         df_spot = self.fetcher.fetch_spot_candles(symbol)
 
@@ -8894,7 +9598,10 @@ class OptionsBuyerEdgeBot:
                 )
             state.get_greeks_history(symbol, _strike).append(_snap)
 
+        _ctx["atm_strike"] = atm_k
+
         straddle_price = (atm_ce_ltp + atm_pe_ltp) if (atm_ce_ltp and atm_pe_ltp) else None
+        _ctx["straddle_price"] = straddle_price
         # Only compare premium expansion if the ATM strike is the same as the previous scan.
         # If the ATM strike shifted, straddle velocity is undefined/reset for this bar.
         prev_str = state.prev_straddle.get(symbol)
@@ -8935,6 +9642,14 @@ class OptionsBuyerEdgeBot:
         # Legacy fallback for backward compatibility
         iv_rank_val = ce_iv_rank if (ce_iv_rank is not None and pe_iv_rank is None) else (pe_iv_rank if pe_iv_rank is not None else None)
 
+        # ChainSnapshotWriter: capture PRE-smoothing greeks now — _smooth_greeks below
+        # reassigns ce_delta/pe_delta/ce_iv_rank/pe_iv_rank in place, so this is the
+        # only point where the raw (this-scan-only) values still exist as such.
+        _ctx["greeks_atm_raw"] = {
+            "ce_delta": ce_delta, "pe_delta": pe_delta,
+            "ce_iv_rank": ce_iv_rank, "pe_iv_rank": pe_iv_rank,
+        }
+
         # Smooth greeks across last N scan cycles — per-strike deque, no cross-contamination
         _sg = _smooth_greeks(
             state.get_greeks_history(symbol, atm_k),
@@ -8947,6 +9662,11 @@ class OptionsBuyerEdgeBot:
         pe_iv_rank = _sg.get("pe_iv_rank", pe_iv_rank)
         # Recompute derived values after smoothing
         iv_rank_val = ce_iv_rank if (ce_iv_rank is not None and pe_iv_rank is None) else (pe_iv_rank if pe_iv_rank is not None else None)
+
+        _ctx["greeks_atm_smoothed"] = {
+            "ce_delta": ce_delta, "pe_delta": pe_delta,
+            "ce_iv_rank": ce_iv_rank, "pe_iv_rank": pe_iv_rank,
+        }
 
         result = self.scorer.score(
             spot=spot,
@@ -8974,6 +9694,7 @@ class OptionsBuyerEdgeBot:
             symbol=symbol,
         )
         state.latest_signals[symbol] = (result, time.time())
+        _ctx["result"] = result
 
         # ── Formatted scoring panel ──────────────────────────────────────────
         _s        = result.score
@@ -9157,9 +9878,20 @@ class OptionsBuyerEdgeBot:
         entry_sl_pts = base_sl_pts * sl_factor
         entry_sl_pts = max(5.0, entry_sl_pts)
 
-        # Dynamic ceiling: absolute cap (max_sl_pts or premium_stop_pts sentinel)
-        # optionally tightened by a premium-proportional ratio
-        _effective_ceiling = cfg.entry.max_sl_pts if cfg.entry.max_sl_pts > 0 else cfg.entry.premium_stop_pts
+        # ── P1-c: moneyness-scaled ceiling ────────────────────────────────
+        # register_filled_entry sets tgt = executed + premium_target_pts * tgt_mult, so
+        # the TARGET already scales with moneyness. The ceiling did not, which had two
+        # consequences: (1) the flat cap discarded the delta-adaptive base for any
+        # premium above ~75, making EntryStopLossPolicy's sl_width_pct table inert in
+        # production; (2) identical config produced R:R 0.83 on Deep-OTM and 3.33 on
+        # Deep-ITM. Scaling the absolute ceiling by the SAME tgt_mult keeps R:R
+        # invariant across moneyness and lets the moneyness table reach the order.
+        # Delta unavailable -> mult 1.0 -> ceiling identical to pre-fix behaviour.
+        _mny_label, _, _sl_ceiling_mult, _ = EntryStopLossPolicy.get_moneyness_multipliers(
+            best.get("_abs_delta")
+        )
+        _base_ceiling = cfg.entry.max_sl_pts if cfg.entry.max_sl_pts > 0 else cfg.entry.premium_stop_pts
+        _effective_ceiling = _base_ceiling * _sl_ceiling_mult
         if cfg.entry.max_sl_premium_ratio > 0:
             _premium_cap = est_premium * (cfg.entry.max_sl_premium_ratio / 100.0)
             _effective_ceiling = min(_effective_ceiling, _premium_cap)
@@ -9168,7 +9900,9 @@ class OptionsBuyerEdgeBot:
         inf(
             f"[SCAN] {symbol}: Phase A initial SL source={entry_sl_source} "
             f"base={base_sl_pts:.2f} × factor={sl_factor:.2f} "
-            f"(conv={entry_conviction:.2f}) → clamped={entry_sl_pts:.2f}pts (ceiling={_effective_ceiling:.0f})"
+            f"(conv={entry_conviction:.2f}) → clamped={entry_sl_pts:.2f}pts "
+            f"(ceiling={_effective_ceiling:.1f} = {_base_ceiling:.0f} × {_sl_ceiling_mult:.2f} "
+            f"[{_mny_label}])"
             )
 
         lotsize = int(best.get("lotsize", 1) or 1)
@@ -9228,6 +9962,75 @@ class OptionsBuyerEdgeBot:
             entry_conviction=entry_conviction,
             entry_sl_source=entry_sl_source,
         )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # CHAIN SNAPSHOT: option-chain research log (backtesting / expectancy analysis)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _write_chain_snapshot(self, symbol: str, _ctx: dict[str, Any]) -> None:
+        """Build and persist one research-log record from what _scan_underlying_impl
+        populated into _ctx, then discard it — the record lives only in the file.
+
+        Called from scan_underlying()'s `finally`, so this runs on every scan
+        outcome: EXECUTE, WATCH, NO_TRADE, and every specific rejection reason
+        (no-strike, qty-zero, spread-block, ...). If the pipeline returned before
+        any chain was fetched (no spot LTP, no expiry, empty chain, `outcome` never
+        set), there is nothing worth logging — return without writing rather than
+        emit a record with no chain in it.
+        """
+        if "chain_rows_raw" not in _ctx:
+            return
+        try:
+            result: SignalResult | None = _ctx.get("result")
+            decision = None
+            if result is not None:
+                decision = {
+                    "score": result.score,
+                    "label": result.label,
+                    "signal": result.signal,
+                    "direction": result.direction,
+                    "trap_score": result.trap_score,
+                    "trap_reasons": result.trap_reasons,
+                    "fast_norm": result.fast_norm,
+                    "slow_norm": result.slow_norm,
+                    "confirm_mult": result.confirm_mult,
+                    "fast_coverage": result.fast_coverage,
+                    "components": [
+                        {
+                            "label": c.label, "score": c.score, "score_max": c.score_max,
+                            "direction": c.direction, "note": c.note, "available": c.available,
+                            "tier": c.tier,
+                        }
+                        for c in result.components
+                    ],
+                }
+            record = {
+                "ts": get_ist_now().isoformat(),
+                "underlying": symbol,
+                "expiry": _ctx.get("expiry"),
+                "outcome": _ctx.get("outcome", "unknown"),
+                "spot": _ctx.get("spot"),
+                "atm_strike": _ctx.get("atm_strike"),
+                "session_label": _ctx.get("session_label"),
+                "effective_min_score": _ctx.get("effective_min_score"),
+                "straddle_price": _ctx.get("straddle_price"),
+                "chain_smooth_bars": _ctx.get("chain_smooth_bars"),
+                "chain_history_depth": _ctx.get("chain_history_depth"),
+                # `chain` is raw-as-fetched; `chain_derived` is what the scorer read
+                # after EWA smoothing. Both are needed — see the comment at the
+                # capture site: raw oi_chg is always 0.0 because openalgo's chain
+                # response has no oi_change field, so the derived value is the only
+                # OI-change signal that carries information.
+                "chain": _ctx.get("chain_rows_raw"),
+                "chain_derived": _ctx.get("chain_derived"),
+                "greeks_atm_raw": _ctx.get("greeks_atm_raw"),
+                "greeks_atm_smoothed": _ctx.get("greeks_atm_smoothed"),
+                "decision": decision,
+            }
+            self.chain_snapshot_writer.write(symbol, record)
+        except Exception as exc:
+            # Fail-open: a research-log defect must never surface as a scan failure.
+            err(f"[CHAIN-SNAPSHOT] Failed to build snapshot for {symbol}: ", exc)
 
     # ──────────────────────────────────────────────────────────────────────────
     # SNAPSHOT FRESHNESS: producer-failure fallback
@@ -9374,7 +10177,16 @@ class OptionsBuyerEdgeBot:
                             )
                             for ul in eod_underlyings:
                                 for pos in self.state.positions.get_all(ul):
-                                    with self.state.exit_lock:
+                                    # P2-h: the exit_pending test-and-set MUST be under
+                                    # state_lock. _trigger_exit (the WS SL/target path) claims
+                                    # a position with exactly this check under state_lock; doing
+                                    # it here under exit_lock guarded the same invariant with a
+                                    # DIFFERENT lock, so the two were never mutually exclusive.
+                                    # A WS stop tick landing at square-off time could pass its
+                                    # guard while this loop passed its own, and both would call
+                                    # place_exit for the same slot — the duplicate-SELL /
+                                    # naked-short hazard of F100, reachable at 15:13 daily.
+                                    with self.state.state_lock:
                                         if pos.exit_pending:
                                             continue
                                         pos.exit_pending = True
