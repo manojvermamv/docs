@@ -150,3 +150,28 @@ volumes:
 Here is official 'https://github.com/decolua/9router/blob/master/docker-compose.yml' read it; Now adjust/update our last version yml if needed;
 And After Done in the end; Process the `9router` related only (Skip all others completely) from entire available chat/session/workspace context as the single source of truth and produce a complete, coherent, production-quality output in clean Markdown — do not invent facts, steps, values, or claims that weren't actually present or confirmed in that context. Consolidate all relevant information, decisions, corrections, and refinements discussed so far into one unified piece, eliminating redundancy and repetition, resolving contradictions by treating the most recently confirmed version as authoritative, and explicitly flagging any gap you had to fill with a reasonable assumption. Redact or placeholder any sensitive, private, or confidential information rather than reproducing it verbatim. Compress aggressively, surfacing only the decisions, conclusions, and action items that matter — omit exploratory back-and-forth. Organize as overview → key points → decisions made → open questions → next steps. Keep language concise, precise, and free of filler, using clear headings, lists, tables, code blocks, or other Markdown elements only where they genuinely aid readability, to create a polished, self-contained, ready-to-use document that a reader unfamiliar with the original conversation could still fully understand.
 ```
+
+---
+
+## AutonomousTrading Cleanup — Debian Instance
+
+```text
+Check whether you have complete access to the `Debian` instance. If not, read `@aws-keys/cross-instance-ssh.md` first and fix access before proceeding.
+
+You already completed the full setup/configuration (per session/chat history) and also fixed the nginx issue on the `Debian` instance. The home path is `/home/<admin/ubuntu/debian>/`.
+
+We now need to clean up, remove, and revert everything you did while working on `AutonomousTrading` on the `Debian` instance. This is because I've implemented two MCPs on the same server, which now handle a newer built-in version of `AutonomousTrading` — we'll work on that fresh, later, as a clean start. For now, a complete cleanup is required.
+
+Make sure you do NOT touch the running OpenAlgo Docker container or its processes.
+```
+
+---
+
+## AutonomousTrading Fresh Setup — Debian Instance
+
+```text
+Here is a private repo of mine, so you'll need to access it using the token `{GITHUB_TOKEN}`.
+Using that token, read `https://github.com/manojvermamv/AutonomousTrading/blob/main/README.md`, including all referenced markdown files as well.
+
+Then clone the complete setup onto the Debian instance at home path `/home/admin/`. Do not follow any previous manual setup workaround — this repo includes an installer script; use that instead. Also, do not perform manual analysis, diagnosis, or fix workarounds unless I explicitly ask for it.
+```
