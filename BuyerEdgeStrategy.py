@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F93, F96–F99 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓ · Review P1-a…P1-e ✓ P2-a ✓ P2-f ✓ P2-g ✓ P2-h ✓
+# Closed Findings    : F1–F64, F71–F93, F96–F99 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓ · Review P1-a…P1-e ✓ P2-a ✓ P2-f ✓ P2-g ✓ P2-h ✓ P3-a ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -98,21 +98,6 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #     cross-session OI buffer carry-over depends on daily process restart.
 #   ✓ F94 Fixed (HIGH): _effective_min_score() reaches SignalEngine.score() but StrikeSelector.select_best() and conviction scalars still read raw cfg.entry.min_score — power hour scores 32-39 pass EXECUTE then get rejected by select_best; morning gate overstates conviction 3.3x. Fixed by plumbing effective_min_score through select_best(), entry_conviction, and trail opposition gate.
 #
-#   ⬢ P3-a (OPEN, LOW — verified dead read, benign today): fetch_option_chain sets
-#     ce_oi_chg/pe_oi_chg from `ce.get("oi_change")`, but openalgo's option-chain response
-#     has no such field. Verified against openalgo/services/option_chain_service.py:497-537 —
-#     the leg carries exactly {symbol,label,ltp,bid,ask,bid_qty,ask_qty,open,high,low,
-#     prev_close,volume,oi,lotsize,tick_size}; `oi_change` appears nowhere in the chain path
-#     (only in the unrelated services/oi_profile_service.py and some WS streaming adapters).
-#     So the RAW chain's oi_chg fields are permanently 0.0 in production.
-#     Benign today only because smooth_chain_rows() overwrites them with a derived value
-#     (EWA(oi) - oldest raw oi across the window), and that derived value is what actually
-#     feeds Call OI Flow (2) + Put OI Flow (2) + OI Velocity (1) = 5 of 14 fast points.
-#     Two consequences worth knowing: (1) on the FIRST scan after startup the history holds a
-#     single bar, smooth_chain_rows returns early, and those 5 points score 0/neutral until the
-#     window fills — expected warm-up, not a fault; (2) the signal is a within-session window
-#     delta, NOT the day-over-day OI change the "Call Buying"/"Call Writing" labels
-#     conventionally imply. Either delete the dead read or source a real OI-change field.
 #   ⬢ F95 (research, not a defect): _compute_oi_wall has no +1 bullish-breakout case — returns at most +0.5/14 against -1.0/14, a standing directional skew. Scoring-model gap, not a coding defect.
 #
 # OpenAlgo SDK audit: all strategy= params migrated to cfg.broker.strategy_name.
@@ -227,6 +212,34 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # F98b ✓ Fixed (MEDIUM): Weighting approach for F98 was also broken — apply_confirmed_partial_exit decrements pos.core.qty right after record_strike_loss, so the denominator shrinks across repeated partial fills (1.83× on 3 fills, 2.83× on 9). Fixed by replacing all 10 weighted record_strike_loss calls with an accrue/settle pattern: accrue_strike_loss() banks pts×qty and qty per slot; settle_strike_loss() commits the qty-weighted average once at the 3 close seams (_finalize_exit, all-tranches-broker-filled, _cleanup_stale_positions). The old record_strike_loss() is now only used by the strike-pain dashboard (query-only).
 # F99 ✓ Fixed (HIGH): ExitReason.normalize() not idempotent — double-normalize collapsed every WS-triggered exit to OTHER, starving the exit-type expectancy database. Fixed with _ENUM_VALUES pass-through, _RAW_PREFIX_TO_ENUM prefix matching, DEEP_OTM enum, and missing opposite_side_signal mapping.
 # F100 ✓ Fixed (CRITICAL): Cancel/fill race sent a duplicate SELL and left an untracked -30 naked short (live 28JUL 11:22:33) — openalgo sandbox _execute_order writes the trade then sets status='complete' with no row lock, while a concurrent cancel_order overwrites it with 'cancelled', so the fill survives but every status endpoint denies it. Fixed with _fill_from_tradebook() cross-checking a cancelled verdict by order_id (the trade row is never rewritten) and _broker_net_qty() clamping or suppressing the SELL; layer 2 may suppress but never books, since positionbook is account-wide. Upstream fix still open.
+# P3-a ✓ Fixed (MEDIUM): fetch_option_chain built ce_oi_chg/pe_oi_chg from
+#       `ce.get("oi_change")` — a field openalgo's option-chain response does not contain.
+#       Verified against openalgo/services/option_chain_service.py:497-537, where the leg carries
+#       exactly {symbol,label,ltp,bid,ask,bid_qty,ask_qty,open,high,low,prev_close,volume,oi,
+#       lotsize,tick_size}; grepping the whole upstream tree shows `oi_change` only in the
+#       unrelated services/oi_profile_service.py and in some WS streaming adapters, never in the
+#       chain path. So the RAW oi_chg fields were permanently 0.0 in production, and that had two
+#       non-obvious consequences beyond "a field is always zero":
+#         (1) classify_ce_flow/classify_pe_flow's 2-factor fallback became unreachable — it only
+#             runs when the _dir fields are all zero (single-bar history), which is exactly when
+#             oi_chg was the fabricated 0.0, so it could never return anything but Neutral.
+#         (2) Call OI Flow (2) + Put OI Flow (2) + OI Velocity (1) = 5 of 14 fast points reported
+#             available=True on no data, putting their score_max into FAST_MAX with a
+#             guaranteed-zero numerator. That DEFLATES the composite — the mirror image of the
+#             P1-b inflation bug, capping a perfect signal on the other 9 points at ~64/100.
+#       Fixed by removing the dead read entirely so the key's ABSENCE is meaningful
+#       (smooth_chain_rows sets it only at history depth >= 2), adding _has_oi_change_basis(), and
+#       returning None (unavailable) from those three specs instead of a confident zero — the F56
+#       pattern. The shadow OI-Z spec is guarded too so it no longer seeds its rolling buffer with
+#       a fabricated zero observation.
+#       BEHAVIOURAL CHANGE: the first scan of each session (and after the daily
+#       reset_market_caches) now falls below the P1-b coverage floor and is honestly gated
+#       NO_TRADE, recovering on the next scan. Measured cold->warm coverage 43% -> 79%, a delta of
+#       exactly those 5 points. Deliberate: the alternative is trading on a deflated score.
+#       Also note the derived value is a within-session window delta, NOT the day-over-day OI
+#       change the "Call Buying"/"Call Writing" labels conventionally imply. A real day change
+#       needs daily history per strike — oi_profile_service does that internally but is exposed
+#       only via a Flask blueprint, not restx_api, so no SDK call exists. findings-master.md PART 6.
 # P2-h ✓ Fixed (HIGH): The exit_pending test-and-set was guarded by TWO DIFFERENT locks in
 #       different places. _trigger_exit (WS SL/target) claims a position under state_lock; the EOD
 #       square-off loop in _strategy_thread claimed it under exit_lock. Guarding one invariant with
@@ -579,92 +592,48 @@ MARKET_HOURS_START = 915   # 09:15 IST
 MARKET_HOURS_END   = 1530  # 15:30 IST
 
 # ── Layer 1: Score Generation ──────────────────────────────────────────────────
-# PRACTICAL_ALIGNMENT_FACTOR: defines what fraction of MAX_RAW_SCORE is treated as
-# the "practical ceiling" for a 100-point conviction score. Market signals rarely
-# achieve 100% component alignment; this factor acknowledges that reality.
-#
-# Calibration guide — run a distribution audit across N scans and observe:
-#   If 95th percentile raw_score ≈ 0.50 × MAX_RAW_SCORE → set to 0.50
-#   If 95th percentile raw_score ≈ 0.75 × MAX_RAW_SCORE → set to 0.75
-#   Until confirmed by live data, keep at 1.00 (no compression, full gradient).
+# Fraction of MAX_RAW_SCORE treated as the practical ceiling for a 100-point score.
+# Calibrate to the 95th-percentile raw_score / MAX_RAW_SCORE; 1.00 = no compression.
 PRACTICAL_ALIGNMENT_FACTOR = 1.00
 
 # ── Layer 2: Trade Selection ────────────────────────────────────────────────────
-# WATCH_FACTOR: the score band below EXECUTE that marks a setup worth monitoring.
-# watch_threshold = effective_min_score × WATCH_FACTOR
-#
-# Session thresholds (set via BotConfig / ENV):
-#   morning_gate  → typically 45  (stricter pre-market discipline)
-#   normal_hours  → typically 30  (baseline execution bar)
-#   power_hour    → typically 20  (relaxed, momentum-driven)
-#
-# Example at normal_hours (effective_min_score=30):
-#   abs_score >= 30  → EXECUTE
-#   abs_score >= 22  → WATCH  (30 × 0.75 = 22.5 → 22)
-#   abs_score  < 22  → NO_TRADE
+# watch_threshold = effective_min_score × WATCH_FACTOR; below that is NO_TRADE.
+# effective_min_score comes from the session gate (morning 45 / normal 30 / power 20).
 WATCH_FACTOR = 0.75
 
 # ── Layer 3: Strike Selection (conviction-driven) ──────────────────────────────
-# All strike-selection parameters are driven by a single `conviction` scalar
-# derived from (abs(signal_score) - min_score) / (100 - min_score).  This
-# eliminates hard regime jumps and maps the tradeable score range [min→100]
-# continuously to [0.0, 1.0].
-#
-# Delta targeting — piecewise continuous mapping:
-#   Score < 50   → [STRIKE_DELTA_BASE, STRIKE_DELTA_PIVOT] (near-OTM → ATM)
-#   Score >= 50  → [STRIKE_DELTA_PIVOT, STRIKE_DELTA_MAX]  (ATM → Mild ITM)
-#
-# Calibration change (2026-06-04):
-#   STRIKE_DELTA_BASE:  raised 0.15 → 0.25: even the weakest signal now targets
-#     a near-OTM strike (Δ≈0.25) instead of a deep-OTM (Δ≈0.15), reducing
-#     SL width and preventing systematic qty=0 risk-cap rejections.
-#   STRIKE_SCORE_PIVOT: lowered 60 → 50: ATM targeting is reached at a lower
-#     score, so today's typical 42–52 signals get meaningfully better strikes.
-STRIKE_DELTA_BASE  = 0.25   # min delta at min_score (near-OTM floor) — raised from 0.15 to reduce SL width on weak signals
-STRIKE_DELTA_PIVOT = 0.50   # delta at SCORE_PIVOT (ATM) — crossover between OTM and mild-ITM targeting zones
-STRIKE_DELTA_MAX   = 0.70   # max delta at score 100 (mild ITM) — prevents over-leveraged deep-ITM selection
-STRIKE_SCORE_PIVOT = 50.0   # score where ATM is targeted — lowered from 60 so typical 42–52 signals reach ATM-ish strikes
+# conviction = (abs(score) - min_score) / (100 - min_score), mapped continuously to
+# a target delta: BASE at min_score → PIVOT at SCORE_PIVOT (ATM) → MAX at score 100.
+STRIKE_DELTA_BASE  = 0.25   # min delta at min_score — near-OTM floor keeps SL width sane on weak signals
+STRIKE_DELTA_PIVOT = 0.50   # delta at SCORE_PIVOT (ATM) — crossover between OTM and mild-ITM targeting
+STRIKE_DELTA_MAX   = 0.70   # max delta at score 100 (mild ITM) — caps leverage, no deep-ITM selection
+STRIKE_SCORE_PIVOT = 50.0   # score at which ATM is targeted — typical 42–52 signals land near ATM
 
-# Delta band half-width — how wide to search around the target delta.
-# e.g. 0.08 means [target-0.08, target+0.08].
-STRIKE_DELTA_BAND = 0.08    # search band around target_delta — wider band tolerates illiquid chains with sparse delta coverage
+STRIKE_DELTA_BAND = 0.08    # half-width of the delta search window — wider tolerates sparse chains
+MAX_DELTA_GAP = 0.15        # fallback gap ceiling — exceeding this drops the delta filter for liquidity rank
 
-# Maximum acceptable delta gap in the fallback strike selection.
-# If the nearest available delta is farther than this from the target, the
-# fallback is considered pathological and the delta filter is bypassed entirely,
-# falling back to pure liquidity ranking instead of picking a wildly OTM strike.
-MAX_DELTA_GAP = 0.15        # fallback gap ceiling — exceeding this bypasses delta filter entirely and uses liquidity rank only
+# delta_weight scales from BASE at conviction 0 (favour liquidity) to BASE+RANGE at 1 (favour delta fit).
+STRIKE_DELTA_WEIGHT_BASE  = 0.10   # delta fit weight at zero conviction — defers to OI/volume liquidity
+STRIKE_DELTA_WEIGHT_RANGE = 0.20   # added at max conviction — 0.30 total, max delta precision
 
-# Dynamic asym_score weighting — delta vs liquidity tradeoff:
-#   conviction=0.0 → delta_weight = STRIKE_DELTA_WEIGHT_BASE          (favour liquidity)
-#   conviction=1.0 → delta_weight = STRIKE_DELTA_WEIGHT_BASE + RANGE  (favour delta fit)
-STRIKE_DELTA_WEIGHT_BASE  = 0.10   # delta fit weight at zero conviction — low conviction defers to OI/volume liquidity signals
-STRIKE_DELTA_WEIGHT_RANGE = 0.20   # additional delta weight at max conviction — total 0.30 at high conviction (max delta precision)
+STRIKE_RANGE_PCT = 0.05     # strike search radius as a fraction of spot, each side — ±5%
 
-# Maximum strike search window as a fraction of spot price (each side).
-# e.g. 0.05 = ±5% → CE: [spot, spot*1.05]; PE: [spot*0.95, spot].
-STRIKE_RANGE_PCT = 0.05     # strike search radius — ±5% of spot; wider = more candidates but lower quality floor
-
-# ── Conviction Risk Engine — global tuning constants ──────────────────────────
-# These constants are shared by SL sizing, breakeven, and all trail functions
-# to ensure a single consistent model drives all risk parameters.
-#
-# Breakeven trigger adjustment:
-#   adj = CONV_BE_BASE - conviction * CONV_BE_RANGE
-#   conviction=0.0 → 1.10× (need 110% of normal trigger)
-#   conviction=1.0 → 0.90× (trigger at 90% — protect earlier)
-#   Narrow range intentional: avoids killing winners via premature BE on strong setups.
+# ── Conviction Risk Engine — shared by SL sizing, breakeven and all trail functions ──
+# BE trigger adjustment: adj = CONV_BE_BASE - conviction * CONV_BE_RANGE, so 1.10× at
+# zero conviction down to 0.90× at full. Range stays narrow to avoid premature BE on strong setups.
 CONV_BE_BASE  = 1.10
 CONV_BE_RANGE = 0.20
 
-# Live PNL alert interval in seconds (0 = disabled)
+# P&L alert interval, seconds (0 = disabled) — cosmetic notification only.
 LIVE_PNL_ALERT_INTERVAL = 60
 
-# Minimum SL-M trigger price (₹). The OpenAlgo API rejects a negative trigger outright
-# (openalgo/restx_api/schemas.py — OrderSchema.trigger_price → validate.Range(min=0)),
-# and while 0.0 passes validation it can never fire on a long option: a SELL trigger
-# requires ltp <= trigger (openalgo/sandbox/order_manager.py:396) and premium cannot
-# reach zero. So a stop wider than the fill must clamp to a small POSITIVE value, not 0.
+# Naked-short detector interval, seconds — safety net, so it keeps its own switch
+# rather than sharing the alert setting, and runs outside market hours (square-off
+# at 15:13 can leave a short after _is_market_hours() ends at 15:30).
+NAKED_SHORT_CHECK_INTERVAL = 60
+
+# Minimum SL-M trigger (₹) — upstream rejects a negative trigger, and 0 can never
+# fire on a long option (a SELL trigger needs ltp <= trigger).
 MIN_SL_TRIGGER = 0.05
 
 
@@ -708,10 +677,7 @@ class ExitReason:
     # match _RAW_TO_ENUM by equality — matched by prefix instead (F99).
     #   _check_max_hold      -> f"MaxHoldTime({minutes}m)"
     #   _check_premium_trail -> f"DeepOTM_delta_{delta:.3f}"
-    _RAW_PREFIX_TO_ENUM = (
-        ("MaxHoldTime",    MAX_HOLD),
-        ("DeepOTM_delta_", DEEP_OTM),
-    )
+    _RAW_PREFIX_TO_ENUM = (("MaxHoldTime", MAX_HOLD), ("DeepOTM_delta_", DEEP_OTM))
 
     # Every normalized value, for the idempotence check in normalize().
     _ENUM_VALUES = frozenset({
@@ -850,14 +816,19 @@ class MarketConfig:
     chain_smooth_bars:     int   = 5
     greeks_smooth_max_age: float = 180.0
 
+    # ── Day-over-day OI (Item 26) ──
+    # Real prev-close-to-now OI change from daily history. Observation only: it is
+    # logged beside the in-session basis and never scored. Costs one daily-history
+    # call per leg, cached for the session since the prev-day close cannot move.
+    dod_oi_enabled:        bool  = True
+    dod_oi_max_strikes:    int   = 5     # legs each side around ATM — caps the call budget
+
     @classmethod
     def from_env(cls) -> "MarketConfig":
         underlyings_csv = os.getenv("UNDERLYINGS", "BANKNIFTY")
         index_csv = os.getenv("INDEX_UNDERLYINGS", "BANKNIFTY")
         underlyings = sorted({u.strip() for u in underlyings_csv.split(",") if u.strip()})
-        index_underlyings: frozenset[str] = frozenset(
-            u.strip() for u in index_csv.split(",") if u.strip()
-        )
+        index_underlyings: frozenset[str] = frozenset(u.strip() for u in index_csv.split(",") if u.strip())
         defaults = cls()
         strategy_exch = os.getenv("OPENALGO_STRATEGY_EXCHANGE", "").upper().strip()
         mapped = _STRATEGY_EXCHANGE_MAP.get(strategy_exch)
@@ -884,6 +855,8 @@ class MarketConfig:
             stale_cleanup_grace_secs=int(os.getenv("STALE_CLEANUP_GRACE_SECS", str(defaults.stale_cleanup_grace_secs))),
             chain_smooth_bars=int(os.getenv("CHAIN_SMOOTH_BARS", str(defaults.chain_smooth_bars))),
             greeks_smooth_max_age=float(os.getenv("GREEKS_SMOOTH_MAX_AGE", str(defaults.greeks_smooth_max_age))),
+            dod_oi_enabled=os.getenv("DOD_OI_ENABLED", str(defaults.dod_oi_enabled)).lower() in ("1", "true", "yes"),
+            dod_oi_max_strikes=int(os.getenv("DOD_OI_MAX_STRIKES", str(defaults.dod_oi_max_strikes))),
             no_new_trade_after=os.getenv("NO_NEW_TRADE_AFTER", defaults.no_new_trade_after),
             square_off_time=os.getenv("SQUARE_OFF_TIME", defaults.square_off_time),
             max_hold_minutes=int(os.getenv("MAX_HOLD_MINUTES", str(defaults.max_hold_minutes))),
@@ -1083,8 +1056,7 @@ class EntryConfig:
                         f"(fast_ema={self.fast_ema_period}, slow_ema={self.slow_ema_period}, "
                         f"rsi={self.rsi_period})")
         if self.fast_ema_period >= self.slow_ema_period:
-            errs.append(f"FAST_EMA_PERIOD={self.fast_ema_period} must be < "
-                        f"SLOW_EMA_PERIOD={self.slow_ema_period}")
+            errs.append(f"FAST_EMA_PERIOD={self.fast_ema_period} must be < SLOW_EMA_PERIOD={self.slow_ema_period}")
 
         # ── Group 4: Filter/reward — 0 = sentinel (filter off / no LIMIT profit) ──
         if self.min_oi_filter < 0:
@@ -1370,9 +1342,7 @@ class PositionConfig:
         if self.max_total_positions < self.max_positions_per_underlying:
             errs.append("MAX_TOTAL_POSITIONS must be >= MAX_POSITIONS_PER_UNDERLYING")
         if self.allow_simultaneous_ce_pe and self.max_positions_per_underlying < 2:
-            errs.append(
-                "ALLOW_SIMULTANEOUS_CE_PE=True requires MAX_POSITIONS_PER_UNDERLYING >= 2"
-            )
+            errs.append("ALLOW_SIMULTANEOUS_CE_PE=True requires MAX_POSITIONS_PER_UNDERLYING >= 2")
         return errs
 
 
@@ -1459,35 +1429,29 @@ class SignalConfig:
     shadow_mode_enabled:        bool  = True
 
     # ── Step 3: fast/slow two-stage combine ──
-    # Slow (technical-trend) tier no longer adds points directly; it dampens the fast
-    # (options-statistical) tier's score on disagreement via this multiplier. Agreement
-    # or a neutral/unavailable slow layer never boosts or penalizes (multiplier = 1.0).
+    # The slow (technical-trend) tier only dampens the fast tier on disagreement;
+    # agreement or a neutral/unavailable slow layer leaves the multiplier at 1.0.
     slow_disagree_weight:       float = 0.5   # how strongly full disagreement dampens (0-1)
     slow_disagree_floor:        float = 0.5   # multiplier can never drop below this
 
-    # ── P1-b: data-coverage floor ──
+    # ── Data-coverage floor ──
     # Minimum share of NOMINAL_FAST_MAX that must be available before a score is
-    # tradeable. Below it the normalized score is arithmetically inflated (a smaller
-    # denominator) and says more about feed health than about the market, so the
-    # signal is forced to NO_TRADE. 0.0 disables the gate (pre-fix behaviour).
+    # tradeable — below it the smaller denominator inflates the score and reports feed
+    # health, not the market, so the signal is forced to NO_TRADE. 0.0 disables the gate.
     min_fast_coverage:          float = 0.70
 
     @classmethod
     def from_env(cls) -> "SignalConfig":
         defaults = cls()
         return cls(
-            rvol_lookback=int(
-                os.getenv("RVOL_LOOKBACK", str(defaults.rvol_lookback))),
+            rvol_lookback=int(os.getenv("RVOL_LOOKBACK", str(defaults.rvol_lookback))),
             oi_z_buffer_maxlen=int(
                 os.getenv("OI_Z_BUFFER_MAXLEN", str(defaults.oi_z_buffer_maxlen))),
             oi_zone_z_threshold=float(
                 os.getenv("OI_ZONE_Z_THRESHOLD", str(defaults.oi_zone_z_threshold))),
-            oi_zone_z_climax=float(
-                os.getenv("OI_ZONE_Z_CLIMAX", str(defaults.oi_zone_z_climax))),
-            oi_zone_min_touch=int(
-                os.getenv("OI_ZONE_MIN_TOUCH", str(defaults.oi_zone_min_touch))),
-            wall_reject_pct=float(
-                os.getenv("WALL_REJECT_PCT", str(defaults.wall_reject_pct))),
+            oi_zone_z_climax=float(os.getenv("OI_ZONE_Z_CLIMAX", str(defaults.oi_zone_z_climax))),
+            oi_zone_min_touch=int(os.getenv("OI_ZONE_MIN_TOUCH", str(defaults.oi_zone_min_touch))),
+            wall_reject_pct=float(os.getenv("WALL_REJECT_PCT", str(defaults.wall_reject_pct))),
             oi_zone_wall_proximity_pts=float(
                 os.getenv("OI_ZONE_WALL_PROXIMITY_PTS", str(defaults.oi_zone_wall_proximity_pts))),
             oi_zone_lookback_scans=int(
@@ -1606,10 +1570,7 @@ class BotConfig:
             inf("[CONFIG] Startup validation failed:")
             for e in errors:
                 inf(f"  \u2717 {e}")
-            raise SystemExit(
-                "Fix the configuration errors above before running. "
-                "See env-var comments at the top of the file."
-            )
+            raise SystemExit("Fix the configuration errors above before running. See env-var comments at the top of the file.")
         inf("[CONFIG] All configuration values validated OK")
         for sc in (self.broker, self.market, self.entry, self.risk,
                    self.trail, self.journal, self.chain_snapshot,
@@ -2116,11 +2077,7 @@ def _build_tranches(pos: OptionPosition, qty: int, cfg: BotConfig) -> list[Tranc
     _min_required = (tc.min_qty_per_tranche * tc.number_of_tranches if tc.mode == "equal"
                      else tc.min_qty_per_tranche * 3)
     if not tc.enabled or qty < _min_required:
-        return [Tranche(
-            tranche_id=f"{pos.slot_id}_0", qty=qty,
-            sl=pos.sl, initial_sl=pos.initial_sl, is_runner=True,
-            tp_pts=pos.tgt,
-        )]
+        return [Tranche(tranche_id=f"{pos.slot_id}_0", qty=qty, sl=pos.sl, initial_sl=pos.initial_sl, is_runner=True, tp_pts=pos.tgt)]
     if tc.mode == "equal":
         n = tc.number_of_tranches
         base = qty // n
@@ -2342,32 +2299,16 @@ class ChainSnapshotWriter:
     decision (EXECUTE, WATCH, or the specific rejection reason), for offline
     backtesting and expectancy analysis.
 
-    Design notes, cross-checked against JournalWriter and the actual call graph
-    (not assumed by analogy):
+    Design notes:
 
-    - No lock. scan_underlying() — the sole caller — runs from a plain sequential
-      `for symbol in cfg.market.underlyings:` loop on the strategy thread only; it
-      is never invoked from the WS thread or the exit-executor pool. This is a
-      narrower claim than "JournalWriter has no lock so this needs none either" —
-      JournalWriter.write() IS reachable concurrently, from place_exit() via both
-      the strategy thread and the WS-triggered _exit_executor pool (max_workers=5),
-      so it is not actually a safe precedent to copy. Verified via
-      ws.set_exit_callback(orders.place_exit) + _exit_executor.submit(...).
-
-    - JSON-Lines, not CSV: the chain is a variable-length nested array (10-40
-      strikes/scan). CSV would force one row per strike per scan, duplicating
-      every scan-level field on every row for no benefit — JSON-Lines keeps one
-      record per scan and the chain as one field.
-
-    - One file per underlying per day, dated in IST (get_ist_now()), not
-      datetime.now()/UTC. A UTC-dated filename would split one IST trading
-      session across two files at container-local midnight (05:30 IST) — the
-      exact class of bug F21 already fixed at 7 other sites in this file.
-
-    - Best-effort, fail-open: any exception here is logged and swallowed, never
-      raised. This runs once per scan on the strategy thread; a failure here must
-      never abort a scan or interrupt the entry/exit decision it is only
-      observing.
+    - No lock. scan_underlying() is the sole caller and runs only on the strategy
+      thread. (JournalWriter is not a precedent — its write() IS reachable from the
+      WS exit-executor pool as well.)
+    - JSON-Lines, not CSV — the chain is a variable-length nested array per scan.
+    - One file per underlying per day, dated IST, so a session is never split at
+      container-local midnight (F21).
+    - Fail-open: exceptions are logged, never raised. This observes a scan; it must
+      never abort one.
     """
 
     def __init__(self, dir_path: str):
@@ -2456,12 +2397,7 @@ class TradeAnalytics:
         )
 
     @staticmethod
-    def build_tranche(
-        underlying: str,
-        pos: OptionPosition,
-        tr: Tranche,
-        paper_trade: bool = False,
-    ) -> "TradeRecord":
+    def build_tranche(underlying: str, pos: OptionPosition, tr: Tranche, paper_trade: bool = False) -> "TradeRecord":
         """Build a TradeRecord for a single tranche partial exit."""
         pnl_abs = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price else 0.0
         risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
@@ -2804,10 +2740,7 @@ class PositionBook:
         return any(p.core.option_type != direction for p in self.get_all(underlying))
 
     def has_active_opposite(self, underlying: str, direction: str) -> bool:
-        return any(
-            p.core.option_type != direction and not p.exit_pending
-            for p in self.get_all(underlying)
-        )
+        return any(p.core.option_type != direction and not p.exit_pending for p in self.get_all(underlying))
 
     def has_same_direction(self, underlying: str, direction: str) -> bool:
         return any(p.core.option_type == direction for p in self.get_all(underlying))
@@ -2818,8 +2751,7 @@ class PositionBook:
             return False, f"max_total_positions={cfg.position.max_total_positions} reached"
         per_ul = self.count(underlying)
         if per_ul >= cfg.position.max_positions_per_underlying:
-            return False, (f"max_positions_per_underlying={cfg.position.max_positions_per_underlying} "
-                           f"reached for {underlying}")
+            return False, (f"max_positions_per_underlying={cfg.position.max_positions_per_underlying} reached for {underlying}")
         if self.has_active_opposite(underlying, direction):
             if cfg.position.opposite_side_exit_on_signal:
                 return True, "opposite_exit_pending"
@@ -2922,8 +2854,7 @@ class BotState:
         with self.state_lock:
             self._strike_loss_pts[key] = self._strike_loss_pts.get(key, 0.0) + pts_loss
 
-    def accrue_strike_loss(self, slot_id: str, option_symbol: str, direction: str,
-                           pts_loss: float, qty: int) -> None:
+    def accrue_strike_loss(self, slot_id: str, option_symbol: str, direction: str, pts_loss: float, qty: int) -> None:
         """Accrue a partial-exit loss under a slot id for deferred settlement (F98b).
         Banks (key, pts_loss × qty, qty) so settle_strike_loss() can compute the
         qty-weighted average once at trade close."""
@@ -2963,8 +2894,7 @@ class BotState:
         self._pending_strike_loss.clear()
 
 
-def _smooth_greeks(history: deque, lookback: int | None = None,
-                    max_age_secs: float | None = None) -> dict:
+def _smooth_greeks(history: deque, lookback: int | None = None, max_age_secs: float | None = None) -> dict:
     """Average delta and IVR across THIS strike's own history.
     max_age_secs drops entries older than this. Returns {} on empty."""
     snaps = list(history)
@@ -3051,6 +2981,56 @@ def _series_slope(values: list[float]) -> int:
     return 0
 
 
+def _has_oi_change_basis(chain_rows: list[dict]) -> bool:
+    """True when the chain rows carry an OI-change series at all.
+
+    Upstream sends no oi_change, so a raw chain has none — only smooth_chain_rows()
+    derives it, at history depth >= 2. Presence of the key IS the availability signal.
+
+    Callers return None rather than 0 when this is False: a 0 claims available=True and
+    puts score_max into FAST_MAX with a zero numerator, deflating the composite (F56).
+    """
+    return any(("ce_oi_chg" in r) or ("pe_oi_chg" in r) for r in chain_rows)
+
+
+def attach_dod_oi(chain_rows: list[dict], prev_oi: dict[str, float | None]) -> int:
+    """Attach a real day-over-day OI change per leg from previous closes. Returns legs filled.
+
+    ce_oi_dod / pe_oi_dod = live chain OI - that leg's previous session close. Absent
+    on any leg whose previous close is unknown, so absence stays the availability
+    signal, exactly as _has_oi_change_basis() reads it (Item 26 / P3-a grammar).
+    """
+    filled = 0
+    for r in chain_rows:
+        for side in ("ce", "pe"):
+            sym, live = r.get(f"{side}_symbol"), r.get(f"{side}_oi")
+            prev = prev_oi.get(sym) if sym else None
+            if prev and live:
+                r[f"{side}_oi_dod"] = float(live) - float(prev)
+                filled += 1
+    return filled
+
+
+def _dod_flow_note(chain_rows: list[dict]) -> str:
+    """One-line comparison of the day-over-day OI basis against the in-session one.
+
+    Observation only — Item 26 is logged, never scored, because swapping the basis
+    would change 5 of the 14 fast-tier points and those gate entry.
+    """
+    ce_dod = sum(r["ce_oi_dod"] for r in chain_rows if "ce_oi_dod" in r)
+    pe_dod = sum(r["pe_oi_dod"] for r in chain_rows if "pe_oi_dod" in r)
+    ce_ses = sum(r.get("ce_oi_chg", 0) or 0 for r in chain_rows)
+    pe_ses = sum(r.get("pe_oi_chg", 0) or 0 for r in chain_rows)
+    n = sum(1 for r in chain_rows if "ce_oi_dod" in r or "pe_oi_dod" in r)
+    agree = "agree" if (_sign_of(ce_dod) == _sign_of(ce_ses) and _sign_of(pe_dod) == _sign_of(pe_ses)) else "DISAGREE"
+    return (f"[DOD-OI] {n} legs | CE dod={ce_dod:+,.0f} session={ce_ses:+,.0f} | "
+            f"PE dod={pe_dod:+,.0f} session={pe_ses:+,.0f} | {agree}")
+
+
+def _sign_of(x: float) -> int:
+    return 1 if x > 0 else (-1 if x < 0 else 0)
+
+
 class OIFlowAnalyzer:
     """Static helpers for OI-flow analysis and chain smoothing."""
 
@@ -3095,9 +3075,7 @@ class OIFlowAnalyzer:
 
         all_strikes = sorted({k for s in snaps for k in s})
         # Only smooth absolute values — deltas and bid/ask handled separately
-        SMOOTH_FIELDS = [
-            "ce_oi", "pe_oi", "ce_volume", "pe_volume", "ce_ltp", "pe_ltp",
-        ]
+        SMOOTH_FIELDS = ["ce_oi", "pe_oi", "ce_volume", "pe_volume", "ce_ltp", "pe_ltp"]
 
         smoothed = []
         for strike in all_strikes:
@@ -3151,15 +3129,28 @@ class OIFlowAnalyzer:
 
     @staticmethod
     def call_wall(chain_rows: list[dict]) -> float | None:
-        return max(chain_rows, key=lambda r: r.get("ce_oi", 0))["strike"] if chain_rows else None
+        # A chain with no CE open interest anywhere has no wall. Without the >0 test,
+        # max() over an all-equal key returns the FIRST row, so an untraded chain
+        # reports its lowest strike as a wall and reads downstream as real resistance.
+        if not chain_rows:
+            return None
+        top = max(chain_rows, key=lambda r: r.get("ce_oi", 0) or 0)
+        return top["strike"] if (top.get("ce_oi") or 0) > 0 else None
 
     @staticmethod
     def put_wall(chain_rows: list[dict]) -> float | None:
-        return max(chain_rows, key=lambda r: r.get("pe_oi", 0))["strike"] if chain_rows else None
+        if not chain_rows:
+            return None
+        top = max(chain_rows, key=lambda r: r.get("pe_oi", 0) or 0)
+        return top["strike"] if (top.get("pe_oi") or 0) > 0 else None
 
     @staticmethod
-    def classify_ce_flow(chain_rows: list[dict]) -> tuple[float, str]:
-        """3-factor CE flow classifier (8-state matrix). Falls back to 2-factor on single bar."""
+    def classify_ce_flow(chain_rows: list[dict]) -> tuple[float | None, str]:
+        """3-factor CE flow classifier (8-state matrix). Falls back to 2-factor on single bar.
+
+        Returns (None, reason) when neither path has data — the caller propagates that
+        as unavailable, not as a zero score.
+        """
         def _agg(fld: str) -> int:
             raw = sum(r.get(fld, 0) or 0 for r in chain_rows)
             return 1 if raw > 0 else (-1 if raw < 0 else 0)
@@ -3175,7 +3166,10 @@ class OIFlowAnalyzer:
             elif l == -1 and v == -1 and o ==  1: return -0.5, "Call writing low volume — cautiously bearish"
             elif l == -1 and v == -1 and o == -1: return  0.0, "CE pressure fading — weakening bearish"
             return 0.0, "CE Neutral"
-        # 2-factor fallback
+        # 2-factor fallback needs an OI-change series, which a raw single-bar chain
+        # has none of — without this guard it can only ever return Neutral.
+        if not _has_oi_change_basis(chain_rows):
+            return None, "CE flow unavailable — no OI-change series yet (chain history < 2 scans)"
         oi_chg  = sum(r.get("ce_oi_chg", 0) or 0 for r in chain_rows)
         ltp_chg = sum(r.get("ce_ltp_chg", 0) or 0 for r in chain_rows)
         if oi_chg > 0 and ltp_chg > 0.5:  return  2, "Call Buying"
@@ -3185,8 +3179,12 @@ class OIFlowAnalyzer:
         return 0, "CE Neutral"
 
     @staticmethod
-    def classify_pe_flow(chain_rows: list[dict]) -> tuple[float, str]:
-        """3-factor PE flow classifier (8-state matrix). Falls back to 2-factor on single bar."""
+    def classify_pe_flow(chain_rows: list[dict]) -> tuple[float | None, str]:
+        """3-factor PE flow classifier (8-state matrix). Falls back to 2-factor on single bar.
+
+        Returns (None, reason) when neither path has data — see P3-a. The caller must
+        propagate that as unavailable rather than as a zero score.
+        """
         def _agg(fld: str) -> int:
             raw = sum(r.get(fld, 0) or 0 for r in chain_rows)
             return 1 if raw > 0 else (-1 if raw < 0 else 0)
@@ -3202,7 +3200,9 @@ class OIFlowAnalyzer:
             elif l == -1 and v == -1 and o ==  1: return  0.5, "Put writing low volume — cautiously bullish"
             elif l == -1 and v == -1 and o == -1: return  0.0, "PE pressure fading — weakening bullish"
             return 0.0, "PE Neutral"
-        # 2-factor fallback
+        # 2-factor fallback — see the matching guard in classify_ce_flow (P3-a).
+        if not _has_oi_change_basis(chain_rows):
+            return None, "PE flow unavailable — no OI-change series yet (chain history < 2 scans)"
         oi_chg  = sum(r.get("pe_oi_chg", 0) or 0 for r in chain_rows)
         ltp_chg = sum(r.get("pe_ltp_chg", 0) or 0 for r in chain_rows)
         if oi_chg > 0 and ltp_chg < -0.5: return  2, "Put Writing"
@@ -3305,10 +3305,7 @@ def _compute_spot_vs_vwap(df_spot, cfg):
     _vol_feed = _vol if _has_volume else np.ones(len(_vol))
     source = "today" if _has_volume else "today(price-only)"
     try:
-        vwap_arr = ta.vwap(
-            df_today["high"], df_today["low"], df_today["close"],
-            _vol_feed, anchor="Session", source="hlc3",
-        )
+        vwap_arr = ta.vwap(df_today["high"], df_today["low"], df_today["close"], _vol_feed, anchor="Session", source="hlc3")
         vv = ta_value(vwap_arr, -1)
         if vv is None or vv <= 0:
             return None
@@ -3384,6 +3381,10 @@ def _compute_call_flow(ctx, cfg, intermediates):
     if not chain_rows:
         return None
     s, label = OIFlowAnalyzer.classify_ce_flow(chain_rows)
+    if s is None:
+        # No OI-change series -> unavailable. A 0 would claim available=True and put
+        # score_max into FAST_MAX with a zero numerator, deflating the composite.
+        return None
     intermediates["call_flow_score"] = s
     return s, label
 
@@ -3396,6 +3397,8 @@ def _compute_put_flow(ctx, cfg, intermediates):
     if not chain_rows:
         return None
     s, label = OIFlowAnalyzer.classify_pe_flow(chain_rows)
+    if s is None:
+        return None   # P3-a — see _compute_call_flow
     intermediates["put_flow_score"] = s
     return s, label
 
@@ -3504,16 +3507,10 @@ def _compute_gamma_regime(ctx, cfg, intermediates):
                 f"{chosen_target:.0f} from spot {spot:.0f}"
             )
         else:
-            gamma_note = (
-                f"Short gamma (Net GEX {total_net_gex:+.0f}) but no nearby punch target "
-                "resolved — neutral"
-            )
+            gamma_note = (f"Short gamma (Net GEX {total_net_gex:+.0f}) but no nearby punch target resolved — neutral")
 
     elif total_net_gex > 0:
-        gamma_note = (
-            f"Long gamma (Net GEX {total_net_gex:+.0f}) — dealer hedging tends to dampen "
-            "directional follow-through"
-        )
+        gamma_note = (f"Long gamma (Net GEX {total_net_gex:+.0f}) — dealer hedging tends to dampen directional follow-through")
         s10 = 0
     else:
         gamma_note = "Net GEX near zero — no clear gamma regime"
@@ -3533,6 +3530,10 @@ def _compute_oi_velocity(ctx, cfg, intermediates):
     chain_rows = ctx.get("chain_rows")
     if not chain_rows:
         return None
+    # Velocity is entirely a function of the OI-change series — without it every branch
+    # below evaluates against 0.0 and returns a confident "below threshold".
+    if not _has_oi_change_basis(chain_rows):
+        return None
     s6 = intermediates.get("call_flow_score", 0)
     s7 = intermediates.get("put_flow_score", 0)
     ce_oi_chg = sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows)
@@ -3544,23 +3545,15 @@ def _compute_oi_velocity(ctx, cfg, intermediates):
     th = cfg.entry.oi_velocity_threshold
 
     if ce_vel > th and s6 > 0:
-        return 1, (
-            f"CE OI building {ce_vel:+.2%} + call buying — institutional accumulation"
-        )
+        return 1, f"CE OI building {ce_vel:+.2%} + call buying — institutional accumulation"
     if ce_vel > th and s6 < 0:
-        return -1, (
-            f"CE OI building {ce_vel:+.2%} + call writing — institutional writer trap"
-        )
+        return -1, f"CE OI building {ce_vel:+.2%} + call writing — institutional writer trap"
     if ce_vel < -th and s6 > 0:
         return 0.5, f"CE OI unwinding {ce_vel:+.2%} — short covering"
     if pe_vel > th and s7 < 0:
-        return -1, (
-            f"PE OI building {pe_vel:+.2%} + put buying — bearish accumulation"
-        )
+        return -1, f"PE OI building {pe_vel:+.2%} + put buying — bearish accumulation"
     if pe_vel > th and s7 > 0:
-        return 1, (
-            f"PE OI building {pe_vel:+.2%} + put writing — institutional support"
-        )
+        return 1, f"PE OI building {pe_vel:+.2%} + put writing — institutional support"
     if pe_vel < -th and s7 < 0:
         return -0.5, f"PE OI unwinding {pe_vel:+.2%} — put covering"
     return 0, f"OI velocity below threshold (CE {ce_vel:+.2%}, PE {pe_vel:+.2%})"
@@ -3678,6 +3671,10 @@ def _compute_oi_zscore(ctx, cfg, intermediates):
     symbol = ctx.get("symbol", "")
     if not chain_rows or not oi_z_buffers or not symbol:
         return None
+    # Without an OI-change series net_oi is exactly 0.0 — feeding that would bias the
+    # z-score baseline with a fabricated observation.
+    if not _has_oi_change_basis(chain_rows):
+        return None
     if symbol not in oi_z_buffers:
         oi_z_buffers[symbol] = RollingZ(maxlen=cfg.signal.oi_z_buffer_maxlen)
     net_oi = sum(float(r.get("ce_oi_chg", 0) or 0) for r in chain_rows) + \
@@ -3761,8 +3758,7 @@ def _compute_oi_rejection_zone(ctx, cfg, intermediates):
     if near_wall == "call":
         s = -s
     dir_label = "bearish" if s < 0 else "bullish" if s > 0 else "neutral"
-    return s, (f"OI Rejection Zone wall={near_wall} z={wall_z:.2f} "
-               f"touches={active_count}/{lookback}scans ({dir_label})")
+    return s, (f"OI Rejection Zone wall={near_wall} z={wall_z:.2f} touches={active_count}/{lookback}scans ({dir_label})")
 
 OI_REJECTION_ZONE = StatisticSpec(name="OI Rejection Zone", compute=_compute_oi_rejection_zone, score_max=0, tier="fast")
 
@@ -3783,11 +3779,9 @@ STATISTIC_REGISTRY: list[StatisticSpec] = [
 ]
 
 
-# P1-b: the full fast-tier score budget when every feed is healthy. score() divides
-# fast_raw by the budget of the specs that were ACTUALLY available this scan, so a
-# shrinking denominator inflates the normalized score — losing greeks/GEX/IV to a rate
-# limit makes thinner evidence read as HIGHER conviction. Comparing the live budget
-# against this nominal gives the coverage ratio the entry gate needs.
+# Full fast-tier budget when every feed is healthy. score() divides by the budget of the
+# specs actually available, so a shrinking denominator inflates the score — this nominal
+# gives the coverage ratio the entry gate compares against.
 NOMINAL_FAST_MAX: float = sum(
     spec.score_max
     for spec in (*INDICATOR_REGISTRY, *STATISTIC_REGISTRY)
@@ -3818,11 +3812,7 @@ class SignalEngine:
             self._oi_zone_state.clear()
 
     @staticmethod
-    def iv_rank(
-        current_iv: float | None,
-        iv_52w_low: float | None,
-        iv_52w_high: float | None,
-    ) -> float | None:
+    def iv_rank(current_iv: float | None, iv_52w_low: float | None, iv_52w_high: float | None) -> float | None:
         if current_iv is None or iv_52w_low is None or iv_52w_high is None:
             return None
         if iv_52w_high <= iv_52w_low:
@@ -3915,11 +3905,9 @@ class SignalEngine:
         trap_score = min(100, trap_score)
 
         # ── Final Score ──────────────────────────────────────────────────────
-        # STEP 3 — Two-stage combine: fast (L2-5) drives direction/magnitude directly.
-        # Slow (L1) no longer adds points; it only dampens fast_raw via confirm_mult
-        # when disagreeing (bounded by slow_disagree_floor), mult=1.0 when agreeing or
-        # neutral. Fixes old flat-sum coupling where lagging technicals diluted live
-        # options-statistical reads.
+        # Two-stage combine: fast (L2-5) sets direction and magnitude; slow (L1) only
+        # dampens fast_raw via confirm_mult on disagreement (floored by
+        # slow_disagree_floor), mult=1.0 when agreeing or neutral.
         fast_components = [c for c in components if c.tier == "fast" and c.available and c.score_max > 0]
         slow_components = [c for c in components if c.tier == "slow" and c.available and c.score_max > 0]
 
@@ -3963,11 +3951,8 @@ class SignalEngine:
         elif effective_min_score > 100:
             effective_min_score = 100
 
-        # P1-b: base_score divides by the AVAILABLE fast budget, so a degraded feed
-        # inflates it — e.g. fast_raw=3 scores 21 at full coverage (FAST_MAX=14) but 50
-        # when greeks/GEX/IV drop out (FAST_MAX=6). _fetch_option_greeks_cached returns
-        # None on a rate-limit miss, which is exactly when the market is moving fastest.
-        # Gate before trap/score so a thin scan can never reach EXECUTE.
+        # base_score divides by the AVAILABLE fast budget, so a degraded feed inflates it
+        # (fast_raw=3 scores 21 at FAST_MAX=14, but 50 at 6). Gate before trap/score.
         fast_coverage = (FAST_MAX / NOMINAL_FAST_MAX) if NOMINAL_FAST_MAX > 0 else 0.0
 
         if fast_coverage < cfg.signal.min_fast_coverage:
@@ -3991,10 +3976,8 @@ class SignalEngine:
         else:
             signal = "NO_TRADE"
 
-        # Shadow comparison: what final_score would have been under the pre-Step-3
-        # flat-sum (slow adding points directly, MAX_RAW_SCORE=FAST_MAX+SLOW_MAX).
-        # Logged so cfg.entry.min_score can be recalibrated from the real distribution
-        # of this gap across a live session instead of the theoretical ~1.21x estimate.
+        # Shadow score under a flat fast+slow sum, logged so cfg.entry.min_score can be
+        # recalibrated from the live distribution of this gap, not a theoretical estimate.
         _old_max = FAST_MAX + SLOW_MAX
         _old_raw = fast_raw + slow_raw
         _old_score = int(max(-100, min(100, (_old_raw / (_old_max * PRACTICAL_ALIGNMENT_FACTOR)) * 100))) if _old_max > 0 else 0
@@ -4041,6 +4024,10 @@ class DataFetcher:
         self._quote_lock = threading.Lock()
         # Per-symbol expiry list cache (called at most once per symbol per strategy lifecycle).
         self._expiry_list_cache: dict[str, list[str] | None] = {}
+        # Previous session's closing OI per option leg. Keyed by symbol, valid for the
+        # trading day; None is cached too, so a leg that has no daily bar is not retried.
+        self._prev_day_oi_cache: dict[str, float | None] = {}
+        self._prev_day_oi_date: str = ""
 
     def clear_greeks_cache(self, symbol: str | None = None) -> None:
         """Clear cached option greeks. Called once per scan to avoid stale reads."""
@@ -4096,6 +4083,44 @@ class DataFetcher:
         except Exception as exc: err(f"[DATA] optiongreeks error for {option_symbol}: ", exc)
         return None
 
+    def fetch_prev_day_oi(self, option_symbol: str) -> float | None:
+        """Previous session's closing OI for one option leg, or None if unavailable.
+
+        Reads the daily-interval history and takes the last bar strictly before today.
+        history_service guarantees an `oi` column but fills it with 0 when the broker
+        sends none, so a 0 is treated as "no data" rather than as a real zero-OI close.
+        Cached for the trading day — the previous close cannot change.
+        """
+        today = get_ist_now().strftime("%Y-%m-%d")
+        if self._prev_day_oi_date != today:
+            self._prev_day_oi_cache.clear()
+            self._prev_day_oi_date = today
+        if option_symbol in self._prev_day_oi_cache:
+            return self._prev_day_oi_cache[option_symbol]
+
+        value: float | None = None
+        if self._acquire_quote_token():
+            try:
+                end = get_ist_now()
+                start = end - timedelta(days=10)   # spans weekends and a holiday run
+                df = self.client.history(
+                    symbol=option_symbol,
+                    exchange=self.config.market.fno_exchange,
+                    interval="D",
+                    start_date=start.strftime("%Y-%m-%d"),
+                    end_date=end.strftime("%Y-%m-%d"),
+                )
+                if isinstance(df, pd.DataFrame) and "oi" in df.columns and len(df) >= 2:
+                    prior = df[df.index.strftime("%Y-%m-%d") < today] if hasattr(df.index, "strftime") else df.iloc[:-1]
+                    if len(prior) > 0:
+                        oi = float(prior["oi"].iloc[-1] or 0)
+                        value = oi if oi > 0 else None
+            except Exception as exc:
+                dbg(f"[DOD-OI] daily history failed for {option_symbol}: {exc}")
+
+        self._prev_day_oi_cache[option_symbol] = value
+        return value
+
     def greeks_perf_snapshot(self, symbol: str | None = None) -> dict[str, float | int]:
         cache_size = len(self._greeks_cache)
         if symbol is not None:
@@ -4148,7 +4173,7 @@ class DataFetcher:
     def fetch_option_candles(self, option_symbol: str) -> pd.DataFrame | None:
         return self.fetch_candles(option_symbol, self.config.market.fno_exchange)
 
-    def fetch_option_chain(self, symbol: str, expiry: str | None = None) -> tuple[list[dict], str | None]:
+    def fetch_option_chain(self, symbol: str, expiry: str | None = None) -> tuple[list[dict], str | None, float]:
         """Fetch and flatten the option chain (CE/PE nested → flat dicts)."""
         try:
             ul_exchange = self.underlying_exchange(symbol)
@@ -4158,17 +4183,22 @@ class DataFetcher:
             kwargs["strike_count"] = self.config.market.strike_count
             raw = self.client.optionchain(**kwargs)
             if not raw:
-                return [], None
+                return [], None, 0.0
             if isinstance(raw, dict) and raw.get("status") == "error":
                 err(f"[DATA] Option chain API error for {symbol}: {raw.get('message', str(raw))}")
-                return [], None
+                return [], None, 0.0
             if isinstance(raw, dict):
                 expiry_date = raw.get("expiry_date")
+                # Sibling of expiry_date in the same payload. Upstream refuses to emit a
+                # success response without it (option_chain_service.py:330-335), so on
+                # success it is always present — but it can legitimately be 0, hence the
+                # `or 0` here and the caller's own truthiness guard.
+                ul_ltp = float(raw.get("underlying_ltp") or 0)
                 nested = raw.get("chain", raw.get("data", []))
             else:
-                nested, expiry_date = raw, None
+                nested, expiry_date, ul_ltp = raw, None, 0.0
             if not isinstance(nested, list):
-                return [], expiry_date
+                return [], expiry_date, ul_ltp
 
             flat_rows: list[dict] = []
             for entry in nested:
@@ -4195,16 +4225,16 @@ class DataFetcher:
                     "pe_oi":      float(pe.get("oi")  or 0),
                     "ce_volume":  float(ce.get("volume") or 0),
                     "pe_volume":  float(pe.get("volume") or 0),
-                    "ce_oi_chg":  float(ce.get("oi_change") or 0),
-                    "pe_oi_chg":  float(pe.get("oi_change") or 0),
+                    # ce_oi_chg / pe_oi_chg intentionally absent — upstream sends no
+                    # oi_change; smooth_chain_rows() derives them at history depth >= 2.
                     "ce_ltp_chg": (ce_ltp - ce_prev) if (ce_ltp and ce_prev) else 0.0,
                     "pe_ltp_chg": (pe_ltp - pe_prev) if (pe_ltp and pe_prev) else 0.0,
                     "lotsize":    ce.get("lotsize") or pe.get("lotsize") or 1,
                 })
-            return flat_rows, expiry_date
+            return flat_rows, expiry_date, ul_ltp
         except Exception as exc:
             err(f"[DATA] Option chain error for {symbol}", exc)
-            return [], None
+            return [], None, 0.0
 
     def _acquire_quote_token(self) -> bool:
         """Acquire a token from the quote API rate limiter.
@@ -4214,10 +4244,7 @@ class DataFetcher:
             now = time.time()
             # Refill tokens based on elapsed time
             elapsed = now - self._quote_last_refill
-            self._quote_tokens = min(
-                self._quote_burst,
-                self._quote_tokens + elapsed * self._quote_rate_limit_rps
-            )
+            self._quote_tokens = min(self._quote_burst, self._quote_tokens + elapsed * self._quote_rate_limit_rps)
             self._quote_last_refill = now
             if self._quote_tokens >= 1.0:
                 self._quote_tokens -= 1.0
@@ -4277,11 +4304,7 @@ class DataFetcher:
     def fetch_synthetic_future(self, symbol: str, expiry: str | None) -> float | None:
         if symbol in self.config.market.index_underlyings and expiry:
             try:
-                resp = self.client.syntheticfuture(
-                    underlying=symbol,
-                    exchange=self.underlying_exchange(symbol),
-                    expiry_date=expiry,
-                )
+                resp = self.client.syntheticfuture(underlying=symbol, exchange=self.underlying_exchange(symbol), expiry_date=expiry)
                 if resp and resp.get("status") == "success":
                     price = float(resp.get("synthetic_future_price") or 0)
                     return price if price else None
@@ -4348,10 +4371,7 @@ class DataFetcher:
             if prev_sign is not None and sign != prev_sign and prev_item is not None:
                 if cumsum != prev_cumsum:
                     frac = -prev_cumsum / (cumsum - prev_cumsum)
-                    gamma_flip = round(
-                        float(prev_item["strike"]) + frac * (float(item["strike"]) - float(prev_item["strike"])),
-                        2,
-                    )
+                    gamma_flip = round(float(prev_item["strike"]) + frac * (float(item["strike"]) - float(prev_item["strike"])), 2)
                 else:
                     gamma_flip = float(item["strike"])
                 break
@@ -4471,11 +4491,7 @@ class DataFetcher:
         if not hasattr(self.client, "expiry"):
             return None
         try:
-            resp = self.client.expiry(
-                symbol=symbol,
-                exchange=self.config.market.fno_exchange,
-                instrumenttype="options",
-            )
+            resp = self.client.expiry(symbol=symbol, exchange=self.config.market.fno_exchange, instrumenttype="options")
             if not resp:
                 return None
             if isinstance(resp, list):
@@ -4726,10 +4742,7 @@ class TrailSLEngine:
             spot_ltp = _spot_snap.spot_ltp if _spot_snap else None
 
             # Only require spot_ltp for modes that actually consume it
-            _needs_spot = (
-                cfg.trail.sl_method == "key_level"
-                or cfg.trail.tracking_mode == "spot"
-            )
+            _needs_spot = (cfg.trail.sl_method == "key_level" or cfg.trail.tracking_mode == "spot")
             _missing = []
             if opt_ltp is None:
                 _missing.append("option_ltp")
@@ -4750,16 +4763,11 @@ class TrailSLEngine:
             if self._data_skip_logged:
                 self._data_skip_logged.clear()
             confirmed_close = opt_ltp
-            # P1-a defence in depth: the WS boundary now rejects non-positive ticks,
-            # but the quote-API fallback and any snapshot written before this guard
-            # existed can still hold a 0. A 0 here would poison trail_peak_close.
+            # Defence in depth — the quote-API fallback can still hold a 0, which would
+            # poison trail_peak_close.
             if confirmed_close is None or confirmed_close <= 0:
                 continue
-            prior_trail_peak_close = (
-                pos.trail_peak_close
-                if pos.trail_peak_close is not None
-                else pos.entry_premium
-            )
+            prior_trail_peak_close = (pos.trail_peak_close if pos.trail_peak_close is not None else pos.entry_premium)
             is_new_confirmed_close_high = confirmed_close > prior_trail_peak_close
             if is_new_confirmed_close_high:
                 pos.trail_peak_close = confirmed_close
@@ -4847,12 +4855,7 @@ class TrailSLEngine:
                     _df_today = price_series_df[price_series_df.index.tz_localize(None).normalize() == pd.Timestamp(get_ist_now().date())]
                     if len(_df_today) >= cfg.trail.atr_period + 2:
                         _df_atr = _df_today
-                atr_series = ta.atr(
-                    _df_atr["high"],
-                    _df_atr["low"],
-                    _df_atr["close"],
-                    period=cfg.trail.atr_period,
-                )
+                atr_series = ta.atr(_df_atr["high"], _df_atr["low"], _df_atr["close"], period=cfg.trail.atr_period)
                 atr_val = ta_value(atr_series, -2)
                 if atr_val is not None and atr_val > 0:
                     return atr_val * cfg.trail.atr_mult
@@ -4985,10 +4988,9 @@ class TrailSLEngine:
         if not pos.premium_trail_active:
             new_sl = confirmed_close - step_pts
 
-            # Profit-lock ladder: guarantee minimum locked profit at activation
-            # ATR skips the artificial floor on first activation — first SL stays
-            # below BE so the position has room to breathe. The natural ratchet
-            # (confirmed_close - step_pts) lifts SL above BE as premium grows.
+            # Profit-lock ladder: guarantee a minimum locked profit at activation.
+            # ATR skips the floor so its first SL stays below BE and the position has
+            # room; the natural ratchet lifts SL above BE as premium grows.
             if cfg.trail.sl_method == "atr":
                 _lock_floor = 0.0  # no floor — SL sits at confirmed_close - step_pts
             else:
@@ -5168,13 +5170,7 @@ class TrailSLEngine:
         levels.sort()
         return levels
 
-    def _get_next_key_level(
-        self,
-        spot: float,
-        direction: str,
-        underlying: str,
-        current_level: float | None,
-    ) -> float | None:
+    def _get_next_key_level(self, spot: float, direction: str, underlying: str, current_level: float | None) -> float | None:
         """Return the next structure level the spot must cross to trigger a trail ratchet.
 
         CE: next level ABOVE current_level (upward targets).
@@ -5202,13 +5198,7 @@ class TrailSLEngine:
             below = [l for l in levels if l < current_level]
             return max(below) if below else None
 
-    def _process_key_level_trail(
-        self,
-        underlying: str,
-        pos: OptionPosition,
-        spot_ltp: float,
-        premium_ltp: float,
-    ) -> None:
+    def _process_key_level_trail(self, underlying: str, pos: OptionPosition, spot_ltp: float, premium_ltp: float) -> None:
         """Structure-driven trailing SL based on key strike levels.
 
         Logic:
@@ -5251,16 +5241,10 @@ class TrailSLEngine:
             # ACTIVATED → KEY_LEVEL (structure-driven variant)
             _advance_stage(pos, LifecycleStage.KEY_LEVEL)
             pos.kl_active = True
-            pos.kl_next_level = self._get_next_key_level(
-                spot_ltp, pos.option_type, underlying, None
-            )
+            pos.kl_next_level = self._get_next_key_level(spot_ltp, pos.option_type, underlying, None)
             pos.kl_levels_completed = 0
             pos.kl_level_premium = premium_ltp
-            inf(
-                f"[TRAIL] KeyLevel INIT {underlying}: "
-                f"next_level={pos.kl_next_level:.0f} | "
-                f"premium={premium_ltp:.2f}"
-            )
+            inf(f"[TRAIL] KeyLevel INIT {underlying}: next_level={pos.kl_next_level:.0f} | premium={premium_ltp:.2f}")
             return
 
         # ── Guard: no next level computed ───────────────────────────────────
@@ -5278,8 +5262,7 @@ class TrailSLEngine:
             # ── Level crossed — compute trail step ─────────────────────────
             pos.kl_levels_completed += 1
             # A7: structured key-level hit telemetry
-            inf(f"[TRAIL-KL] {underlying}: level={pos.kl_next_level:.0f}, "
-                f"completed={pos.kl_levels_completed}, premium={premium_ltp:.2f}")
+            inf(f"[TRAIL-KL] {underlying}: level={pos.kl_next_level:.0f}, completed={pos.kl_levels_completed}, premium={premium_ltp:.2f}")
             captured_range = premium_ltp - (pos.kl_level_premium or ep)
 
             if cfg.trail.key_level_trail_style == "capture_pct":
@@ -5300,10 +5283,7 @@ class TrailSLEngine:
                 if _broker_ok:
                     pos.sl = ep
                     pos.breakeven_moved = True
-                    inf(
-                        f"[TRAIL] KeyLevel BREAKEVEN {underlying}: "
-                        f"SL → entry ₹{ep:.2f} after {pos.kl_levels_completed} level(s)"
-                    )
+                    inf(f"[TRAIL] KeyLevel BREAKEVEN {underlying}: SL → entry ₹{ep:.2f} after {pos.kl_levels_completed} level(s)")
 
             # ── Compute new SL from captured range ─────────────────────────
             new_sl = premium_ltp - trail_step
@@ -5334,9 +5314,7 @@ class TrailSLEngine:
 
             # ── Advance to next level ──────────────────────────────────────
             pos.kl_level_premium = premium_ltp
-            pos.kl_next_level = self._get_next_key_level(
-                spot_ltp, pos.option_type, underlying, pos.kl_next_level
-            )
+            pos.kl_next_level = self._get_next_key_level(spot_ltp, pos.option_type, underlying, pos.kl_next_level)
 
         # Log distance to next level (only when no level was crossed this tick)
         if pos.kl_next_level is not None:
@@ -5358,12 +5336,7 @@ class StrikeSelector:
         self._config  = cfg
 
     @staticmethod
-    def simple_otm(
-        chain_rows: list[dict],
-        spot: float,
-        option_type: str,
-        otm_offset: int,
-    ) -> dict | None:
+    def simple_otm(chain_rows: list[dict], spot: float, option_type: str, otm_offset: int) -> dict | None:
         """Pick a slightly OTM strike that is `otm_offset` strikes away from ATM."""
         strikes = sorted({r["strike"] for r in chain_rows if "strike" in r})
         if not strikes:
@@ -5429,13 +5402,9 @@ class StrikeSelector:
             return None
 
         # ── Conviction scalar ─────────────────────────────────────────────────
-        # Maps [min_score, 100] → [0.0, 1.0] so STRIKE_DELTA_BASE is the actual
-        # minimum delta at the weakest tradeable signal, not a theoretical floor
-        # at score=0 which can never be reached after the min_score gate above.
-        conviction = min(
-            (abs_score - _min_score) / max(100.0 - _min_score, 1.0),
-            1.0,
-        )
+        # Maps [min_score, 100] → [0.0, 1.0], so STRIKE_DELTA_BASE is the delta at the
+        # weakest *tradeable* signal rather than at score=0, which the gate above blocks.
+        conviction = min((abs_score - _min_score) / max(100.0 - _min_score, 1.0), 1.0)
 
         # ── Piecewise continuous delta target ─────────────────────────────────
         # 0 - 50 score   → STRIKE_DELTA_BASE(0.25) to STRIKE_DELTA_PIVOT(0.50)  (near-OTM → ATM)
@@ -5452,11 +5421,7 @@ class StrikeSelector:
             target_delta = STRIKE_DELTA_PIVOT + fraction * (STRIKE_DELTA_MAX - STRIKE_DELTA_PIVOT)
         target_delta_low  = max(0.01, target_delta - STRIKE_DELTA_BAND)
         target_delta_high = min(0.99, target_delta + STRIKE_DELTA_BAND)
-        inf(
-            f"[STRIKE] conviction={conviction:.2f} "
-            f"target_delta={target_delta:.3f} "
-            f"band=[{target_delta_low:.2f},{target_delta_high:.2f}]"
-        )
+        inf(f"[STRIKE] conviction={conviction:.2f} target_delta={target_delta:.3f} band=[{target_delta_low:.2f},{target_delta_high:.2f}]")
 
         # ── Stage 1: Price-range filter ───────────────────────────────────────
         # Window scales from config; avoids hardcoding ±5%.
@@ -5666,9 +5631,8 @@ class RiskManager:
         self._pnl_at_last_fetch: float = 0.0
         self._pnl_history: deque[tuple[float, float]] = deque()  # (unix_timestamp, cumulative_pnl)
         self._slot_realized: dict[str, float] = {}   # slot_id -> realized P&L across partial exits (F97)
-        # P2-f: slots whose trade has been settled exactly once. _cleanup_stale_positions is
-        # reachable both from paths that already booked and from paths that never did, so the
-        # orphan estimate needs an explicit "was this settled?" ledger to stay idempotent.
+        # Slots settled exactly once — the orphan estimate needs this ledger because
+        # cleanup is reachable both from paths that booked and paths that did not.
         self._settled_slots: set[str] = set()
 
     def available_capital(self) -> float:
@@ -5740,13 +5704,9 @@ class RiskManager:
         if entry_in_flight > 0:
             return False, f"Entry already in flight for {symbol} ({entry_in_flight})"
         if cfg.risk.max_trades_per_session > 0 and trade_count >= cfg.risk.max_trades_per_session:
-            return False, (
-                f"Max trades/session reached ({trade_count}/{cfg.risk.max_trades_per_session})"
-            )
+            return False, (f"Max trades/session reached ({trade_count}/{cfg.risk.max_trades_per_session})")
         if cfg.risk.max_consecutive_losses > 0 and consecutive_losses >= cfg.risk.max_consecutive_losses:
-            return False, (
-                f"Loss streak limit reached ({consecutive_losses} consecutive losses)"
-            )
+            return False, f"Loss streak limit reached ({consecutive_losses} consecutive losses)"
         if cfg.risk.entry_cooldown_secs > 0 and symbol:
             if last_entry_time is not None:
                 elapsed = time.monotonic() - last_entry_time
@@ -5765,10 +5725,7 @@ class RiskManager:
                     f"₹{max_loss_amt:.0f}) | current P&L ₹{daily_pnl:.0f}"
                 )
         if cfg.risk.max_daily_loss_amount > 0 and daily_pnl <= -cfg.risk.max_daily_loss_amount:
-            return False, (
-                f"Daily loss limit hit (₹{cfg.risk.max_daily_loss_amount:.0f}) "
-                f"| current P&L ₹{daily_pnl:.0f}"
-            )
+            return False, (f"Daily loss limit hit (₹{cfg.risk.max_daily_loss_amount:.0f}) | current P&L ₹{daily_pnl:.0f}")
         if not drawdown_ok:
             return False, (
                 f"Drawdown rate limit: ₹{abs(window_pnl_change):.0f} lost in last "
@@ -5782,10 +5739,7 @@ class RiskManager:
         if cfg.market.no_new_trade_after:
             now_hm = _now_ist.strftime("%H:%M")
             if now_hm >= cfg.market.no_new_trade_after:
-                return False, (
-                    f"No new entries after {cfg.market.no_new_trade_after} IST "
-                    f"(current {now_hm}) — waiting for EOD"
-                )
+                return False, (f"No new entries after {cfg.market.no_new_trade_after} IST (current {now_hm}) — waiting for EOD")
         return True, ""
 
     def record_entry(self, symbol: str):
@@ -5800,14 +5754,12 @@ class RiskManager:
         if trade_pnl < 0:
             self._session_consecutive_losses += 1
             self._session_consecutive_wins = 0
-            inf(f"[RISK] Loss streak: {self._session_consecutive_losses} | "
-                  f"Daily P&L ₹{self._daily_pnl:.0f}")
+            inf(f"[RISK] Loss streak: {self._session_consecutive_losses} | Daily P&L ₹{self._daily_pnl:.0f}")
         else:
             self._session_consecutive_losses = 0
             self._session_consecutive_wins += 1
 
-    def record_exit(self, pnl: float, *, slot_id: str | None = None,
-                    closes_position: bool = True):
+    def record_exit(self, pnl: float, *, slot_id: str | None = None, closes_position: bool = True):
         """Call after a confirmed exit fill. Updates daily P&L and loss streak.
 
         F97: streak counts TRADES, not tranche slices. Partial exits
@@ -5827,7 +5779,7 @@ class RiskManager:
                 return
             trade_pnl = self._slot_realized.pop(slot_id, pnl) if slot_id else pnl
             if slot_id:
-                self._settled_slots.add(slot_id)   # P2-f: settled exactly once
+                self._settled_slots.add(slot_id)   # settled exactly once
             self._apply_streak(trade_pnl)
 
     def close_trade(self, slot_id: str) -> None:
@@ -5837,34 +5789,24 @@ class RiskManager:
         with self._state.state_lock:
             if slot_id not in self._slot_realized:
                 return
-            # P2-f: mark only on the settling path. A no-op here means "nothing to
-            # settle", which is NOT the same as "already settled" — a slot that was
-            # never booked at all must stay eligible for the orphan estimate.
+            # Mark only on the settling path — "nothing to settle" is not "already
+            # settled", and an unbooked slot must stay eligible for the orphan estimate.
             self._settled_slots.add(slot_id)
             self._apply_streak(self._slot_realized.pop(slot_id))
 
     def record_orphan_estimate(self, slot_id: str, est_pnl: float) -> bool:
         """P2-f: book an ESTIMATED P&L for a position reaped without a confirmed exit.
 
-        _cleanup_stale_positions previously wrote an orphan_cleanup journal row and called
-        close_trade(), but never record_exit() — so a position that was orphaned before any
-        exit was booked contributed nothing to _daily_pnl, _pnl_history or the win/loss
-        streak. The journal showed the loss; the risk engine did not. max_daily_loss,
-        max_consecutive_losses and the drawdown-rate limit all under-counted, and the
-        under-count is silent and unbounded.
+        Without this the orphan path writes a journal row but never reaches the risk
+        engine, so max_daily_loss, the loss streak and the drawdown limit under-count.
 
-        Idempotent by design, because that cleanup path is reachable two ways:
-          - the exit DID book (_finalize_exit calls record_exit before positions.pop, so an
-            exception in between leaves a settled slot in the book) -> must not double-count
-          - the exit never booked (e.g. an exception in place_exit between
-            cancel_broker_orders and the pending_exits write) -> must book
-        Booking unconditionally corrupts the first; skipping unconditionally under-counts
-        the second, and under-counting a loss is the more dangerous direction.
+        Idempotent, because the cleanup path is reachable both from exits that already
+        booked (exception between record_exit and positions.pop) and from exits that never
+        did. Booking twice corrupts the first; skipping under-counts the second, which is
+        the more dangerous direction.
 
-        Adds to _slot_realized rather than settling directly, so the caller's existing
-        close_trade() settles the streak once against partials + this estimate together.
-
-        Returns True when the estimate was booked, False when already settled.
+        Adds to _slot_realized so the caller's close_trade() settles once against partials
+        plus this estimate. Returns True when booked, False when already settled.
         """
         with self._state.state_lock:
             if slot_id in self._settled_slots:
@@ -6053,10 +5995,7 @@ class WebSocketManager:
         with self._subscribe_lock:
             self._desired.add((exchange, symbol))
             try:
-                self.client.subscribe_ltp(
-                    [{"exchange": exchange, "symbol": symbol}],
-                    on_data_received=self._on_ws_data,
-                )
+                self.client.subscribe_ltp([{"exchange": exchange, "symbol": symbol}], on_data_received=self._on_ws_data)
                 self._actual.add((exchange, symbol))
                 inf(f"[WS] Subscribed option {exchange}:{symbol}")
             except Exception as exc: err(f"[WS] Subscribe error {exchange}:{symbol}: ", exc)
@@ -6066,10 +6005,7 @@ class WebSocketManager:
         with self._subscribe_lock:
             self._desired.add((exch, symbol))
             try:
-                self.client.subscribe_ltp(
-                    [{"exchange": exch, "symbol": symbol}],
-                    on_data_received=self._on_ws_data,
-                )
+                self.client.subscribe_ltp([{"exchange": exch, "symbol": symbol}], on_data_received=self._on_ws_data)
                 self._actual.add((exch, symbol))
                 inf(f"[WS] Subscribed spot {exch}:{symbol}")
             except Exception as exc: err(f"[WS] Subscribe spot error {symbol}: ", exc)
@@ -6123,9 +6059,8 @@ class WebSocketManager:
         inner_data = data.get("data") if isinstance(data.get("data"), dict) else data
         
         symbol = inner_data.get("symbol") or data.get("symbol", "")
-        # None-aware read, not `or`: a legitimate inner ltp of 0 must reach the
-        # positivity guard below and be rejected, not be silently swapped for the
-        # root key (which happens to be absent today — an accident, not a guard).
+        # None-aware, not `or` — an inner ltp of 0 must reach the guard below, not be
+        # swapped for the root key.
         ltp = inner_data.get("ltp")
         if ltp is None:
             ltp = data.get("ltp")
@@ -6137,16 +6072,8 @@ class WebSocketManager:
         except (TypeError, ValueError):
             return
 
-        # P1-a: a non-positive premium is never a real option print. Upstream broker
-        # streaming adapters default a MISSING price field to 0.0 rather than omitting
-        # it, so a partial/heartbeat/depth-only frame arrives here as ltp=0.0:
-        #   openalgo/broker/aliceblue/streaming/aliceblue_mapping.py:139
-        #   openalgo/broker/dhan/streaming/dhan_adapter.py:836
-        #   openalgo/broker/angel/streaming/angel_adapter.py:768
-        #   openalgo/broker/deltaexchange/streaming/delta_adapter.py:469
-        # Unguarded, 0.0 satisfies `ltp <= pos.sl` in _check_premium_trail and fires an
-        # unconditional MARKET SELL. Reject before the snapshot write so the bad price
-        # cannot reach the trail engine either.
+        # Reject non-positive ticks before the snapshot write — broker adapters default
+        # a missing price to 0.0, and 0 satisfies `ltp <= pos.sl` (fires a MARKET SELL).
         if ltp <= 0:
             self._bad_tick_count += 1
             if self._bad_tick_count <= 5 or self._bad_tick_count % 100 == 0:
@@ -6215,16 +6142,13 @@ class WebSocketManager:
 
     def _check_premium_trail(self, underlying: str, pos: OptionPosition, ltp: float) -> None:
         cfg = self.config
-        # P1-a: last line of defence before a MARKET SELL — never act on a bad price.
+        # Last line of defence before a MARKET SELL — never act on a bad price.
         if ltp <= 0:
             return
         if cfg.entry.delta_exit_threshold > 0 and not pos.exit_pending:
             live_delta = self._get_cached_delta(underlying, pos.symbol)
             if live_delta is not None and live_delta < cfg.entry.delta_exit_threshold:
-                inf(
-                    f"[WS] DEEP OTM EXIT {underlying}: delta {live_delta:.3f} "
-                    f"< threshold {cfg.entry.delta_exit_threshold:.3f}"
-                )
+                inf(f"[WS] DEEP OTM EXIT {underlying}: delta {live_delta:.3f} < threshold {cfg.entry.delta_exit_threshold:.3f}")
                 self._trigger_exit(underlying, f"DeepOTM_delta_{live_delta:.3f}", pos=pos)
                 return
         # Read SL/TGT under state_lock to avoid racing trail engine (HR-3)
@@ -6251,8 +6175,7 @@ class WebSocketManager:
                 inf(f"[WS] SPOT TRAIL SL HIT {underlying}: spot {spot_ltp:.2f} >= trail_sl_spot {pos.trail_sl_spot:.2f}")
                 self._trigger_exit(underlying, "spot_trail_sl_hit", pos=pos)
 
-    def _trigger_exit(self, underlying: str, reason: str,
-                      pos: OptionPosition | None = None) -> None:
+    def _trigger_exit(self, underlying: str, reason: str, pos: OptionPosition | None = None) -> None:
         normalized_reason = ExitReason.normalize(reason)
         with self._state.state_lock:
             if not pos or pos.exit_pending:
@@ -6287,12 +6210,9 @@ class WebSocketManager:
                     err("[WS] Stop-path disconnect error", _disc_exc)
                 break
             try:
-                # Persistent single-client architecture — SDK-aligned.
-                # Per OpenAlgo SDK docs: one client instance, one connect(), many subscriptions.
-                # Re-instantiating api() on every attempt spawns new internal SDK threads
-                # without cleaning up the old ones, exhausting the OS thread limit.
-                # Fix: reuse self.client (constructed once in BuyerEdgeStrategy.__init__);
-                # disconnect() the previous transport before reconnecting.
+                # One client instance, one connect(), many subscriptions (SDK contract).
+                # Re-instantiating api() per attempt leaks SDK threads until the OS limit,
+                # so reuse self.client and disconnect() the transport before reconnecting.
                 inf(f"[WS] Connecting... (active OS threads: {threading.active_count()})")
                 try:
                     self.client.disconnect()   # Release previous transport threads
@@ -6338,10 +6258,7 @@ class WebSocketManager:
                             if (exch, sym) not in self._desired:
                                 continue
                         try:
-                            self.client.subscribe_ltp(
-                                [{"exchange": exch, "symbol": sym}],
-                                on_data_received=self._on_ws_data,
-                            )
+                            self.client.subscribe_ltp([{"exchange": exch, "symbol": sym}], on_data_received=self._on_ws_data)
                             with self._subscribe_lock:
                                 if (exch, sym) in self._desired:
                                     self._actual.add((exch, sym))
@@ -6406,10 +6323,7 @@ class WebSocketManager:
                                     if (exch, sym) not in self._desired:
                                         continue
                                 try:
-                                    self.client.subscribe_ltp(
-                                        [{"exchange": exch, "symbol": sym}],
-                                        on_data_received=self._on_ws_data,
-                                    )
+                                    self.client.subscribe_ltp([{"exchange": exch, "symbol": sym}], on_data_received=self._on_ws_data)
                                     with self._subscribe_lock:
                                         if (exch, sym) in self._desired:
                                             self._actual.add((exch, sym))
@@ -6555,9 +6469,7 @@ class OrderManager:
                     self._known_order_ids = self._load_known_order_ids()
         return self._known_order_ids
 
-    def _reconcile_lost_placeorder(
-        self, symbol: str, action: str, qty: int, window_secs: int = 60
-    ) -> str | None:
+    def _reconcile_lost_placeorder(self, symbol: str, action: str, qty: int, window_secs: int = 60) -> str | None:
         """F81: placeorder() raised before a response was received — the broker may
         have processed the order anyway. Check orderbook() for a recent order
         matching (symbol, action, quantity) that isn't already in known_order_ids.
@@ -6700,15 +6612,10 @@ class OrderManager:
         else:
             tranche.sl_order_id = None
             tranche.tgt_order_id = None
-            # NOT clearing pos.sl_order_id / pos.tgt_order_id here:
-            # they belong to the runner tranche; this call processes a
-            # non-runner (guarded by caller) but the else branch fires
-            # when residual remains — clearing the runner's IDs would
-            # cause duplicate reissue on the next verify pass.
-        inf(
-            f"[PARTIAL] {underlying} {opt_sym}: filled {filled_qty} @ \u20b9{price:.2f} "
-            f"P&L \u20b9{tr_pnl:.0f} | residual {tranche.qty}"
-        )
+            # pos.sl_order_id / pos.tgt_order_id are deliberately left set — they belong
+            # to the runner tranche, and clearing them here would make the next verify
+            # pass reissue duplicates.
+        inf(f"[PARTIAL] {underlying} {opt_sym}: filled {filled_qty} @ \u20b9{price:.2f} P&L \u20b9{tr_pnl:.0f} | residual {tranche.qty}")
 
     def _raw_order_status(self, order_id: str) -> dict | None:
         """One-shot orderstatus call. Returns the full response dict (data layer)
@@ -6723,12 +6630,7 @@ class OrderManager:
             err(f"[ORDER] status error {order_id}: ", exc)
         return None
 
-    def poll_order_status(
-        self,
-        order_id: str,
-        max_retries: int | None = None,
-        sleep_secs: float | None = None,
-    ) -> dict | None:
+    def poll_order_status(self, order_id: str, max_retries: int | None = None, sleep_secs: float | None = None) -> dict | None:
         cfg = self.config
         max_r = max_retries if max_retries is not None else cfg.broker.order_status_max_retries
         slp   = sleep_secs  if sleep_secs  is not None else cfg.broker.order_poll_interval
@@ -6796,9 +6698,8 @@ class OrderManager:
         """
         opt_sym = opt_symbol or pos.symbol
         self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=True)
-        # P2-a: an unresolved exit price (0) would bank the FULL premium as loss against
-        # this strike+direction, potentially tripping max_strike_cum_loss_pts and blocking
-        # re-entry on a strike that never lost that much. Settle without accruing instead.
+        # Skip accrual on an unresolved price (0) — it would bank the full premium as
+        # loss and can trip max_strike_cum_loss_pts. Settle without accruing.
         if executed_price > 0:
             _pts_loss = max(0.0, pos.entry_premium - executed_price)
             self._state.accrue_strike_loss(pos.slot_id, opt_sym, pos.option_type, _pts_loss, pos.remaining_qty)
@@ -6839,16 +6740,14 @@ class OrderManager:
                 if not oid:
                     continue
                 try:
-                    resp = self.client.orderstatus(
-                        order_id=oid, strategy=self.config.broker.strategy_name
-                    )
+                    resp = self.client.orderstatus(order_id=oid, strategy=self.config.broker.strategy_name)
                     if isinstance(resp, dict) and resp.get("status") == "success":
                         data = resp.get("data") or resp
                         broker_stat = str(data.get("order_status", "")).lower()
                         if broker_stat in ("complete", "filled", "executed"):
                             broker_filled[f"{tr.tranche_id}_{attr_name}"] = {
                                 "order_id": oid,
-                                # P2-a: may be None — consumers resolve or estimate.
+                                # May be None — consumers resolve or estimate.
                                 "executed": self._resolve_fill_price(
                                     oid, pos.symbol, data,
                                     context=f"pre-cancel {attr_name} {underlying} t={tr.tranche_id}",
@@ -6866,9 +6765,7 @@ class OrderManager:
                 if not oid or key in broker_filled:
                     continue
                 try:
-                    resp = self.client.cancelorder(
-                        order_id=oid, strategy=self.config.broker.strategy_name
-                    )
+                    resp = self.client.cancelorder(order_id=oid, strategy=self.config.broker.strategy_name)
                     if isinstance(resp, dict) and resp.get("status") in ("success", "cancelled"):
                         dbg(f"[ORDER] Cancelled broker {attr_name} {oid} for {underlying} t={tr.tranche_id}")
                     else:
@@ -6884,9 +6781,7 @@ class OrderManager:
                 data = {}
                 for attempt in range(2):
                     try:
-                        resp = self.client.orderstatus(
-                            order_id=oid, strategy=self.config.broker.strategy_name
-                        )
+                        resp = self.client.orderstatus(order_id=oid, strategy=self.config.broker.strategy_name)
                         if isinstance(resp, dict) and resp.get("status") == "success":
                             data = resp.get("data") or resp
                             broker_stat = str(data.get("order_status", "")).lower()
@@ -6899,9 +6794,8 @@ class OrderManager:
                     dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
                     key = f"{tr.tranche_id}_{attr_name}"
                     if broker_stat in ("complete", "filled", "executed") and key not in broker_filled:
-                        # P2-a: symmetric with the cancelled branch below — the tradebook is
-                        # the trusted price source, orderstatus' average_price is not.
-                        # May be None; consumers must not treat that as a zero fill.
+                        # Tradebook is the trusted price source, not average_price. May be
+                        # None — consumers must not treat that as a zero fill.
                         executed_price = self._resolve_fill_price(
                             oid, pos.symbol, data,
                             context=f"post-cancel {attr_name} {underlying} t={tr.tranche_id}",
@@ -6960,11 +6854,8 @@ class OrderManager:
                     if broker_stat in ("complete", "filled", "executed"):
                         broker_filled[attr_name] = {
                             "order_id":    oid,
-                            # P2-a: may be None — consumers resolve or estimate.
-                            "executed":    self._resolve_fill_price(
-                                oid, pos.symbol, data,
-                                context=f"pre-cancel {attr_name} {underlying}",
-                            ),
+                            # May be None — consumers resolve or estimate.
+                            "executed":    self._resolve_fill_price(oid, pos.symbol, data, context=f"pre-cancel {attr_name} {underlying}"),
                             "order_status": broker_stat,
                         }
                         dbg(f"[ORDER] Broker {attr_name} already filled: {oid}")
@@ -7000,28 +6891,16 @@ class OrderManager:
             if broker_stat is not None:
                 dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
                 if broker_stat in ("complete", "filled", "executed") and attr_name not in broker_filled:
-                    # P2-a: symmetric with the cancelled branch below — the tradebook is
-                    # the trusted price source, orderstatus' average_price is not.
-                    # May be None; consumers must not treat that as a zero fill.
-                    executed_price = self._resolve_fill_price(
-                        oid, pos.symbol, data,
-                        context=f"post-cancel {attr_name} {underlying}",
-                    )
-                    broker_filled[attr_name] = {
-                        "order_id":    oid,
-                        "executed":    executed_price,
-                        "order_status": broker_stat,
-                    }
+                    # Tradebook is the trusted price source, not average_price. May be
+                    # None — consumers must not treat that as a zero fill.
+                    executed_price = self._resolve_fill_price(oid, pos.symbol, data, context=f"post-cancel {attr_name} {underlying}")
+                    broker_filled[attr_name] = {"order_id":    oid, "executed":    executed_price, "order_status": broker_stat}
                     dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
                 elif broker_stat in ("cancelled", "canceled", "rejected") and attr_name not in broker_filled:
                     # F100: cancel raced fill — cancelled status is not proof of no-fill; trade row proves fill.
                     _tb_price = self._fill_from_tradebook(oid, pos.symbol)
                     if _tb_price and _tb_price > 0:
-                        broker_filled[attr_name] = {
-                            "order_id":    oid,
-                            "executed":    _tb_price,
-                            "order_status": "complete",
-                        }
+                        broker_filled[attr_name] = {"order_id":    oid, "executed":    _tb_price, "order_status": "complete"}
                         err(f"[ORDER] CANCEL/FILL RACE on {attr_name} {oid}: broker reports "
                             f"'{broker_stat}' but tradebook shows a fill @ ₹{_tb_price:.2f} — "
                             f"treating as FILLED, suppressing duplicate SELL")
@@ -7068,19 +6947,12 @@ class OrderManager:
     def _sell_fill_from_tradebook(self, symbol: str, expect_qty: int) -> float | None:
         """Qty-weighted avg SELL price for `symbol`, when the tradebook is unambiguous.
 
-        P2-f: an orphaned position has no order_id left to look up (sl_order_id and
-        tgt_order_id being None is a precondition for reaping it), so _fill_from_tradebook
-        cannot be used. This scans by symbol instead.
+        An orphaned position has no order_id left (that is a precondition for reaping
+        it), so this scans by symbol instead of using _fill_from_tradebook.
 
-        Row shape is normalised by openalgo across brokers — symbol / action / quantity /
-        average_price (broker/{upstox,zerodha,angel,dhan}/mapping/order_data.py
-        transform_tradebook_data), so matching on action == SELL is portable.
-
-        Deliberately conservative: positionbook/tradebook are account-wide, not
-        strategy-scoped (documented platform gap), so another strategy's SELL on the same
-        strike could appear here. Returns None unless the summed SELL quantity matches the
-        quantity we expect to have exited, which makes an accidental cross-strategy match
-        unlikely. Caller falls back to a market estimate when this returns None.
+        Conservative by design: the tradebook is account-wide, so another strategy's SELL
+        on the same strike could appear. Returns None unless the summed SELL quantity
+        matches what we expect to have exited; the caller then estimates instead.
         """
         if not symbol or expect_qty <= 0 or not hasattr(self.client, "tradebook"):
             return None
@@ -7111,33 +6983,15 @@ class OrderManager:
             err(f"[CLEANUP] tradebook SELL lookup failed for {symbol}: ", exc)
             return None
 
-    def _resolve_fill_price(
-        self,
-        order_id: str | None,
-        symbol: str,
-        data: dict | None,
-        *,
-        context: str,
-    ) -> float | None:
+    def _resolve_fill_price(self, order_id: str | None, symbol: str, data: dict | None, *, context: str) -> float | None:
         """Resolve a trustworthy fill price, or None when it cannot be established.
 
-        P2-a: orderstatus' average_price is NOT authoritative and a 0 from it does not
-        mean "filled at zero". openalgo/services/orderstatus_service.py:182-246
-        initialises average_price = 0.0 and populates it only from a SEPARATE tradebook
-        lookup gated on order_status == "complete"; when that lookup misses or races the
-        trade write it logs "No trade found for OrderID {orderid} in tradebook" and
-        still returns status=success + order_status=complete + average_price=0.0.
+        orderstatus' average_price is not authoritative — upstream fills it from a
+        separate tradebook lookup and returns success + complete + 0.0 when that misses.
+        Booking 0 as a fill computes pnl = (0 - entry) * qty, a phantom full-premium loss.
 
-        Booking that as a fill computes pnl = (0 - entry_premium) * qty — a phantom
-        full-premium loss that trips max_daily_loss, trips the consecutive-loss halt,
-        and corrupts the exit-type expectancy database. place_entry already refuses a
-        zero price ("Executed price is zero ... cannot register position"); the exit
-        and protection-fill paths did not.
-
-        Ladder: orderstatus average_price -> tradebook row (written before order_status
-        and independent of it, F100) -> None. Returning None is deliberate: the callers
-        defer to reconciliation, which is always recoverable, whereas booking a wrong
-        number is not.
+        Ladder: average_price -> tradebook row (independent of order_status, F100) -> None.
+        None is deliberate — callers defer to reconciliation, which is recoverable.
         """
         px = 0.0
         if isinstance(data, dict):
@@ -7147,8 +7001,7 @@ class OrderManager:
 
         tb_px = self._fill_from_tradebook(order_id, symbol) if order_id else None
         if tb_px and tb_px > 0:
-            inf(f"[ORDER] {context}: orderstatus average_price=0 for {order_id} — "
-                f"recovered ₹{tb_px:.2f} from tradebook")
+            inf(f"[ORDER] {context}: orderstatus average_price=0 for {order_id} — recovered ₹{tb_px:.2f} from tradebook")
             return tb_px
 
         err(f"[ORDER] {context}: no trustworthy fill price for {order_id} "
@@ -7184,9 +7037,7 @@ class OrderManager:
             return False
         # ORD-4: pre-check if broker SL already filled before sending modifyorder
         try:
-            pre = self.client.orderstatus(
-                order_id=pos.sl_order_id, strategy=self.config.broker.strategy_name
-            )
+            pre = self.client.orderstatus(order_id=pos.sl_order_id, strategy=self.config.broker.strategy_name)
             if isinstance(pre, dict) and pre.get("status") == "success":
                 _data = pre.get("data") or pre
                 if str(_data.get("order_status", "")).lower() in ("complete", "filled", "executed"):
@@ -7215,9 +7066,7 @@ class OrderManager:
                 # TOCTOU guard: modify may have failed because SL filled in the
                 # window between pre-check and modifyorder. Re-query immediately.
                 try:
-                    post = self.client.orderstatus(
-                        order_id=pos.sl_order_id, strategy=self.config.broker.strategy_name
-                    )
+                    post = self.client.orderstatus(order_id=pos.sl_order_id, strategy=self.config.broker.strategy_name)
                     if isinstance(post, dict) and post.get("status") == "success":
                         _post_data = post.get("data") or post
                         if str(_post_data.get("order_status", "")).lower() in ("complete", "filled", "executed"):
@@ -7230,9 +7079,7 @@ class OrderManager:
             err(f"[ORDER] modify_broker_sl error for {underlying}", exc)
             # TOCTOU guard: same immediate status check on exception
             try:
-                post = self.client.orderstatus(
-                    order_id=pos.sl_order_id, strategy=self.config.broker.strategy_name
-                )
+                post = self.client.orderstatus(order_id=pos.sl_order_id, strategy=self.config.broker.strategy_name)
                 if isinstance(post, dict) and post.get("status") == "success":
                     _post_data = post.get("data") or post
                     if str(_post_data.get("order_status", "")).lower() in ("complete", "filled", "executed"):
@@ -7279,20 +7126,15 @@ class OrderManager:
                 f"remaining_qty={pos.remaining_qty}"
             )
             self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
-            # P2-a: the P&L above already guards on executed_price > 0, but the strike-loss
-            # accrual did not — an unresolved 0 recorded the FULL premium as loss against
-            # this strike+direction and could trip max_strike_cum_loss_pts, blocking
-            # re-entry on a strike that never actually lost that much. Skip instead.
+            # Skip accrual on an unresolved price — 0 would bank the full premium as loss
+            # and can trip max_strike_cum_loss_pts on a strike that never lost that much.
             if executed_price > 0:
                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
                 self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
             else:
                 err(f"[ORDER] {underlying} t={tr.tranche_id}: exit price unresolved — skipping "
                     f"strike-loss accrual rather than banking a phantom full-premium loss")
-            tranche_record = TradeAnalytics.build_tranche(
-                underlying=underlying, pos=pos, tr=tr,
-                paper_trade=self.config.broker.paper_trade,
-            )
+            tranche_record = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
             self._journal.write(tranche_record)
             return
 
@@ -7367,16 +7209,13 @@ class OrderManager:
                             data = resp.get("data") or resp
                             broker_stat = str(data.get("order_status", "")).lower()
                             if broker_stat in ("complete", "filled", "executed"):
-                                # P2-a: resolve via tradebook, then last LTP. A 0 here would
-                                # book the full premium as strike loss and journal a 0 exit.
+                                # Resolve via tradebook, then last LTP — a 0 books the full
+                                # premium as strike loss.
                                 executed_price = self._resolve_fill_price(
                                     oid, pos.symbol, data,
                                     context=f"protection fill {attr_name} {underlying} t={tr.tranche_id}",
                                 ) or self._resolve_option_ltp(underlying, pos.symbol) or 0.0
-                                self._handle_broker_order_fill(
-                                    underlying, pos, attr_name, oid, raw_reason,
-                                    executed_price, tr=tr,
-                                )
+                                self._handle_broker_order_fill(underlying, pos, attr_name, oid, raw_reason, executed_price, tr=tr)
                         except Exception as exc:
                             err(f"[ORDER] check_broker_order_fills error ({underlying} t={tr.tranche_id}, {oid}): ", exc)
             # ── Check position-level orders (single-tranche mode only) ──
@@ -7397,15 +7236,13 @@ class OrderManager:
                     data = resp.get("data") or resp
                     broker_stat = str(data.get("order_status", "")).lower()
                     if broker_stat in ("complete", "filled", "executed"):
-                        # P2-a: resolve via tradebook, then last LTP. A 0 here would book
-                        # the full premium as strike loss and journal a 0 exit price.
+                        # Resolve via tradebook, then last LTP — a 0 books the full premium
+                        # as strike loss.
                         executed_price = self._resolve_fill_price(
                             oid, pos.symbol, data,
                             context=f"protection fill {attr_name} {underlying}",
                         ) or self._resolve_option_ltp(underlying, pos.symbol) or 0.0
-                        self._handle_broker_order_fill(
-                            underlying, pos, attr_name, oid, raw_reason, executed_price,
-                        )
+                        self._handle_broker_order_fill(underlying, pos, attr_name, oid, raw_reason, executed_price)
                 except Exception as exc: err(f"[ORDER] check_broker_order_fills error ({underlying}, {oid}): ", exc)
 
     def verify_sl_orders_active(self) -> None:
@@ -7423,9 +7260,7 @@ class OrderManager:
                 # ── Single-tranche: verify SL + LIMIT at position level ────
                 if not pos.sl_order_id:
                     err(f"[ORDER] SL MISSING (never placed) for {underlying} — re-issuing")
-                    self._place_protection_orders_sequential(
-                        underlying, pos, pos.symbol, pos.qty, pos.sl, pos.tgt
-                    )
+                    self._place_protection_orders_sequential(underlying, pos, pos.symbol, pos.qty, pos.sl, pos.tgt)
                     continue
                 self._verify_one_order(underlying, pos, "sl_order_id", "SL")
                 if pos.tgt_order_id:
@@ -7437,23 +7272,14 @@ class OrderManager:
                         continue
                     if tr.is_runner and not tr.sl_order_id:
                         err(f"[ORDER] SL MISSING (never placed) for {underlying} t={tr.tranche_id} — re-issuing")
-                        self._place_protection_orders_sequential(
-                            underlying, pos, pos.symbol, pos.qty, pos.sl, pos.tgt
-                        )
+                        self._place_protection_orders_sequential(underlying, pos, pos.symbol, pos.qty, pos.sl, pos.tgt)
                         continue
                     if tr.is_runner:
                         self._verify_one_order(underlying, pos, "sl_order_id", "SL", tr=tr)
                     if tr.tgt_order_id:
                         self._verify_one_order(underlying, pos, "tgt_order_id", "LIMIT", tr=tr)
 
-    def _verify_one_order(
-        self,
-        underlying: str,
-        pos: OptionPosition,
-        attr: str,
-        label: str,
-        tr: Tranche | None = None,
-    ) -> None:
+    def _verify_one_order(self, underlying: str, pos: OptionPosition, attr: str, label: str, tr: Tranche | None = None) -> None:
         """Check one broker order status; re-issue if cancelled/rejected/expired."""
         oid = getattr(tr, attr) if tr else getattr(pos, attr)
         if not oid:
@@ -7471,9 +7297,7 @@ class OrderManager:
                     setattr(tr, attr, None)
                 else:
                     setattr(pos, attr, None)
-                self._place_protection_orders_sequential(
-                    underlying, pos, pos.symbol, pos.qty, pos.sl, pos.tgt
-                )
+                self._place_protection_orders_sequential(underlying, pos, pos.symbol, pos.qty, pos.sl, pos.tgt)
         except Exception as exc:
             tag = f"t={tr.tranche_id} " if tr else ""
             err(f"[ORDER] verify_{label.lower()}_order error for {underlying} {tag}", exc)
@@ -7496,10 +7320,8 @@ class OrderManager:
         moneyness, _, tgt_mult, act_mult = EntryStopLossPolicy.get_moneyness_multipliers(entry_delta)
 
         resolved_sl_pts = sl_pts if (sl_pts is not None and sl_pts > 0) else cfg.entry.premium_stop_pts
-        # P1-d: a stop wider than the fill drove sl negative, which the broker API
-        # rejects at the schema layer — the SL-M was never placed, verify_sl_orders_active
-        # retried it forever, and `ltp <= pos.sl` could never fire. The position ran with
-        # no stop of any kind. Clamp to a positive trigger and say so loudly.
+        # A stop wider than the fill drives sl negative, which the API rejects — the
+        # SL-M is then never placed and the position runs unstopped. Clamp, and say so.
         sl = executed - resolved_sl_pts
         if sl < MIN_SL_TRIGGER:
             err(f"[ORDER] {underlying}: computed SL ₹{sl:.2f} is not a placeable trigger "
@@ -7584,15 +7406,7 @@ class OrderManager:
             2,
         )
 
-    def _place_protection_basket(
-        self,
-        underlying: str,
-        pos: OptionPosition,
-        option_symbol: str,
-        qty: int,
-        sl: float,
-        tgt: float
-    ) -> None:
+    def _place_protection_basket(self, underlying: str, pos: OptionPosition, option_symbol: str, qty: int, sl: float, tgt: float) -> None:
         cfg = self.config
         try:
             basket_orders = [
@@ -7804,10 +7618,7 @@ class OrderManager:
                     ltp = float(live_q.get("ltp", 0) or 0)
                     mid = (bid + ask) / 2 if (bid and ask) else ltp
                     if cfg.entry.preflight_min_bid > 0 and bid < cfg.entry.preflight_min_bid:
-                        inf(
-                            f"[ORDER] Pre-flight FAIL {option_symbol}: "
-                            f"bid ₹{bid:.2f} < min ₹{cfg.entry.preflight_min_bid:.2f}"
-                        )
+                        inf(f"[ORDER] Pre-flight FAIL {option_symbol}: bid ₹{bid:.2f} < min ₹{cfg.entry.preflight_min_bid:.2f}")
                         return False
                     if (
                         cfg.entry.preflight_max_spread_pct > 0
@@ -7961,10 +7772,7 @@ class OrderManager:
                             trr.tgt_order_id = None
                         pos.sl_order_id = None
                         pos.tgt_order_id = None
-                        self._place_protection_orders_sequential(
-                            underlying, pos, pos.symbol, pos.remaining_qty,
-                            pos.sl, pos.tgt,
-                        )
+                        self._place_protection_orders_sequential(underlying, pos, pos.symbol, pos.remaining_qty, pos.sl, pos.tgt)
                     dbg(f"[ORDER] Tranche exit SELL {_pending_oid} partially filled {fq_raw} — protection re-placed for residual")
                 elif bs in ("cancelled", "canceled", "rejected"):
                     with self._pending_tranche_exits_lock:
@@ -7986,10 +7794,7 @@ class OrderManager:
             self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
             _pts_loss = max(0.0, pos.entry_premium - executed_price)
             self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
-            tr_exit_record = TradeAnalytics.build_tranche(
-                underlying=underlying, pos=pos, tr=tr,
-                paper_trade=cfg.broker.paper_trade,
-            )
+            tr_exit_record = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=cfg.broker.paper_trade)
             self._journal.write(tr_exit_record)
             return
         # Place SELL first — keep protection active until fill confirmed
@@ -8041,10 +7846,7 @@ class OrderManager:
                 self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
                 self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
-                tr_exit_record = TradeAnalytics.build_tranche(
-                    underlying=underlying, pos=pos, tr=tr,
-                    paper_trade=cfg.broker.paper_trade,
-                )
+                tr_exit_record = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=cfg.broker.paper_trade)
                 self._journal.write(tr_exit_record)
                 return
         # Fill unconfirmed — entry already in _pending_tranche_exits, stays for reconciliation
@@ -8135,12 +7937,8 @@ class OrderManager:
         if not is_multi_tranche:
             for attr_name, info in broker_filled.items():
                 if isinstance(info, dict) and info.get("order_status") in ("complete", "filled", "executed"):
-                    # P2-a: `executed` is None when neither orderstatus nor the tradebook
-                    # could produce a price. The FILL is real (broker says complete), so the
-                    # SELL must still be skipped — but the price must not be booked as 0,
-                    # which would realise a phantom full-premium loss. Fall back to the last
-                    # known LTP and label the journal row estimated, matching the existing
-                    # FORCE_UNTRACK_EST / orphan_cleanup convention.
+                    # `executed` is None when no price could be resolved. The fill is real,
+                    # so still skip the SELL — but estimate rather than book 0 as a loss.
                     _px = info.get("executed")
                     _src = "broker_fill"
                     if _px is None or float(_px) <= 0:
@@ -8167,17 +7965,13 @@ class OrderManager:
                     if tr and not tr.is_exit_placed:
                         tr.is_exit_placed = True
                         tr.exit_reason = ExitReason.BROKER_FILLED
-                        # P2-a: `executed` may be None (no trustworthy price). The old
-                        # `if tr.exit_price > 0 else 0.0` booked a real fill as zero P&L and
-                        # then fed exit_price=0 into the strike-loss accrual as a full-premium
-                        # loss. Fall back to last known LTP so the tranche books a defensible
-                        # number, and skip accrual entirely when even that is unavailable.
+                        # `executed` may be None — estimate from last LTP rather than book a
+                        # real fill at 0, and skip accrual when even that is unavailable.
                         _tr_px = info.get("executed")
                         if _tr_px is None or float(_tr_px) <= 0:
                             _tr_px = self._resolve_option_ltp(underlying, pos.symbol)
                             if _tr_px and _tr_px > 0:
-                                err(f"[ORDER] Tranche {tr_id} filled at an unknown price — "
-                                    f"booking at last LTP ₹{_tr_px:.2f} (ESTIMATED)")
+                                err(f"[ORDER] Tranche {tr_id} filled at an unknown price — booking at last LTP ₹{_tr_px:.2f} (ESTIMATED)")
                         tr.exit_price = float(_tr_px) if (_tr_px and _tr_px > 0) else None
                         if tr.exit_price is None:
                             err(f"[ORDER] Tranche {tr_id} filled for {underlying} but no price "
@@ -8298,26 +8092,18 @@ class OrderManager:
                     self._state.exit_queue.discard(pos.slot_id)
                 return
 
-            # P1-e: cancel_broker_orders() at the top of this call already pulled the
-            # SL-M and the LIMIT target and set sl_order_id/tgt_order_id to None, so the
-            # position is COMPLETELY unprotected at this instant. Before this fix the
-            # only thing that put protection back was verify_sl_orders_active() on the
-            # next strategy cycle (signal_check_interval, default 60s) — and only because
-            # exit_pending is reset below, since that sweep skips exit_pending slots.
-            # Re-arm here so the unprotected window is the length of one placeorder call.
+            # cancel_broker_orders() above already pulled SL-M and LIMIT, so the position
+            # is unprotected right now. Re-arm here rather than waiting a strategy cycle.
             if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
                 err(f"[ORDER] Exit order not submitted for {underlying} — protection was "
                     f"cancelled for this attempt; re-arming SL-M/LIMIT before retry")
                 try:
-                    self._place_protection_orders_sequential(
-                        underlying, pos, pos.symbol, pos.remaining_qty, pos.sl, pos.tgt
-                    )
+                    self._place_protection_orders_sequential(underlying, pos, pos.symbol, pos.remaining_qty, pos.sl, pos.tgt)
                 except Exception as _rearm_exc:
                     err(f"[ORDER] Protection re-arm raised for {underlying}", _rearm_exc)
                 if pos.sl_order_id or pos.tgt_order_id:
                     pos.broker_protection = True
-                    dbg(f"[ORDER] Protection re-armed for {underlying} "
-                        f"(sl={pos.sl_order_id}, tgt={pos.tgt_order_id})")
+                    dbg(f"[ORDER] Protection re-armed for {underlying} (sl={pos.sl_order_id}, tgt={pos.tgt_order_id})")
                 else:
                     self._notify(
                         f"🚨 UNPROTECTED POSITION — {underlying}\n"
@@ -8353,14 +8139,11 @@ class OrderManager:
             return
 
         data           = filled.get("data") or filled
-        # P2-a: never book (0 - entry) * qty as a realised loss on an unpopulated
-        # average_price. Resolve via tradebook, or defer to reconciliation.
-        _resolved_px   = self._resolve_fill_price(
-            order_id, pos.symbol, data, context=f"exit {underlying}"
-        )
+        # Never book (0 - entry) * qty on an unpopulated average_price — resolve via
+        # tradebook, or defer to reconciliation.
+        _resolved_px   = self._resolve_fill_price(order_id, pos.symbol, data, context=f"exit {underlying}")
         if _resolved_px is None:
-            inf(f"[ORDER] Exit fill price unresolved for {underlying} (order {order_id}) — "
-                "leaving in pending_exits for reconciliation")
+            inf(f"[ORDER] Exit fill price unresolved for {underlying} (order {order_id}) — leaving in pending_exits for reconciliation")
             if sellable_qty < pos.remaining_qty:
                 pos.exit_pending = False
             return
@@ -8476,10 +8259,7 @@ class OrderManager:
                         inf(f"[PENDING] Entry {order_id} filled AFTER cutoff ({now_hm} >= {square_off_hm}) — queuing exit")
                         _cutoff_slot_id = None
                         with self._state.state_lock:
-                            pos = next(
-                                (p for p in self._state.positions.get_all(underlying) if p.symbol == pending_entry.symbol),
-                                None,
-                            )
+                            pos = next((p for p in self._state.positions.get_all(underlying) if p.symbol == pending_entry.symbol), None)
                             if pos:
                                 _cutoff_slot_id = pos.slot_id
                                 pos.exit_pending = True
@@ -8605,10 +8385,7 @@ class OrderManager:
                                     trr.tgt_order_id = None
                                 pos.sl_order_id = None
                                 pos.tgt_order_id = None
-                                self._place_protection_orders_sequential(
-                                    underlying, pos, opt_sym, pos.remaining_qty,
-                                    pos.sl, pos.tgt,
-                                )
+                                self._place_protection_orders_sequential(underlying, pos, opt_sym, pos.remaining_qty, pos.sl, pos.tgt)
                             # Clean up pending exit
                             with self._state.state_lock:
                                 self._state.pending_exits.pop(slot_id, None)
@@ -8651,10 +8428,7 @@ class OrderManager:
                                 trr.tgt_order_id = None
                             pos.sl_order_id = None
                             pos.tgt_order_id = None
-                            self._place_protection_orders_sequential(
-                                underlying, pos, opt_sym, pos.remaining_qty,
-                                pos.sl, pos.tgt,
-                            )
+                            self._place_protection_orders_sequential(underlying, pos, opt_sym, pos.remaining_qty, pos.sl, pos.tgt)
                         self._notify(
                             f"\U0001f6a8 {self.config.broker.strategy_name}: pending EXIT {order_id} {status} for {underlying} {opt_sym}\n"
                             "Position remains tracked; protection re-placed.",
@@ -8733,8 +8507,7 @@ class OptionsBuyerEdgeBot:
                 filled_qty = int(event.get("filled_quantity", 0) or 0)
                 avg_price  = float(event.get("average_price", 0) or 0)
                 if filled_qty > 0 and avg_price > 0:
-                    inf(f"[ORDER-STREAM] Confirmed fill for {order_id}: "
-                        f"qty={filled_qty} @ {avg_price} — completing entry immediately")
+                    inf(f"[ORDER-STREAM] Confirmed fill for {order_id}: qty={filled_qty} @ {avg_price} — completing entry immediately")
                     self.risk.record_entry(pending.underlying)
                     self.orders.register_filled_entry(
                         pending.underlying, pending.symbol, filled_qty,
@@ -8747,10 +8520,7 @@ class OptionsBuyerEdgeBot:
                     with self.state.state_lock:
                         self.state.pending_entries.pop(order_id, None)
                     return
-            inf(
-                f"[ORDER-STREAM] {order_id}: {os_status} "
-                f"{event.get('symbol', '')} (entry)"
-            )
+            inf(f"[ORDER-STREAM] {order_id}: {os_status} {event.get('symbol', '')} (entry)")
 
         # ── 2. Exit completion (NEW) ──────────────────────────────────
         if not handled:
@@ -8832,10 +8602,7 @@ class OptionsBuyerEdgeBot:
                         # Position-level match (single-tranche path)
                         if getattr(pos, attr_name, None) == order_id:
                             inf(f"[ORDER-STREAM] Protection fill detected: {attr_name} {order_id} → handling immediately")
-                            self.orders._handle_broker_order_fill(
-                                underlying, pos, attr_name, order_id,
-                                raw_reason, executed_price,
-                            )
+                            self.orders._handle_broker_order_fill(underlying, pos, attr_name, order_id, raw_reason, executed_price)
                             return
                         # Tranche-level match (multi-tranche path)
                         for tr in (pos.tranches or []):
@@ -8969,12 +8736,9 @@ class OptionsBuyerEdgeBot:
                 if restored_spot <= 0:
                     restored_spot = entry_px
 
-                # NOTE: entry_conviction defaults to 0.0 (not persisted), making trail
-                # activation more conservative post-restart (later trail activation).
-                # Try to recover delta from option greeks for accurate tgt/act_mult.
-                # F96: delta is at greeks.delta, never top-level. Top-level read always
-                # yielded 0.0 -> Deep-OTM (tgt_mult 0.5, act_mult 2.0). Zero delta now
-                # maps to None -> neutral Unknown band (1.0/1.0).
+                # entry_conviction is not persisted, so it restores as 0.0 — trail
+                # activation is deliberately later post-restart. Delta is recovered from
+                # greeks.delta (never top-level, F96); zero maps to None → Unknown band.
                 _restore_delta = None
                 try:
                     _greeks = self.client.optiongreeks(symbol=sym, exchange=cfg.market.fno_exchange)
@@ -8986,9 +8750,8 @@ class OptionsBuyerEdgeBot:
                 except Exception as _g_exc:
                     err(f"[STARTUP] optiongreeks failed for {sym}", _g_exc)
                 _mm_label, _, tgt_mult, act_mult = EntryStopLossPolicy.get_moneyness_multipliers(_restore_delta)
-                # P1-d: same unplaceable-trigger clamp as register_filled_entry — a
-                # restored position whose premium is below premium_stop_pts would
-                # otherwise rebuild with a negative SL the broker will not accept.
+                # Same clamp as register_filled_entry — a restored position priced below
+                # premium_stop_pts would otherwise rebuild with an unplaceable SL.
                 _restore_sl = entry_px - cfg.entry.premium_stop_pts
                 if _restore_sl < MIN_SL_TRIGGER:
                     err(f"[STARTUP] {sym}: restored SL ₹{_restore_sl:.2f} is not a placeable "
@@ -9107,15 +8870,10 @@ class OptionsBuyerEdgeBot:
             with self.state.state_lock:
                 if pos.exit_pending:
                     continue
-                # P2-h: the nested exit_lock here protected nothing — the write is already
-                # covered by state_lock, and unlike _trigger_exit this path never touches
-                # exit_queue, which is what exit_lock exists for. Holding a second lock for
-                # no reason only widens the deadlock surface.
+                # No exit_lock — the write is covered by state_lock, and this path never
+                # touches exit_queue.
                 pos.exit_pending = True
-            inf(
-                f"[TIME-EXIT] {ul}: held {held_minutes:.0f}m "
-                f">= max {cfg.market.max_hold_minutes}m — exiting (theta guard)"
-            )
+            inf(f"[TIME-EXIT] {ul}: held {held_minutes:.0f}m >= max {cfg.market.max_hold_minutes}m — exiting (theta guard)")
             self.orders.place_exit(ul, f"MaxHoldTime({cfg.market.max_hold_minutes}m)", slot_id=pos.slot_id)
 
     def _cleanup_stale_positions(self) -> None:
@@ -9142,24 +8900,12 @@ class OptionsBuyerEdgeBot:
                     continue
                 stale.append(pos)
 
-        # P2-f/DEADLOCK: the reap loop below used to run INSIDE the state_lock block
-        # above, but settle_strike_loss() and close_trade() both re-acquire state_lock,
-        # and state_lock is a plain threading.Lock (non-reentrant) — so the strategy
-        # thread blocked on itself the first time any position was reaped. This is the
-        # F59 failure mode, and it is unrecoverable: _cleanup_stale_positions is the
-        # first call in _strategy_thread, so the hang takes down pending-order
-        # reconciliation, trailing, EOD square-off and scanning together (only the WS
-        # thread and the broker's own SL-M survive). Reproduced with a 6s watchdog.
-        # Snapshot under the lock, do the work outside it — the same pattern
-        # _check_max_hold already uses. This also stops the journal write and the
-        # tradebook/quote calls below from running under the global state lock.
+        # Reap OUTSIDE state_lock — settle_strike_loss() and close_trade() re-acquire
+        # it, and state_lock is non-reentrant. Also keeps I/O off the global lock.
         for pos in stale:
-            # ── P2-f: resolve the exit price before booking anything ──────────
-            # The old estimate was `pos.sl or pos.entry_premium`, which assumes a
-            # stop-out. Post-P1-d pos.sl can legitimately be MIN_SL_TRIGGER (0.05),
-            # which would estimate an almost-total loss on a position that may well
-            # have exited near entry. Prefer real fills, then the last price we
-            # actually saw, and only then the assumed stop.
+            # ── Resolve the exit price before booking ─────────────────────────
+            # Prefer a real fill, then last seen price, then the assumed stop — pos.sl
+            # can be MIN_SL_TRIGGER, which would estimate a near-total loss.
             _px_src = "assumed_stop"
             _est_exit = self.orders._sell_fill_from_tradebook(pos.symbol, pos.remaining_qty)
             if _est_exit and _est_exit > 0:
@@ -9183,10 +8929,8 @@ class OptionsBuyerEdgeBot:
             # settle per-slot P&L or it leaks. No-op on already-settled slots.
             # F98b: settle pending strike loss accrue(s) before cleanup.
             self.state.settle_strike_loss(pos.slot_id)
-            # P2-f: the journal row alone left this P&L invisible to max_daily_loss,
-            # max_consecutive_losses and the drawdown-rate limit. Book it (idempotent —
-            # a no-op when the exit already settled), then let close_trade() settle the
-            # streak once against partials + this estimate together.
+            # A journal row alone leaves this P&L invisible to the risk limits. Book it
+            # (idempotent), then let close_trade() settle the streak once.
             _booked = self.risk.record_orphan_estimate(pos.slot_id, _est_pnl)
             self.risk.close_trade(pos.slot_id)
             if _booked:
@@ -9361,11 +9105,8 @@ class OptionsBuyerEdgeBot:
     def scan_underlying(self, symbol: str) -> None:
         """Full scan pipeline for one underlying.  Called from strategy thread.
 
-        Thin wrapper: the actual pipeline is _scan_underlying_impl(). This layer
-        exists solely so the chain-snapshot research log is written exactly once
-        per scan regardless of which of the pipeline's many early returns fires —
-        `finally` runs on every path, success or return, without re-indenting or
-        duplicating the ~230-line decision pipeline itself.
+        Thin wrapper over _scan_underlying_impl() so the chain snapshot is written
+        exactly once per scan whatever early return fires.
         """
         _ctx: dict[str, Any] = {}
         try:
@@ -9377,10 +9118,8 @@ class OptionsBuyerEdgeBot:
     def _scan_underlying_impl(self, symbol: str, _ctx: dict[str, Any]) -> None:
         """Full scan pipeline for one underlying.  Called only from scan_underlying().
 
-        _ctx is an out-parameter: populated with chain/greeks/decision context as
-        the pipeline computes it, read by scan_underlying()'s finally block after
-        this method returns (by any path). Populating a dict the caller already
-        holds needs no return-value plumbing through 13 existing early returns.
+        _ctx is an out-parameter, filled as the pipeline computes and read by
+        scan_underlying()'s finally — avoids plumbing returns through 13 early exits.
         """
         cfg    = self.config
         state  = self.state
@@ -9407,11 +9146,7 @@ class OptionsBuyerEdgeBot:
         # Keep greeks cache scoped to this scan cycle for fresh yet deduplicated API calls.
         self.fetcher.clear_greeks_cache(symbol)
 
-        def _log_greeks_perf(
-            stage:     str,
-            sep_count: int = 0,
-            sep_char:  str = "━",
-        ) -> None:
+        def _log_greeks_perf(stage:     str, sep_count: int = 0, sep_char:  str = "━") -> None:
             """Log greeks cache performance for this scan-cycle stage.
 
             Args:
@@ -9422,11 +9157,8 @@ class OptionsBuyerEdgeBot:
                            one call instead of two.
                 sep_char:  Separator character (default: ━).
             """
-            # ChainSnapshotWriter: this closure already runs at every terminal point
-            # in the pipeline (13 sites) with a stage label naming exactly why the
-            # scan ended where it did. Capturing it here — rather than adding a line
-            # at each of those 13 return sites — gives the snapshot an accurate
-            # `outcome` field for free, including every rejection reason.
+            # This closure already runs at all 13 terminal points with a stage label,
+            # so capturing here gives the snapshot its `outcome` for free.
             _ctx["outcome"] = stage
             perf = self.fetcher.greeks_perf_snapshot(symbol)
             dbg(
@@ -9444,12 +9176,6 @@ class OptionsBuyerEdgeBot:
         if _session_label != "mid-session":
             inf(f"[SCAN] {symbol}: session regime [{_session_label}]")
 
-        spot_q = self.fetcher.fetch_quote(symbol, self.fetcher.underlying_exchange(symbol))
-        spot   = float(spot_q.get("ltp", 0) or 0)
-        if not spot:
-            inf(f"[SCAN] {symbol}: no spot LTP")
-            return
-
         expiry = self.fetcher.fetch_target_expiry(symbol)
         if not expiry:
             expiry = self.fetcher.pick_nearest_expiry(symbol)
@@ -9460,18 +9186,21 @@ class OptionsBuyerEdgeBot:
                 return
 
         # Fetch option chain
-        chain_rows, expiry_used = self.fetcher.fetch_option_chain(symbol, expiry)
+        # Spot rides in on the chain payload — one fewer quote call per symbol per
+        # scan. Cost of the trade: the no-spot bail now happens after the expiry and
+        # chain fetches instead of before them.
+        chain_rows, expiry_used, spot = self.fetcher.fetch_option_chain(symbol, expiry)
         if not chain_rows:
             inf(f"[SCAN] {symbol}: empty option chain")
+            return
+        if not spot:
+            inf(f"[SCAN] {symbol}: no spot LTP")
             return
         if expiry_used and not expiry:
             expiry = expiry_used
 
-        # ChainSnapshotWriter: capture the RAW chain here. For the absolute fields
-        # (oi / volume / ltp) raw is strictly better than `smoothed` below — EWA
-        # smoothing is reproducible from a raw per-scan log (the deque replays
-        # exactly) while the reverse is not. chain_smooth_bars is recorded so a
-        # replay knows the window width.
+        # Capture RAW here — smoothing is reproducible from a raw per-scan log, the
+        # reverse is not. chain_smooth_bars records the window width.
         _ctx["chain_rows_raw"] = chain_rows
         _ctx["chain_smooth_bars"] = cfg.market.chain_smooth_bars
         _ctx["expiry"] = expiry
@@ -9485,18 +9214,8 @@ class OptionsBuyerEdgeBot:
         if not smoothed:
             return
 
-        # ChainSnapshotWriter: the raw chain is NOT sufficient on its own. Verified
-        # against openalgo/services/option_chain_service.py:497-537 — the upstream
-        # chain leg carries {symbol,label,ltp,bid,ask,bid_qty,ask_qty,open,high,low,
-        # prev_close,volume,oi,lotsize,tick_size} and NO oi_change field, so
-        # fetch_option_chain's `ce.get("oi_change")` always yields 0.0 in production.
-        # The only OI-change signal with any content is the one smooth_chain_rows()
-        # derives (EWA(oi) - oldest raw oi across the window), and that value feeds
-        # Call OI Flow (2) + Put OI Flow (2) + OI Velocity (1) = 5 of 14 fast points.
-        # Logging raw alone would record a column of zeros for the inputs to a third
-        # of the fast score. Record the derived fields the scorer actually consumed,
-        # keyed by strike — deliberately only the fields that differ from raw, not a
-        # second copy of symbols/bid/ask.
+        # Derived fields the scorer actually consumed — raw oi_chg is always 0
+        # (no upstream oi_change), and these feed 5 of the 14 fast-tier points.
         _ctx["chain_derived"] = [
             {
                 "strike":     r.get("strike"),
@@ -9529,11 +9248,22 @@ class OptionsBuyerEdgeBot:
         atm_ce_ltp  = float(atm_row.get("ce_ltp", 0) or 0)
         atm_pe_ltp  = float(atm_row.get("pe_ltp", 0) or 0)
 
-        # Prefetch greeks only for symbols that will be consumed in this scan:
-        # 1) ATM CE/PE (L3 delta component)
-        # 2) Strikes near ATM with OI > 0 (GEX gamma profile)
-        # 3) Liquidity-qualified strikes near ATM (strike selection delta gate)
-        # Limit to near-ATM strikes to stay within rate budget.
+        # Item 26: real day-over-day OI change, logged beside the in-session basis and
+        # never scored. Near-ATM legs only, one cached daily-history call per leg.
+        if cfg.market.dod_oi_enabled:
+            _i, _w = strikes.index(atm_k), cfg.market.dod_oi_max_strikes
+            _want = set(strikes[max(0, _i - _w):_i + _w + 1])
+            _prev_oi: dict[str, float | None] = {
+                _sym: self.fetcher.fetch_prev_day_oi(_sym)
+                for _r in smoothed if _r.get("strike") in _want
+                for _sym in (_r.get("ce_symbol"), _r.get("pe_symbol")) if _sym
+            }
+            if attach_dod_oi(smoothed, _prev_oi):
+                inf(f"{_dod_flow_note(smoothed)} | {symbol}")
+
+        # Prefetch greeks only for what this scan consumes — ATM CE/PE (L3 delta), near-ATM
+        # strikes with OI > 0 (GEX), and liquidity-qualified strikes (selection delta gate).
+        # Restricted to near-ATM to stay inside the rate budget.
         _atm_idx = strikes.index(atm_k)
         _near_strikes = set(strikes[max(0, _atm_idx - cfg.market.strike_count):
                                      _atm_idx + cfg.market.strike_count + 1])
@@ -9618,11 +9348,7 @@ class OptionsBuyerEdgeBot:
             state.prev_sf[symbol] = sf_ltp
         state.prev_spot[symbol] = spot
 
-        ce_delta, pe_delta = self.fetcher.fetch_atm_greeks(
-            symbol,
-            atm_row.get("ce_symbol"),
-            atm_row.get("pe_symbol"),
-        )
+        ce_delta, pe_delta = self.fetcher.fetch_atm_greeks(symbol, atm_row.get("ce_symbol"), atm_row.get("pe_symbol"))
         gex_levels = self.fetcher.fetch_gex_levels(symbol, chain_rows, spot)
 
         ce_bid = float(atm_row.get("ce_bid", 0) or 0) or None
@@ -9631,31 +9357,18 @@ class OptionsBuyerEdgeBot:
         pe_ask = float(atm_row.get("pe_ask", 0) or 0) or None
 
         # Fetch separate CE and PE IV Ranks (best fit = lower = cheaper for buying)
-        iv_ranks = self.fetcher.fetch_atm_iv_ranks(
-            symbol,
-            ce_symbol=atm_row.get("ce_symbol"),
-            pe_symbol=atm_row.get("pe_symbol"),
-        )
+        iv_ranks = self.fetcher.fetch_atm_iv_ranks(symbol, ce_symbol=atm_row.get("ce_symbol"), pe_symbol=atm_row.get("pe_symbol"))
         ce_iv_rank = iv_ranks.get("ce_iv_rank")
         pe_iv_rank = iv_ranks.get("pe_iv_rank")
         best_fit_iv_side = iv_ranks.get("best_fit")
         # Legacy fallback for backward compatibility
         iv_rank_val = ce_iv_rank if (ce_iv_rank is not None and pe_iv_rank is None) else (pe_iv_rank if pe_iv_rank is not None else None)
 
-        # ChainSnapshotWriter: capture PRE-smoothing greeks now — _smooth_greeks below
-        # reassigns ce_delta/pe_delta/ce_iv_rank/pe_iv_rank in place, so this is the
-        # only point where the raw (this-scan-only) values still exist as such.
-        _ctx["greeks_atm_raw"] = {
-            "ce_delta": ce_delta, "pe_delta": pe_delta,
-            "ce_iv_rank": ce_iv_rank, "pe_iv_rank": pe_iv_rank,
-        }
+        # Pre-smoothing greeks — _smooth_greeks below reassigns these in place.
+        _ctx["greeks_atm_raw"] = {"ce_delta": ce_delta, "pe_delta": pe_delta, "ce_iv_rank": ce_iv_rank, "pe_iv_rank": pe_iv_rank}
 
         # Smooth greeks across last N scan cycles — per-strike deque, no cross-contamination
-        _sg = _smooth_greeks(
-            state.get_greeks_history(symbol, atm_k),
-            lookback=3,
-            max_age_secs=cfg.market.greeks_smooth_max_age,
-        )
+        _sg = _smooth_greeks(state.get_greeks_history(symbol, atm_k), lookback=3, max_age_secs=cfg.market.greeks_smooth_max_age)
         ce_delta = _sg.get("ce_delta", ce_delta) or ce_delta
         pe_delta = _sg.get("pe_delta", pe_delta) or pe_delta
         ce_iv_rank = _sg.get("ce_iv_rank", ce_iv_rank)
@@ -9663,10 +9376,7 @@ class OptionsBuyerEdgeBot:
         # Recompute derived values after smoothing
         iv_rank_val = ce_iv_rank if (ce_iv_rank is not None and pe_iv_rank is None) else (pe_iv_rank if pe_iv_rank is not None else None)
 
-        _ctx["greeks_atm_smoothed"] = {
-            "ce_delta": ce_delta, "pe_delta": pe_delta,
-            "ce_iv_rank": ce_iv_rank, "pe_iv_rank": pe_iv_rank,
-        }
+        _ctx["greeks_atm_smoothed"] = {"ce_delta": ce_delta, "pe_delta": pe_delta, "ce_iv_rank": ce_iv_rank, "pe_iv_rank": pe_iv_rank}
 
         result = self.scorer.score(
             spot=spot,
@@ -9724,10 +9434,7 @@ class OptionsBuyerEdgeBot:
             inf(f"  ⚠ TRAP {_trap}  ·  {'  ·  '.join(result.trap_reasons)}")
 
         if _signal != "EXECUTE":
-            inf(
-                f"  {_sig_ico} {_signal}  —  not executing  "
-                f"(score {abs(_s)}/100, min {effective_min_score})"
-            )
+            inf(f"  {_sig_ico} {_signal}  —  not executing  (score {abs(_s)}/100, min {effective_min_score})")
             _log_greeks_perf("no-execute", sep_count=79)
             return
 
@@ -9865,10 +9572,7 @@ class OptionsBuyerEdgeBot:
 
         # ── Conviction scalar (single source of truth for all adaptive risk) ──────
         # Maps [min_score, 100] → [0.0, 1.0]. Used for SL, BE, and trail adaptation.
-        entry_conviction = max(0.0, min(
-            (abs(result.score) - effective_min_score) / max(100.0 - effective_min_score, 1.0),
-            1.0,
-        ))
+        entry_conviction = max(0.0, min((abs(result.score) - effective_min_score) / max(100.0 - effective_min_score, 1.0), 1.0))
 
         # ── Part 2: Conviction-Driven SL Sizing + Dynamic Cap ──────────────
         # Chain: base → conviction → floor → dynamic ceiling (applied LAST).
@@ -9878,18 +9582,10 @@ class OptionsBuyerEdgeBot:
         entry_sl_pts = base_sl_pts * sl_factor
         entry_sl_pts = max(5.0, entry_sl_pts)
 
-        # ── P1-c: moneyness-scaled ceiling ────────────────────────────────
-        # register_filled_entry sets tgt = executed + premium_target_pts * tgt_mult, so
-        # the TARGET already scales with moneyness. The ceiling did not, which had two
-        # consequences: (1) the flat cap discarded the delta-adaptive base for any
-        # premium above ~75, making EntryStopLossPolicy's sl_width_pct table inert in
-        # production; (2) identical config produced R:R 0.83 on Deep-OTM and 3.33 on
-        # Deep-ITM. Scaling the absolute ceiling by the SAME tgt_mult keeps R:R
-        # invariant across moneyness and lets the moneyness table reach the order.
-        # Delta unavailable -> mult 1.0 -> ceiling identical to pre-fix behaviour.
-        _mny_label, _, _sl_ceiling_mult, _ = EntryStopLossPolicy.get_moneyness_multipliers(
-            best.get("_abs_delta")
-        )
+        # ── Moneyness-scaled ceiling ──────────────────────────────────────
+        # The target scales by tgt_mult, so the ceiling does too — keeps R:R invariant
+        # across moneyness. Delta unavailable -> mult 1.0 -> flat ceiling.
+        _mny_label, _, _sl_ceiling_mult, _ = EntryStopLossPolicy.get_moneyness_multipliers(best.get("_abs_delta"))
         _base_ceiling = cfg.entry.max_sl_pts if cfg.entry.max_sl_pts > 0 else cfg.entry.premium_stop_pts
         _effective_ceiling = _base_ceiling * _sl_ceiling_mult
         if cfg.entry.max_sl_premium_ratio > 0:
@@ -9909,10 +9605,7 @@ class OptionsBuyerEdgeBot:
         effective_mult = self.risk.effective_lot_multiplier(cfg.entry.lot_multiplier)
         fixed_qty = max(1, effective_mult) * lotsize
         if cfg.entry.adaptive_sizing_enabled:
-            inf(
-                f"[SCAN] {symbol}: lot_mult={effective_mult} "
-                f"(base={cfg.entry.lot_multiplier}, wins={self.risk.consecutive_wins})"
-            )
+            inf(f"[SCAN] {symbol}: lot_mult={effective_mult} (base={cfg.entry.lot_multiplier}, wins={self.risk.consecutive_wins})")
 
         available  = self.risk.available_capital()
         if cfg.entry.risk_based_sizing_enabled:
@@ -9971,12 +9664,8 @@ class OptionsBuyerEdgeBot:
         """Build and persist one research-log record from what _scan_underlying_impl
         populated into _ctx, then discard it — the record lives only in the file.
 
-        Called from scan_underlying()'s `finally`, so this runs on every scan
-        outcome: EXECUTE, WATCH, NO_TRADE, and every specific rejection reason
-        (no-strike, qty-zero, spread-block, ...). If the pipeline returned before
-        any chain was fetched (no spot LTP, no expiry, empty chain, `outcome` never
-        set), there is nothing worth logging — return without writing rather than
-        emit a record with no chain in it.
+        Runs on every scan outcome, including each specific rejection reason. Writes
+        nothing when the pipeline returned before any chain was fetched.
         """
         if "chain_rows_raw" not in _ctx:
             return
@@ -10016,11 +9705,8 @@ class OptionsBuyerEdgeBot:
                 "straddle_price": _ctx.get("straddle_price"),
                 "chain_smooth_bars": _ctx.get("chain_smooth_bars"),
                 "chain_history_depth": _ctx.get("chain_history_depth"),
-                # `chain` is raw-as-fetched; `chain_derived` is what the scorer read
-                # after EWA smoothing. Both are needed — see the comment at the
-                # capture site: raw oi_chg is always 0.0 because openalgo's chain
-                # response has no oi_change field, so the derived value is the only
-                # OI-change signal that carries information.
+                # `chain` raw-as-fetched, `chain_derived` what the scorer read after
+                # smoothing — both needed, since raw oi_chg carries no signal.
                 "chain": _ctx.get("chain_rows_raw"),
                 "chain_derived": _ctx.get("chain_derived"),
                 "greeks_atm_raw": _ctx.get("greeks_atm_raw"),
@@ -10171,21 +9857,11 @@ class OptionsBuyerEdgeBot:
                         with self.state.state_lock:
                             eod_underlyings = list(self.state.positions.underlyings())
                         if eod_underlyings:
-                            inf(
-                                f"[SQUAREOFF] {cfg.market.square_off_time} reached — "
-                                f"closing {len(eod_underlyings)} position(s)"
-                            )
+                            inf(f"[SQUAREOFF] {cfg.market.square_off_time} reached — closing {len(eod_underlyings)} position(s)")
                             for ul in eod_underlyings:
                                 for pos in self.state.positions.get_all(ul):
-                                    # P2-h: the exit_pending test-and-set MUST be under
-                                    # state_lock. _trigger_exit (the WS SL/target path) claims
-                                    # a position with exactly this check under state_lock; doing
-                                    # it here under exit_lock guarded the same invariant with a
-                                    # DIFFERENT lock, so the two were never mutually exclusive.
-                                    # A WS stop tick landing at square-off time could pass its
-                                    # guard while this loop passed its own, and both would call
-                                    # place_exit for the same slot — the duplicate-SELL /
-                                    # naked-short hazard of F100, reachable at 15:13 daily.
+                                    # Claim under state_lock — _trigger_exit uses the same
+                                    # check, and a different lock is no mutual exclusion.
                                     with self.state.state_lock:
                                         if pos.exit_pending:
                                             continue
@@ -10222,9 +9898,11 @@ class OptionsBuyerEdgeBot:
                             self._send_live_pnl_alert(pnl_positions)
                             self._last_pnl_alert_time = now_ts
 
-                if LIVE_PNL_ALERT_INTERVAL > 0 and self._is_market_hours():
+                # Own interval, no market-hours gate — a safety net must not switch off
+                # with P&L alerts, and must outlast the 15:13 square-off.
+                if NAKED_SHORT_CHECK_INTERVAL > 0:
                     now_ts = time.time()
-                    if now_ts - self._last_naked_short_check_time >= LIVE_PNL_ALERT_INTERVAL:
+                    if now_ts - self._last_naked_short_check_time >= NAKED_SHORT_CHECK_INTERVAL:
                         self._check_naked_shorts()
                         self._last_naked_short_check_time = now_ts
 
@@ -10294,10 +9972,7 @@ class OptionsBuyerEdgeBot:
                 async with _websockets.connect(ws_url, open_timeout=10) as ws:
                     inf("[WS-TEST] Transport OK — WebSocket handshake succeeded")
 
-                    await ws.send(json.dumps({
-                        "action": "authenticate",
-                        "api_key": cfg.broker.api_key,
-                    }))
+                    await ws.send(json.dumps({"action": "authenticate", "api_key": cfg.broker.api_key}))
                     raw = await _aio.wait_for(ws.recv(), timeout=10)
                     resp = json.loads(raw)
                     status = resp.get("status") or resp.get("type", "")
@@ -10314,11 +9989,7 @@ class OptionsBuyerEdgeBot:
                         return
                     inf("[WS-TEST] Auth OK")
 
-                    await ws.send(json.dumps({
-                        "action": "subscribe",
-                        "symbols": [TEST_SYMBOL],
-                        "mode": "ltp",
-                    }))
+                    await ws.send(json.dumps({"action": "subscribe", "symbols": [TEST_SYMBOL], "mode": "ltp"}))
                     inf(f"[WS-TEST] Subscribed {TEST_SYMBOL['exchange']}:{TEST_SYMBOL['symbol']}")
 
                     deadline = _aio.get_event_loop().time() + TICK_WAIT
@@ -10415,8 +10086,7 @@ class OptionsBuyerEdgeBot:
             inf("[CONFIG] Order-stream DISABLED — platform ORDER_UPDATES_ENABLED is not TRUE."
                 " All order-status updates will use REST polling")
         else:
-            inf("[CONFIG] Order-stream DISABLED — script order_stream_enabled=False."
-                " All order-status updates will use REST polling")
+            inf("[CONFIG] Order-stream DISABLED — script order_stream_enabled=False. All order-status updates will use REST polling")
 
         self._check_open_positions_on_startup()
 
@@ -10464,10 +10134,7 @@ if __name__ == "__main__":
     config.validate()
 
     if not config.broker.api_key or config.broker.api_key == "openalgo-apikey":
-        inf(
-            "[WARNING] OPENALGO_API_KEY is not set in environment.\n"
-            "          Export it before running: export OPENALGO_API_KEY=your-key"
-        )
+        inf("[WARNING] OPENALGO_API_KEY is not set in environment.\n          Export it before running: export OPENALGO_API_KEY=your-key")
 
     bot = OptionsBuyerEdgeBot(config)
     bot.run()
