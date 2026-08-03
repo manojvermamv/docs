@@ -10,26 +10,6 @@ Deliverables (high-level)
 
 Priority feature list (implement in order)
 
-1) Production audit + analytics pipeline (JSONL → Parquet/DuckDB)
-- What: Emit structured JSONL for every tool call, proposal, approval, risk-guard decision, and order attempt. Add a daily/near-real-time ingest that turns JSONL into partitioned Parquet and/or DuckDB for analytics.
-- Why: fast, scalable analytics and forensic queries across many sessions.
-- Acceptance:
-  - A writer emits JSONL lines to configurable path MCP_AUDIT_LOG.
-  - scripts/ingest_audit.sh or scripts/ingest_audit_to_parquet.py converts files into date-partitioned Parquet in run/audit_parquet/ or writes into run/audit.duckdb.
-  - Provide a sample SQL query that returns top 20 blocked orders and their reasons.
-- Files to add/modify: mcp_gateway/core/audit.py, scripts/ingest_audit_to_parquet.py, docs/notes-audit.md
-- Test: unit test that a synthetic call writes expected JSON fields and the ingest script reads them into DuckDB.
-
-2) Distributed worker queue for heavy analyses & simulations
-- What: Move heavy tasks (sim sweeps, long analysis, model training) off the gateway into workers. Provide enqueue + status MCP tools. Provide local Redis-based worker implementation (RQ/Redis or Celery+Redis) and a simple multiprocessing fallback for single-host.
-- Why: keep gateway responsive, allow horizontal scaling.
-- Acceptance:
-  - An MCP tool analysis_enqueue(payload) returns task_id; analysis_status(task_id) returns state/result.
-  - Add worker entrypoint mcp_gateway/worker.py and a systemd/docker example in docs.
-  - Scheduler (in-process or cron) enqueues canary/ingest jobs rather than running synchronously.
-- Files: mcp_gateway/worker.py, mcp_gateway/domains/research/server.py (enqueue tool), docker/compose-worker.yml (example)
-- Test: enqueue a CPU-bound job and assert completion and result file creation.
-
 3) Shadow / dry-run & progressive rollout framework
 - What: A shadow mode where AI proposals (or model-driven changes) execute in parallel but do not affect real config or orders (observes hypothetical outcomes). Add a rollout mechanism to move proposal → staged apply → full apply with canary windows.
 - Why: safely validate automated changes at scale before they touch real trading.
