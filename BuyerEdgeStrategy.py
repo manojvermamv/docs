@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F93, F96–F99 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓ · Review P1-a…P1-e ✓ P2-a ✓ P2-f ✓ P2-g ✓ P2-h ✓ P3-a ✓
+# Closed Findings    : F1–F64, F71–F93, F96–F105 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓ · Review P1-a…P1-e ✓ P2-a ✓ P2-f ✓ P2-g ✓ P2-h ✓ P3-a ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -70,7 +70,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F93, F96–F101 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
+# Closed Findings:               F1–F64, F71–F93, F96–F105 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
 # External Audit:                F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
@@ -339,6 +339,25 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #       'cancelled'. The net-qty gate stopped it going short, but the slot then looped on suppressed SELLs and
 #       _cleanup_stale_positions could not reap it (that path requires exit_pending=True). Added the same
 #       _fill_from_tradebook() cross-check to the per-tranche post-cancel loop.
+# F102 ✓ Fixed (HIGH): PnlCurveWriter never wrote a file on any session — the per-cycle block
+#       called snapshot_cache.get_option(), a method that has never existed on SnapshotCache, so
+#       every cycle holding a position raised AttributeError into the broad per-cycle handler.
+#       Trading was unaffected, which is why it survived. Fixed by calling get_for_position(),
+#       the method the class already exposes for exactly this lookup.
+# F103 ✓ Fixed (MEDIUM): The journal stored only the normalised exit reason, so the 49-of-90
+#       OTHER bucket lost its original string permanently and BROKER_SL never appeared at all.
+#       Fixed by capturing exit_reason_raw at all five normalize() sites onto PositionAnalytics
+#       and writing it as a journal column; falls back to the normalised value, never blank.
+# F104 ✓ Removed (MEDIUM): paper_trade was a second simulator competing with OpenAlgo's analyzer,
+#       and the journal's mode column reported the config flag rather than execution — every row
+#       read LIVE while every fill was analyzer-simulated. 36 references gating entry/exit
+#       simulation, protection placement, the pre-flight check, the F100 net-qty guard and
+#       positionbook reconciliation; all dead at paper_trade=False. Feature and column removed.
+# F105 ✓ Fixed (MEDIUM): The live P&L Telegram alert read positionbook's `pnl`, which stops
+#       re-marking mid-position — frozen at -103.50 for 8 consecutive alerts on 4 Aug while the
+#       option moved -3.45 -> +2.05 -> -4.80 pts, a peak error of Rs 163.50 reported as loss when
+#       the position was in profit. Fixed by marking against the snapshot-cache tick (the same
+#       one pnl_curve uses) with the broker figure kept as a cross-check and divergence logged.
 #
 # ==============================================================================
 # CODING CONVENTIONS
@@ -749,7 +768,6 @@ class BrokerConfig:
     openalgo_username:    str   = "manojv097"
     broker_sl_orders:     bool  = True
     use_basket_protection: bool = True
-    paper_trade:          bool  = False
     order_status_max_retries:   int   = 15
     order_poll_interval: float = 5.0
     quote_api_rps:        float = 30.0
@@ -769,7 +787,6 @@ class BrokerConfig:
             openalgo_username=os.getenv("OPENALGO_USERNAME", cls.openalgo_username),
             use_basket_protection=os.getenv("BASKET_PROTECTION", str(cls.use_basket_protection)).lower() in ("1", "true", "yes"),
             broker_sl_orders=os.getenv("BROKER_SL_ORDERS", str(cls.broker_sl_orders)).lower() in ("1", "true", "yes"),
-            paper_trade=os.getenv("PAPER_TRADE", str(cls.paper_trade)).lower() in ("1", "true", "yes"),
             order_status_max_retries=int(os.getenv("ORDER_STATUS_MAX_RETRIES", str(cls.order_status_max_retries))),
             order_poll_interval=float(os.getenv("ORDER_POLL_INTERVAL", str(cls.order_poll_interval))),
             quote_api_rps=float(os.getenv("QUOTE_API_RPS", str(cls.quote_api_rps))),
@@ -1893,6 +1910,12 @@ class PositionAnalytics:
     peak_after_activation: float | None  = None
     mfe:                   float         = 0.0
     mae_after_activation:  float | None  = None
+    #: exit_reason_raw = the caller's string before ExitReason.normalize() maps it.
+    #: normalize() folds an unrecognised string to OTHER, so without this the
+    #: original is unrecoverable: 49 of 90 exits are OTHER and BROKER_SL never
+    #: appears, leaving the largest bucket unattributable. Costs one column,
+    #: gates nothing.
+    exit_reason_raw:       str           = ""
 
 
 @dataclass
@@ -2118,6 +2141,10 @@ class OptionPosition:
     def mae_after_activation(self) -> float | None: return self.analytics.mae_after_activation
     @mae_after_activation.setter
     def mae_after_activation(self, val): self.analytics.mae_after_activation = val
+    @property
+    def exit_reason_raw(self) -> str: return self.analytics.exit_reason_raw
+    @exit_reason_raw.setter
+    def exit_reason_raw(self, val): self.analytics.exit_reason_raw = str(val or "")
     # Tranche helpers
     @property
     def runner_tranche(self) -> "Tranche | None":
@@ -2241,7 +2268,6 @@ class TradeRecord:
     pnl_pts: float
     pnl_abs: float
     exit_reason: str
-    mode: str
     r_multiple: float
     entry_conviction: float
     moneyness: str
@@ -2265,10 +2291,14 @@ class TradeRecord:
     slot_id: str = ""
     tranche_id: str = ""
     entry_sl_source: str = ""
+    #: The caller's string; exit_reason is the same value after normalisation.
+    #: They differ only when normalize() did not recognise it — the case worth
+    #: keeping. See PositionAnalytics.exit_reason_raw.
+    exit_reason_raw: str = ""
 
     header: ClassVar[list[str]] = [
         "timestamp", "underlying", "option_symbol", "direction", "qty",
-        "entry", "exit", "pnl_pts", "pnl_abs", "exit_reason", "mode",
+        "entry", "exit", "pnl_pts", "pnl_abs", "exit_reason",
         "r_multiple", "entry_conviction", "moneyness",
         "exit_price_source",
         "trail_peak_close", "giveback_pts", "trail_activated", "trail_activation_sl",
@@ -2277,6 +2307,7 @@ class TradeRecord:
         "bars_to_activation", "peak_after_activation", "bars_after_activation",
         "max_favorable_excursion", "max_adverse_excursion_after_activation",
         "record_type", "slot_id", "tranche_id", "entry_sl_source",
+        "exit_reason_raw",
     ]
 
     def to_row(self) -> list[str]:
@@ -2291,7 +2322,6 @@ class TradeRecord:
             f"{self.pnl_pts:.2f}",
             f"{self.pnl_abs:.2f}",
             self.exit_reason,
-            self.mode,
             f"{self.r_multiple:.2f}",
             f"{self.entry_conviction:.2f}",
             self.moneyness,
@@ -2315,6 +2345,7 @@ class TradeRecord:
             self.slot_id,
             self.tranche_id,
             self.entry_sl_source,
+            self.exit_reason_raw,
         ]
 
 
@@ -2439,7 +2470,6 @@ class TradeAnalytics:
         pnl_abs: float,
         exit_reason: str,
         exit_price_source: str,
-        paper_trade: bool,
         sl_method: str,
         activation_lock_pct: float,
         tranche: Tranche | None = None,
@@ -2466,7 +2496,6 @@ class TradeAnalytics:
             pnl_pts=pnl_pts,
             pnl_abs=pnl_abs,
             exit_reason=exit_reason,
-            mode="PAPER" if paper_trade else "LIVE",
             r_multiple=r_multiple,
             entry_conviction=pos.entry_conviction,
             moneyness=pos.moneyness,
@@ -2490,10 +2519,13 @@ class TradeAnalytics:
             slot_id=pos.slot_id,
             tranche_id=tranche.tranche_id if tranche else "",
             entry_sl_source=pos.entry_sl_source,
+            # Falls back to the normalised value, never blank: an empty cell
+            # cannot be told apart from a path that captures no raw at all.
+            exit_reason_raw=pos.exit_reason_raw or exit_reason,
         )
 
     @staticmethod
-    def build_tranche(underlying: str, pos: OptionPosition, tr: Tranche, paper_trade: bool = False) -> "TradeRecord":
+    def build_tranche(underlying: str, pos: OptionPosition, tr: Tranche) -> "TradeRecord":
         """Build a TradeRecord for a single tranche partial exit."""
         pnl_abs = _calc_pnl(pos, tr.exit_price, qty=tr.qty) if tr.exit_price else 0.0
         risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
@@ -2510,7 +2542,6 @@ class TradeAnalytics:
             pnl_pts=(tr.exit_price or 0.0) - pos.entry_premium,
             pnl_abs=pnl_abs,
             exit_reason=tr.exit_reason or "partial_exit",
-            mode="PAPER" if paper_trade else "LIVE",
             r_multiple=r_multiple,
             entry_conviction=pos.entry_conviction,
             moneyness=pos.moneyness,
@@ -2537,7 +2568,7 @@ class TradeAnalytics:
         )
 
     @staticmethod
-    def build_entry(underlying: str, pos: OptionPosition, paper_trade: bool = False) -> "TradeRecord":
+    def build_entry(underlying: str, pos: OptionPosition) -> "TradeRecord":
         """Row written when a position opens. record_type carries a third value, so the
         column count is unchanged and _ensure_schema() does not archive the journal.
         Exit-shaped fields are zero/None — nothing has closed. Readers of realised P&L
@@ -2546,7 +2577,7 @@ class TradeAnalytics:
             timestamp=get_ist_now().strftime("%Y-%m-%d %H:%M:%S"),
             underlying=underlying, option_symbol=pos.symbol, direction=pos.option_type,
             qty=pos.core.qty, entry=pos.entry_premium, exit=0.0,
-            pnl_pts=0.0, pnl_abs=0.0, exit_reason="", mode="PAPER" if paper_trade else "LIVE",
+            pnl_pts=0.0, pnl_abs=0.0, exit_reason="",
             r_multiple=0.0, entry_conviction=pos.entry_conviction, moneyness=pos.moneyness,
             exit_price_source="", trail_peak_close=pos.entry_premium, giveback_pts=0.0,
             trail_activated=False, trail_activation_sl=None, sl_at_exit=pos.initial_sl,
@@ -6337,6 +6368,8 @@ class WebSocketManager:
 
     def _trigger_exit(self, underlying: str, reason: str, pos: OptionPosition | None = None) -> None:
         normalized_reason = ExitReason.normalize(reason)
+        if pos is not None:
+            pos.exit_reason_raw = reason
         with self._state.state_lock:
             if not pos or pos.exit_pending:
                 return
@@ -6770,7 +6803,6 @@ class OrderManager:
         self._state.accrue_strike_loss(pos.slot_id, opt_sym, pos.option_type, _pts_loss, filled_qty)
         tr_exit_record = TradeAnalytics.build_tranche(
             underlying=underlying, pos=pos, tr=filled_slice,
-            paper_trade=self.config.broker.paper_trade,
         )
         self._journal.write(tr_exit_record)
         # Decrement both the tranche and the position-level total
@@ -7197,8 +7229,6 @@ class OrderManager:
 
     def modify_broker_sl(self, underlying: str, new_trigger: float, slot_id: str | None = None) -> bool:
         """Modify broker SL-M trigger price. Returns True if the broker accepted the change."""
-        if self.config.broker.paper_trade:
-            return False  # no-op in paper trade mode
         pos = self._state.positions.slot(slot_id) if slot_id else self._state.positions.get_one(underlying)
         if not pos or not pos.sl_order_id:
             return False
@@ -7268,6 +7298,7 @@ class OrderManager:
     ) -> None:
         """Handle a filled broker order (SL or TGT) for a position or tranche."""
         reason = ExitReason.normalize(raw_reason)
+        pos.exit_reason_raw = raw_reason
         is_multi = len(pos.tranches) > 1
 
         if is_multi and tr and not tr.is_runner:
@@ -7301,7 +7332,7 @@ class OrderManager:
             else:
                 err(f"[ORDER] {underlying} t={tr.tranche_id}: exit price unresolved — skipping "
                     f"strike-loss accrual rather than banking a phantom full-premium loss")
-            tranche_record = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
+            tranche_record = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr)
             self._journal.write(tranche_record)
             return
 
@@ -7415,8 +7446,6 @@ class OrderManager:
         Detects externally cancelled orders and re-issues them.
         Handles both single-tranche (position-level) and multi-tranche modes.
         """
-        if self.config.broker.paper_trade:
-            return
         for underlying, pos in list(self._state.positions.all_items()):
             if pos.exit_pending:
                 continue
@@ -7521,7 +7550,7 @@ class OrderManager:
         with self._state.state_lock:
             self._state.positions.add(pos)
         # Without this a trade that opens and never exits leaves no trace at all.
-        self._journal.write(TradeAnalytics.build_entry(underlying, pos, cfg.broker.paper_trade))
+        self._journal.write(TradeAnalytics.build_entry(underlying, pos))
         # Link snapshot cache with the active option symbol
         self._state.snapshot_cache.set_option_symbol(underlying, option_symbol)
 
@@ -7537,7 +7566,7 @@ class OrderManager:
             f"ws_desired={list(self._ws._desired)}"
         )
 
-        if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
+        if cfg.broker.broker_sl_orders:
             if cfg.broker.use_basket_protection and hasattr(self.client, "basketorder") and not cfg.tranche.enabled:
                 self._place_protection_basket(underlying, pos, option_symbol, qty, sl, tgt)
             else:
@@ -7563,9 +7592,8 @@ class OrderManager:
         sl_amt = actual_sl_pts * qty
         tgt_amt = actual_target_pts * qty
         delta_str = f"{entry_delta:.2f}" if entry_delta is not None else "N/A"
-        mode_str = "PAPER" if cfg.broker.paper_trade else "TRADE"
         self._notify(
-            f"🚀 {direction_emoji} {mode_str} ENTRY: {underlying} @ {now_str}\n"
+            f"🚀 {direction_emoji} TRADE ENTRY: {underlying} @ {now_str}\n"
             f"🔹 Option: {option_symbol} (x{qty})\n"
             f"🎯 Fill Price: ₹{executed:.2f}\n"
             f"📊 {moneyness} | RRR: 1:{rrr} | Δ:{delta_str} | Conv:{entry_conviction:.0%}\n"
@@ -7735,7 +7763,6 @@ class OrderManager:
             underlying=underlying, pos=pos, exit_price=exit_price,
             pnl_abs=pnl_abs, exit_reason=exit_reason,
             exit_price_source=exit_price_source,
-            paper_trade=self.config.broker.paper_trade,
             sl_method=self.config.trail.sl_method,
             activation_lock_pct=self.config.trail.activation_lock_pct,
             record_type=record_type,
@@ -7762,22 +7789,10 @@ class OrderManager:
             dbg(f"[ORDER] {underlying} blocked by position guard: {reason}")
             return False
 
-        if cfg.broker.paper_trade:
-            executed = self._resolve_option_ltp(underlying, option_symbol) or spot * 0.01
-            inf(f"[PAPER] Simulated BUY {qty}x {option_symbol} @ ₹{executed:.2f}")
-            self._risk.record_entry(underlying)
-            self.register_filled_entry(
-                underlying, option_symbol, qty, spot, direction, executed,
-                sl_pts=resolved_sl_pts, entry_delta=entry_delta,
-                entry_conviction=entry_conviction,
-                entry_sl_source=entry_sl_source,
-            )
-            return True
-
         with self._state.state_lock:
             self._state.entry_in_flight[underlying] = self._state.entry_in_flight.get(underlying, 0) + 1
         try:
-            if cfg.entry.preflight_spread_check and not cfg.broker.paper_trade:
+            if cfg.entry.preflight_spread_check:
                 live_q = self._fetcher.fetch_quote(option_symbol, cfg.market.fno_exchange)
                 if live_q:
                     bid = float(live_q.get("bid", 0) or 0)
@@ -7950,20 +7965,6 @@ class OrderManager:
             else:
                 dbg(f"[ORDER] Tranche exit SELL {_pending_oid} status check failed — will retry")
             return
-        if cfg.broker.paper_trade:
-            executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
-            tr.is_exit_placed = True
-            tr.exit_reason = reason
-            tr.exit_price = executed_price
-            pnl = _calc_pnl(pos, executed_price, qty=tr.qty) if executed_price > 0 else 0.0
-            dbg(f"[ORDER] Signal-deterioration partial exit {underlying} t={tr.tranche_id}: "
-                f"\u20b9{executed_price:.2f} \u00d7 {tr.qty} | P&L \u20b9{pnl:.0f}")
-            self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
-            _pts_loss = max(0.0, pos.entry_premium - executed_price)
-            self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
-            tr_exit_record = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=cfg.broker.paper_trade)
-            self._journal.write(tr_exit_record)
-            return
         # Place SELL first — keep protection active until fill confirmed
         order_id = None
         try:
@@ -8013,7 +8014,7 @@ class OrderManager:
                 self._risk.record_exit(pnl, slot_id=pos.slot_id, closes_position=False)
                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
                 self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
-                tr_exit_record = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=cfg.broker.paper_trade)
+                tr_exit_record = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr)
                 self._journal.write(tr_exit_record)
                 return
         # Fill unconfirmed — entry already in _pending_tranche_exits, stays for reconciliation
@@ -8040,60 +8041,8 @@ class OrderManager:
         _advance_stage(pos, LifecycleStage.EXIT_PENDING)
         # Normalize exit reason to enum for consistent attribution
         norm_reason = ExitReason.normalize(reason)
+        pos.exit_reason_raw = reason
         dbg(f"[ORDER] Exiting {underlying} — reason: {reason} → {norm_reason}")
-
-        if cfg.broker.paper_trade:
-            executed_price = self._resolve_option_ltp(underlying, pos.symbol) or pos.entry_premium
-            exit_qty = self._sellable_qty(pos)
-            pnl = _calc_pnl(pos, executed_price, qty=exit_qty)
-            inf(f"[PAPER] Simulated SELL {exit_qty}x {pos.symbol} @ ₹{executed_price:.2f} | P&L ₹{pnl:.2f}")
-
-            if exit_qty < pos.remaining_qty:
-                for tr in list(pos.open_tranches):
-                    is_in_flight = False
-                    with self._pending_tranche_exits_lock:
-                        if f"{pos.underlying}_{tr.tranche_id}" in self._pending_tranche_exits:
-                            is_in_flight = True
-                    if not is_in_flight and not tr.is_exit_placed:
-                        tr.is_exit_placed = True
-                        tr.exit_price = executed_price
-                        tr.exit_reason = norm_reason
-                        tr_pnl = _calc_pnl(pos, executed_price, qty=tr.qty)
-                        self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
-                        _pts_loss = max(0.0, pos.entry_premium - executed_price)
-                        self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
-                        tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=True)
-                        self._journal.write(tr_rec)
-                with self._state.exit_lock:
-                    self._state.exit_queue.discard(pos.slot_id)
-                pos.exit_pending = False
-            else:
-                self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
-                                    exit_price_source="paper")
-
-            direction_emoji = "🔺 UP" if pos.option_type.upper() == "CE" else "🔻 DN"
-            emoji = "✅ PROFIT" if pnl >= 0 else "❌ LOSS"
-            risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
-            risk_amt = risk_pts * exit_qty
-            r_multiple = pnl / risk_amt if risk_amt > 0 else 0.0
-            hold_mins = max(0, int((get_ist_now() - pos.entry_time).total_seconds() / 60))
-            self._notify(
-                    f"{emoji} PAPER EXIT: {underlying}\n"
-                    f"📌 {norm_reason}\n"
-                    f"{direction_emoji} {pos.symbol}\n"
-                    f"🚪 ₹{pos.entry_premium:.2f} → ₹{executed_price:.2f}\n"
-                    f"💰 P&L: ₹{pnl:.0f} ({r_multiple:+.2f}R)\n"
-                    f"⏱ Hold: {hold_mins}m | Daily: ₹{self._risk.daily_pnl:.0f}",
-                    2,
-                )
-
-            if exit_qty >= pos.remaining_qty:
-                # Safety check: verify position was actually removed
-                if self._state.positions.slot(pos.slot_id):
-                    err(f"[CLEANUP] PAPER EXIT failed to remove {pos.symbol} from book — force-removing")
-                    with self._state.state_lock:
-                        self._state.positions.pop(pos.slot_id, None)
-            return
 
         broker_filled = {}
         if cfg.broker.broker_sl_orders:
@@ -8150,8 +8099,7 @@ class OrderManager:
                         self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
                         tr_exit_record = TradeAnalytics.build_tranche(
                             underlying=underlying, pos=pos, tr=tr,
-                            paper_trade=cfg.broker.paper_trade,
-                        )
+                                        )
                         self._journal.write(tr_exit_record)
                         dbg(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — P&L ₹{tr_pnl:.0f}")
             if pos.remaining_qty == 0:
@@ -8186,31 +8134,30 @@ class OrderManager:
         #   - suppress the SELL: always safe, naked-short risk is account-level
         #   - book the exit: NOT safe, another strategy may have netted the qty
         # So suppress and leave the slot tracked; reconciliation closes it later.
-        if not cfg.broker.paper_trade:
-            _held = self._broker_net_qty(pos.symbol)
-            if _held is not None:
-                if _held <= 0:
-                    err(f"[ORDER] SELL SUPPRESSED for {underlying}: broker account qty for "
-                        f"{pos.symbol} is {_held}, strategy expected {sellable_qty}. "
-                        f"Nothing to sell — sending it would open a short. Position stays "
-                        f"tracked; retrying next cycle.")
-                    if pos.slot_id not in self._reconcile_alerted:
-                        self._reconcile_alerted.add(pos.slot_id)
-                        self._notify(
-                            f"⚠️ Duplicate exit BLOCKED — {underlying}\n"
-                            f"{pos.symbol} broker qty={_held}, strategy expected {sellable_qty}\n"
-                            "No SELL sent (would go short). Position still tracked — will retry.\n"
-                            "If this repeats, reconcile the account manually.",
-                            8,
-                        )
-                    with self._state.exit_lock:
-                        self._state.exit_queue.discard(pos.slot_id)
-                    pos.exit_pending = False
-                    return
-                if _held < sellable_qty:
-                    inf(f"[ORDER] Clamping exit qty for {underlying}: broker holds {_held}, "
-                        f"strategy expected {sellable_qty} — selling {_held}")
-                    sellable_qty = _held
+        _held = self._broker_net_qty(pos.symbol)
+        if _held is not None:
+            if _held <= 0:
+                err(f"[ORDER] SELL SUPPRESSED for {underlying}: broker account qty for "
+                    f"{pos.symbol} is {_held}, strategy expected {sellable_qty}. "
+                    f"Nothing to sell — sending it would open a short. Position stays "
+                    f"tracked; retrying next cycle.")
+                if pos.slot_id not in self._reconcile_alerted:
+                    self._reconcile_alerted.add(pos.slot_id)
+                    self._notify(
+                        f"⚠️ Duplicate exit BLOCKED — {underlying}\n"
+                        f"{pos.symbol} broker qty={_held}, strategy expected {sellable_qty}\n"
+                        "No SELL sent (would go short). Position still tracked — will retry.\n"
+                        "If this repeats, reconcile the account manually.",
+                        8,
+                    )
+                with self._state.exit_lock:
+                    self._state.exit_queue.discard(pos.slot_id)
+                pos.exit_pending = False
+                return
+            if _held < sellable_qty:
+                inf(f"[ORDER] Clamping exit qty for {underlying}: broker holds {_held}, "
+                    f"strategy expected {sellable_qty} — selling {_held}")
+                sellable_qty = _held
 
         executed_price = 0.0
         order_id       = None
@@ -8261,7 +8208,7 @@ class OrderManager:
 
             # cancel_broker_orders() above already pulled SL-M and LIMIT, so the position
             # is unprotected right now. Re-arm here rather than waiting a strategy cycle.
-            if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
+            if cfg.broker.broker_sl_orders:
                 err(f"[ORDER] Exit order not submitted for {underlying} — protection was "
                     f"cancelled for this attempt; re-arming SL-M/LIMIT before retry")
                 try:
@@ -8269,7 +8216,6 @@ class OrderManager:
                 except Exception as _rearm_exc:
                     err(f"[ORDER] Protection re-arm raised for {underlying}", _rearm_exc)
                 if pos.sl_order_id or pos.tgt_order_id:
-                    pos.broker_protection = True
                     dbg(f"[ORDER] Protection re-armed for {underlying} (sl={pos.sl_order_id}, tgt={pos.tgt_order_id})")
                 else:
                     self._notify(
@@ -8341,7 +8287,7 @@ class OrderManager:
                     self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                     _pts_loss = max(0.0, pos.entry_premium - executed_price)
                     self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
-                    tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
+                    tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr)
                     self._journal.write(tr_rec)
 
                     for attr_name in ("sl_order_id", "tgt_order_id"):
@@ -8476,6 +8422,7 @@ class OrderManager:
                     pnl = _calc_pnl(pos, executed_price, qty=pending_exit.exit_qty)
                     pnl_sign = "✅" if pnl >= 0 else "❌"
                     norm_reason = ExitReason.normalize(pending_exit.reason)
+                    pos.exit_reason_raw = pending_exit.reason
 
                     if pending_exit.exit_qty < pos.remaining_qty:
                         for tr in list(pos.open_tranches):
@@ -8491,7 +8438,7 @@ class OrderManager:
                                 self._risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                                 _pts_loss = max(0.0, pos.entry_premium - executed_price)
                                 self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
-                                tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
+                                tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr)
                                 self._journal.write(tr_rec)
                                 for attr_name in ("sl_order_id", "tgt_order_id"):
                                     oid = getattr(tr, attr_name, None)
@@ -8738,6 +8685,7 @@ class OptionsBuyerEdgeBot:
                         if pos:
                             pnl = _calc_pnl(pos, executed_price, qty=pending_exit.exit_qty)
                             norm_reason = ExitReason.normalize(pending_exit.reason)
+                            pos.exit_reason_raw = pending_exit.reason
 
                             if pending_exit.exit_qty < pos.remaining_qty:
                                 for tr in list(pos.open_tranches):
@@ -8753,7 +8701,7 @@ class OptionsBuyerEdgeBot:
                                         self.risk.record_exit(tr_pnl, slot_id=pos.slot_id, closes_position=False)
                                         _pts_loss = max(0.0, pos.entry_premium - executed_price)
                                         self.state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
-                                        tr_rec = TradeAnalytics.build_tranche(underlying=pos.underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
+                                        tr_rec = TradeAnalytics.build_tranche(underlying=pos.underlying, pos=pos, tr=tr)
                                         self.orders._journal.write(tr_rec)
                                         for attr_name in ("sl_order_id", "tgt_order_id"):
                                             oid = getattr(tr, attr_name, None)
@@ -9036,7 +8984,7 @@ class OptionsBuyerEdgeBot:
                       f"SL_id={pos.sl_order_id or 'MISSING'} TGT_id={pos.tgt_order_id or 'MISSING'}")
 
                 # Re-issue missing protection orders
-                if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
+                if cfg.broker.broker_sl_orders:
                     sl_ok = bool(pos.sl_order_id)
                     tgt_ok = bool(pos.tgt_order_id)
                     if not sl_ok or not tgt_ok:
@@ -9154,7 +9102,7 @@ class OptionsBuyerEdgeBot:
         """Fetch live positions and dispatch a single-line active PNL alert."""
         try:
             broker_positions: dict[str, dict] = {}
-            if not self.config.broker.paper_trade and hasattr(self.client, "positionbook"):
+            if hasattr(self.client, "positionbook"):
                 resp = self.client.positionbook()
                 if isinstance(resp, dict) and resp.get("status") == "success":
                     for p in resp.get("data", []):
@@ -9165,20 +9113,38 @@ class OptionsBuyerEdgeBot:
                     err(f"[PNL] Broker positionbook call failed: {resp}")
 
             for pos in open_positions:
-                pnl = 0.0
-                if self.config.broker.paper_trade:
-                    snap = self.state.snapshot_cache.get(pos.underlying)
-                    if snap and snap.option_ltp is not None:
-                        pnl = _calc_pnl(pos, snap.option_ltp)
-                        inf(f"[PNL - CACHE] ltp=₹{snap.option_ltp:.2f} entry=₹{pos.entry_premium:.2f} qty={pos.remaining_qty} pnl=₹{pnl:.2f}")
-                    else:
-                        err(f"[PNL - CACHE] no snapshot data. snap_exists={snap is not None} opt_ltp={snap.option_ltp if snap else 'None'}")
-                elif pos.symbol in broker_positions:
-                    p = broker_positions.get(pos.symbol, {})
-                    pnl = float(p.get("pnl", 0) or 0)
-                    inf(f"[PNL - LIVE] pnl=₹{pnl:.2f} symbol={pos.symbol}")
+                # pnl = (live_ltp - entry_premium) x qty, from the snapshot cache.
+                # The broker `pnl` field is a cross-check, not the source: it stops
+                # re-marking while the position is open (F105 — frozen at -103.50
+                # for 8 alerts on 4 Aug while the option moved -3.45 -> +2.05 pts).
+                # The same tick already feeds pnl_curve correctly.
+                _snap = self.state.snapshot_cache.get_for_position(pos.underlying)
+                _ltp = _snap.option_ltp if _snap else None
+                _broker_pnl = None
+                if pos.symbol in broker_positions:
+                    _broker_pnl = float(broker_positions[pos.symbol].get("pnl", 0) or 0)
+
+                if _ltp:
+                    pnl = _calc_pnl(pos, float(_ltp))
+                    _src = "live"
+                elif _broker_pnl is not None:
+                    pnl = _broker_pnl
+                    _src = "broker-fallback"
                 else:
-                    err(f"[PNL - LIVE] {pos.underlying}: symbol={pos.symbol} NOT in broker data. broker_symbols={list(broker_positions.keys())} raw_entry={broker_positions.get(pos.symbol, {})}")
+                    pnl = 0.0
+                    _src = "none"
+                    err(f"[PNL] {pos.underlying}: no live tick AND no broker row for "
+                        f"{pos.symbol} — reporting 0, which is not a measurement. "
+                        f"broker_symbols={list(broker_positions.keys())}")
+
+                # Divergence >= Rs 1 means one side is stale. Logging which is what
+                # makes a frozen broker figure visible without a manual replay.
+                _div = ""
+                if _broker_pnl is not None and _ltp:
+                    _delta = pnl - _broker_pnl
+                    if abs(_delta) >= 1.0:
+                        _div = f" | broker=₹{_broker_pnl:.2f} STALE_BY=₹{_delta:+.2f}"
+                inf(f"[PNL - {_src.upper()}] pnl=₹{pnl:.2f} ltp={_ltp} symbol={pos.symbol}{_div}")
 
                 hold_mins = max(0, int((get_ist_now() - pos.entry_time).total_seconds() / 60))
                 hours = hold_mins // 60
@@ -9193,7 +9159,7 @@ class OptionsBuyerEdgeBot:
         except Exception as exc: err("[PNL REPORT] Error checking active PNL: ", exc)
 
     def _check_naked_shorts(self) -> None:
-        if self.config.broker.paper_trade or not hasattr(self.client, "positionbook"):
+        if not hasattr(self.client, "positionbook"):
             return
         try:
             resp = self.client.positionbook()
@@ -9231,7 +9197,7 @@ class OptionsBuyerEdgeBot:
     def _print_startup_info(self) -> None:
         cfg = self.config
         inf("=" * 70)
-        inf(f"  {cfg.broker.strategy_name}{'  [PAPER TRADE]' if cfg.broker.paper_trade else ''}")
+        inf(f"  {cfg.broker.strategy_name}")
         _sdk_ver = getattr(openalgo, "__version__", "?")
         inf(f"  SDK version     : openalgo {_sdk_ver}")
         inf("=" * 70)
@@ -9298,8 +9264,6 @@ class OptionsBuyerEdgeBot:
             inf(f"  P&L Curve       : {os.path.abspath(cfg.journal.pnl_curve_dir)}")
         if cfg.chain_snapshot.enabled and cfg.chain_snapshot.dir_path:
             inf(f"  Chain Snapshots : {os.path.abspath(cfg.chain_snapshot.dir_path)}")
-        if cfg.broker.paper_trade:
-            inf("\n  *** PAPER TRADE MODE — no real orders will be sent ***")
         inf("=" * 70)
 
     def scan_underlying(self, symbol: str) -> None:
@@ -10044,7 +10008,7 @@ class OptionsBuyerEdgeBot:
                 self._cleanup_stale_positions()
                 self.orders.check_pending_entries()
                 self.orders.check_pending_exits()
-                if cfg.broker.broker_sl_orders and not cfg.broker.paper_trade:
+                if cfg.broker.broker_sl_orders:
                     self.orders.check_broker_order_fills()
                     self.orders.verify_sl_orders_active()
 
