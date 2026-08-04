@@ -4092,7 +4092,7 @@ class SignalEngine:
         # We cap expected alignment to PRACTICAL_ALIGNMENT_FACTOR, so achieving this threshold yields a 100 score.
         effective_max = MAX_RAW_SCORE * PRACTICAL_ALIGNMENT_FACTOR
         base_score = (raw_score / effective_max) * 100 if effective_max > 0 else 0
-        
+
         final_score = int(max(-100, min(100, base_score)))
 
         for c in components:
@@ -4413,7 +4413,7 @@ class DataFetcher:
             response = self.client.quotes(symbol=symbol, exchange=exchange) or {}
             if response.get("status") == "success":
                 return response.get("data", {})
-            
+
             error_msg = response.get("message", "")
             if isinstance(error_msg, str) and ("Invalid token" in error_msg or "UDAPI100050" in error_msg):
                 err(f"{symbol}@{exchange}: broker token invalid (UDAPI100050): {response}")
@@ -4612,7 +4612,7 @@ class DataFetcher:
                         result["ce_iv_rank"] = SignalEngine.iv_rank(
                             float(ce_iv), self.config.entry.iv_52w_low, self.config.entry.iv_52w_high
                         )
-            
+
             # Fetch PE IVR
             if pe_symbol:
                 pe_greeks = self._fetch_option_greeks_cached(symbol, pe_symbol)
@@ -4622,7 +4622,7 @@ class DataFetcher:
                         result["pe_iv_rank"] = SignalEngine.iv_rank(
                             float(pe_iv), self.config.entry.iv_52w_low, self.config.entry.iv_52w_high
                         )
-            
+
             # Determine best fit: lower IVR = cheaper = better for buying
             ce_ivr = result["ce_iv_rank"]
             pe_ivr = result["pe_iv_rank"]
@@ -4632,9 +4632,9 @@ class DataFetcher:
                 result["best_fit"] = "CE"
             elif pe_ivr is not None:
                 result["best_fit"] = "PE"
-            
+
         except Exception as exc: err("[DATA] IV ranks fetch error: ", exc)
-        
+
         return result
 
     def _expiry_list(self, symbol: str) -> list[str] | None:
@@ -4653,7 +4653,7 @@ class DataFetcher:
                 parsed = resp.get("data", resp.get("expiries", []))
             else:
                 return None
-            
+
             if parsed:
                 self._expiry_list_cache[symbol] = parsed
             return parsed
@@ -4753,7 +4753,7 @@ class EntryStopLossPolicy:
         if entry_delta is not None and est_premium is not None and est_premium > 0:
             delta_sl, moneyness = self._sl_pts_by_delta(entry_delta, est_premium)
             return (delta_sl, f"moneyness_adapted_{moneyness}")
-        
+
         return (base_sl, base_source)
 
 
@@ -4950,7 +4950,7 @@ class TrailSLEngine:
                     _sig_strength = abs(_sig_result.score) / 100.0
                     _trail_conv_adj *= 1.0 - (_sig_strength * 0.4)
                     _signal_trail_boost = 1.0 + (_sig_strength * 0.5)
-            
+
             # ── Mode Processing ────────
             # Gate on spot_ltp only in the modes that read spot. Premium
             # trail does not, so gating it here froze the default trail on a
@@ -5038,7 +5038,7 @@ class TrailSLEngine:
         ep = pos.entry_premium
         move = confirmed_close - ep
         ltp = confirmed_close
-        
+
         # ATR method: activate after price crosses BE + buffer_pts
         if cfg.trail.sl_method == "atr":
             _atr_buffer = cfg.trail.atr_activation_buffer_pts
@@ -5067,9 +5067,9 @@ class TrailSLEngine:
                 current_delta = greeks["delta"]
         elif cfg.trail.sl_method == "atr":
             df = self._fetcher.fetch_option_candles(pos.symbol)
-            
+
         _base_step_pts = self._get_step_pts(pos, ep, df, current_delta)
-        
+
         # ── Profit Acceleration Compression Engine ─────────────────────────────
         # 1. Base Gamma Speed (ROI-based)
         _roi_pct = ((confirmed_close - ep) / ep * 100.0) if ep > 0 else 0.0
@@ -5085,11 +5085,11 @@ class TrailSLEngine:
         else:
             _trail_speed = 1.0
             _gamma_tier = "TIER_0_0_50"
-        
+
         # 2. Trend Efficiency Factor (Market Structure & Ranging Avoidance)
         if df is None:
             df = self._fetcher.fetch_option_candles(pos.symbol)
-            
+
         trend_efficiency = 1.0
         _net_move = 0.0
         _path_length = 0.0
@@ -5106,25 +5106,25 @@ class TrailSLEngine:
                 _path_length = sum(abs(closes[i] - closes[i-1]) for i in range(1, len(closes)))
                 if _path_length > 0:
                     trend_efficiency = _net_move / _path_length
-                    
+
         # Clamp efficiency between 0.50 and 1.0 to prevent dividing by zero or inflating the step
         trend_efficiency_factor = max(0.50, min(1.0, trend_efficiency))
-        
+
         # Apply efficiency multiplier: ranging markets will lower the trail speed (looser trail)
         _trail_speed *= trend_efficiency_factor
         _trail_speed *= signal_trail_boost  # V2-A3: tighten when signal opposes
-        
+
         # 3. Apply intelligence to raw step (Option B architecture)
         step_pts = max(_base_step_pts * cfg.trail.gamma_speed_step_floor, _base_step_pts / max(0.1, _trail_speed))
-        
+
         # 4. Final Safety Limit Cap (Guarantees trail doesn't exceed 50% of entry premium)
         step_pts = min(step_pts, ep * 0.50)
-        
+
         # ── Incremental PnL ──
         _unrealized_pnl_pts = confirmed_close - ep
         _unrealized_pnl_pct = (_unrealized_pnl_pts / ep * 100.0) if ep > 0 else 0.0
         _unrealized_pnl_abs = _unrealized_pnl_pts * pos.remaining_qty
-        
+
         # ── Detailed Trail Logging ──
         inf(
             f"[TRAIL] {underlying} | ROI={_roi_pct:.1f}% ({_gamma_tier}) | "
@@ -5135,7 +5135,7 @@ class TrailSLEngine:
             f"UnrealPnL={_unrealized_pnl_pts:.2f}pts ({_unrealized_pnl_pct:.1f}%) ₹{_unrealized_pnl_abs:.0f} | "
             f"PeakClose={pos.trail_peak_close:.2f} | LTP={confirmed_close:.2f}"
         )
-        
+
         # Trail activation and ratchet placement use confirmed periodic closes.
         _prev_sl = pos.sl
         if not pos.premium_trail_active:
@@ -5231,7 +5231,7 @@ class TrailSLEngine:
     def _process_spot_trail(self, underlying: str, pos: OptionPosition, spot_ltp: float, conv_adj: float, signal_trail_boost: float = 1.0) -> None:
         cfg = self._config
         reward_dist = pos.reward_dist
-        
+
         activate_pts = reward_dist * (cfg.trail.activate_at_pct / 100.0) * conv_adj * pos.trail_act_mult
         # Hard ceiling: prevents activation requiring more pts than the TP window on expensive options
         if cfg.trail.activate_at_max_pts > 0:
@@ -5242,7 +5242,7 @@ class TrailSLEngine:
 
         if not pos.trail_active and move < activate_pts:
             return
-            
+
         # Resolve step points
         current_delta = None
         df = None
@@ -5252,7 +5252,7 @@ class TrailSLEngine:
                 current_delta = greeks["delta"]
         elif cfg.trail.sl_method == "atr":
             df = self._fetcher.fetch_spot_candles(underlying)
-            
+
         step_pts = self._get_step_pts(pos, reward_dist, df, current_delta)
 
         # Final Safety Limit Cap for Spot Mode (Option B architecture)
@@ -6215,10 +6215,10 @@ class WebSocketManager:
 
         if not isinstance(data, dict):
             return
-            
+
         # OpenAlgo SDK encapsulates actual market data inside a nested 'data' dictionary. Fallback to root level just in case.
         inner_data = data.get("data") if isinstance(data.get("data"), dict) else data
-        
+
         symbol = inner_data.get("symbol") or data.get("symbol", "")
         # None-aware, not `or` — an inner ltp of 0 must reach the guard below, not be swapped for the root key.
         ltp = inner_data.get("ltp")
@@ -6678,7 +6678,7 @@ class OrderManager:
 
     def _cancel_three_outcome(self, order_id: str, pending: PendingEntry | None = None) -> str:
         """Cancel order_id and determine terminal disposition.
-        
+
         Returns one of three outcomes:
           'cancelled'    — terminal fail status, filled_qty == 0; caller should remove pending entry
           'reconciled'   — terminal fill status, filled_qty > 0, usable price; entry already registered
@@ -6743,7 +6743,7 @@ class OrderManager:
         opt_sym: str,
     ) -> None:
         """Record a confirmed partial exit for one tranche.
-        
+
         Journals the filled slice as a partial-exit row, records risk P&L and
         strike loss, decrements BOTH tranche.qty and pos.core.qty, marks the
         tranche exited only when its residual hits zero, and cancels/reissues
@@ -8047,7 +8047,7 @@ class OrderManager:
             exit_qty = self._sellable_qty(pos)
             pnl = _calc_pnl(pos, executed_price, qty=exit_qty)
             inf(f"[PAPER] Simulated SELL {exit_qty}x {pos.symbol} @ ₹{executed_price:.2f} | P&L ₹{pnl:.2f}")
-            
+
             if exit_qty < pos.remaining_qty:
                 for tr in list(pos.open_tranches):
                     is_in_flight = False
@@ -8070,7 +8070,7 @@ class OrderManager:
             else:
                 self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
                                     exit_price_source="paper")
-            
+
             direction_emoji = "🔺 UP" if pos.option_type.upper() == "CE" else "🔻 DN"
             emoji = "✅ PROFIT" if pnl >= 0 else "❌ LOSS"
             risk_pts = max(0.01, pos.entry_premium - pos.initial_sl)
@@ -8086,7 +8086,7 @@ class OrderManager:
                     f"⏱ Hold: {hold_mins}m | Daily: ₹{self._risk.daily_pnl:.0f}",
                     2,
                 )
-                
+
             if exit_qty >= pos.remaining_qty:
                 # Safety check: verify position was actually removed
                 if self._state.positions.slot(pos.slot_id):
@@ -8245,7 +8245,7 @@ class OrderManager:
                     best_price = 0.0
                     pnl = 0.0
                     journal_reason = ExitReason.FORCE_UNTRACK_UNKNOWN
-                    
+
                 self._finalize_exit(underlying, pos, best_price, pnl, journal_reason,
                                     exit_price_source="estimated")
                 inf(
@@ -8326,7 +8326,7 @@ class OrderManager:
             self._state.pending_exits.pop(pos.slot_id, None)
 
         pnl = _calc_pnl(pos, executed_price, qty=sellable_qty)
-        
+
         if sellable_qty < pos.remaining_qty:
             for tr in list(pos.open_tranches):
                 is_in_flight = False
@@ -8343,7 +8343,7 @@ class OrderManager:
                     self._state.accrue_strike_loss(pos.slot_id, pos.symbol, pos.option_type, _pts_loss, tr.qty)
                     tr_rec = TradeAnalytics.build_tranche(underlying=underlying, pos=pos, tr=tr, paper_trade=self.config.broker.paper_trade)
                     self._journal.write(tr_rec)
-                    
+
                     for attr_name in ("sl_order_id", "tgt_order_id"):
                         oid = getattr(tr, attr_name, None)
                         if oid:
@@ -8353,7 +8353,7 @@ class OrderManager:
                                 pass
                             finally:
                                 setattr(tr, attr_name, None)
-            
+
             inf(f"[ORDER] Partial full-exit for {underlying}: {sellable_qty}/{pos.remaining_qty} "
                 "— leaving position open for in-flight tranches to land")
             with self._state.exit_lock:
@@ -8476,7 +8476,7 @@ class OrderManager:
                     pnl = _calc_pnl(pos, executed_price, qty=pending_exit.exit_qty)
                     pnl_sign = "✅" if pnl >= 0 else "❌"
                     norm_reason = ExitReason.normalize(pending_exit.reason)
-                    
+
                     if pending_exit.exit_qty < pos.remaining_qty:
                         for tr in list(pos.open_tranches):
                             is_in_flight = False
@@ -8511,7 +8511,7 @@ class OrderManager:
                         self._finalize_exit(underlying, pos, executed_price, pnl, norm_reason,
                                             exit_price_source="broker_fill",
                                             opt_symbol=opt_sym, pop_pending_exit=True)
-                    
+
                     inf(f"[PENDING] EXIT {order_id} complete for {underlying} @ \u20b9{executed_price:.2f} | P&L \u20b9{pnl:.2f} | reason={norm_reason}")
                     self._notify(
                         f"{pnl_sign} {self.config.broker.strategy_name} EXIT confirmed\n"
@@ -8738,7 +8738,7 @@ class OptionsBuyerEdgeBot:
                         if pos:
                             pnl = _calc_pnl(pos, executed_price, qty=pending_exit.exit_qty)
                             norm_reason = ExitReason.normalize(pending_exit.reason)
-                            
+
                             if pending_exit.exit_qty < pos.remaining_qty:
                                 for tr in list(pos.open_tranches):
                                     is_in_flight = False
@@ -9071,7 +9071,7 @@ class OptionsBuyerEdgeBot:
 
     def _cleanup_stale_positions(self) -> None:
         """Force-remove positions stuck in the book after exit cleanup missed them.
-        
+
         A position is stale if exit_pending is True but both the pending_exit
         entry and broker protection orders are gone — meaning the exit ran
         but the final positions.pop() was skipped (e.g. exception between
@@ -9189,7 +9189,7 @@ class OptionsBuyerEdgeBot:
                 emoji = "🟢" if pnl >= 0 else "🔴"
                 sign  = "+" if pnl >= 0 else ""
                 self._send_alert(f"{emoji} {pos.underlying} {side} | PNL: ₹{sign}{pnl:.0f} | Hold: {hold_str}", 3)
-                
+
         except Exception as exc: err("[PNL REPORT] Error checking active PNL: ", exc)
 
     def _check_naked_shorts(self) -> None:
@@ -9995,7 +9995,7 @@ class OptionsBuyerEdgeBot:
     def _start_strategy_watchdog(self) -> threading.Thread:
         """Start a watchdog thread that dumps all thread stacks if the strategy thread
         does not update its heartbeat within 2.5x the scan interval.
-        
+
         This is a diagnostic tool for identifying the exact hang location when the
         strategy thread stops producing output but the WS thread remains alive.
         """
@@ -10092,7 +10092,7 @@ class OptionsBuyerEdgeBot:
                     _ts = get_ist_now().isoformat()
                     _rows = []
                     for _p in _curve_pos:
-                        _snap = self.state.snapshot_cache.get_option(_p.spot_symbol)
+                        _snap = self.state.snapshot_cache.get_for_position(_p.spot_symbol)
                         _ltp = _snap.option_ltp if _snap else None
                         if not _ltp:
                             continue
