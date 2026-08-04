@@ -344,9 +344,19 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # CODING CONVENTIONS
 # ==============================================================================
 #
-# Attribute initialization: All instance attributes MUST be declared in __init__
-# with a type annotation. No lazy hasattr(self, '_x') patterns — they bypass type
-# checkers, hide init-order dependencies, and complicate refactoring.
+# Full rules: protocols/maintain-audit-and-code.md, PART 2. Summary:
+#
+#   - Attributes: declared in __init__ with a type annotation. No lazy hasattr().
+#   - Line folding: a statement wrapped for no reason folds to one line, budget 140.
+#     Never fold >9 lines, a range holding a comment or multi-line string, or a
+#     deliberate table (key_level_spacing, dte_window). Verify with ast.unparse.
+#   - Comments: mechanism first as a formula where one exists, then why. Bullets when
+#     the comment carries separate constraints. Present tense. Keep the reason, cut
+#     the narration. No stub last line — under 40% of budget, re-wrap narrower.
+#   - Banners keep their shape — a three-line === header is layout, never collapsed.
+#
+# Editing this file shifts line numbers, which breaks the source: pointers in
+# mcp_gateway/config/parameters.yaml. Re-resolve them by field, not by shifting.
 
 # ==============================================================================
 # AUDIT STATUS
@@ -551,6 +561,22 @@ import pandas as pd
 import openalgo
 from openalgo import api, ta
 
+# ── Session recorder (optional) ────────────────────────────────────────
+# `at recorder install` copies `tape` next to this script, so it resolves off
+# sys.path[0] — no pip install, no PYTHONPATH. Absent when never installed.
+#   - every use is guarded by `_TAPE_OK`
+#   - no entry, exit or stop depends on it
+#   - failures inside it are swallowed, never propagated
+# A recorder that can take the strategy down is worse than no recorder.
+try:
+    from tape import attach as _tape_attach
+    _TAPE_OK = True
+    _TAPE_WHY = ""
+except Exception as _tape_exc:                       # noqa: BLE001
+    _tape_attach = None
+    _TAPE_OK = False
+    _TAPE_WHY = f"{type(_tape_exc).__name__}: {_tape_exc}"
+
 # Ensure UTF-8 output on Windows (cp1252 console cannot encode ₹ and other Unicode chars).
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -619,17 +645,16 @@ STRIKE_DELTA_WEIGHT_RANGE = 0.20   # added at max conviction — 0.30 total, max
 STRIKE_RANGE_PCT = 0.05     # strike search radius as a fraction of spot, each side — ±5%
 
 # ── Conviction Risk Engine — shared by SL sizing, breakeven and all trail functions ──
-# BE trigger adjustment: adj = CONV_BE_BASE - conviction * CONV_BE_RANGE, so 1.10× at
-# zero conviction down to 0.90× at full. Range stays narrow to avoid premature BE on strong setups.
+# adj = CONV_BE_BASE - conviction × CONV_BE_RANGE, so 1.10× at zero conviction down to
+# 0.90× at full. Kept narrow: a wider range breaks even too early on strong setups.
 CONV_BE_BASE  = 1.10
 CONV_BE_RANGE = 0.20
 
 # P&L alert interval, seconds (0 = disabled) — cosmetic notification only.
 LIVE_PNL_ALERT_INTERVAL = 60
 
-# Naked-short detector interval, seconds — safety net, so it keeps its own switch
-# rather than sharing the alert setting, and runs outside market hours (square-off
-# at 15:13 can leave a short after _is_market_hours() ends at 15:30).
+# Naked-short detector interval, seconds — safety net, so it keeps its own switch rather than sharing the alert setting, and runs outside
+# market hours (square-off at 15:13 can leave a short after _is_market_hours() ends at 15:30).
 NAKED_SHORT_CHECK_INTERVAL = 60
 
 # Minimum SL-M trigger (₹) — upstream rejects a negative trigger, and 0 can never
@@ -750,8 +775,7 @@ class BrokerConfig:
             quote_api_rps=float(os.getenv("QUOTE_API_RPS", str(cls.quote_api_rps))),
             quote_api_burst=int(os.getenv("QUOTE_API_BURST", str(cls.quote_api_burst))),
             snapshot_stale_timeout=float(os.getenv("SNAPSHOT_STALE_TIMEOUT", str(cls.snapshot_stale_timeout))),
-            # ORDER_STREAM_ENABLED / ORDER_STREAM_COMPLETE_ENTRIES are script-config
-            # values managed via defaults (not read from os.environ).
+            # ORDER_STREAM_ENABLED / ORDER_STREAM_COMPLETE_ENTRIES are script-config values managed via defaults (not read from os.environ).
             order_updates_enabled=os.getenv("ORDER_UPDATES_ENABLED", "FALSE").upper() == "TRUE",
         )
 
@@ -773,9 +797,9 @@ class BrokerConfig:
 
 
 # ── Strategy exchange map (OpenAlgo /python hosted mode) ──────────────
-# OPENALGO_STRATEGY_EXCHANGE (host-injected, /python only) gives ONE value —
-# the F&O leg the user picked at upload. The bot needs three exchange roles
-# derived from it: fno, spot, index.
+# OPENALGO_STRATEGY_EXCHANGE is host-injected on /python only, and carries one
+# value: the F&O leg picked at upload. This maps it to the three roles the bot
+# needs — fno, spot, index.
 _STRATEGY_EXCHANGE_MAP: dict[str, tuple[str, str, str]] = {
     # STRATEGY_EXCHANGE : (fno_exchange, spot_exchange, index_exchange)
     "NFO": ("NFO", "NSE", "NSE_INDEX"),
@@ -801,8 +825,18 @@ class MarketConfig:
     candle_interval:       str   = "1m"
     signal_check_interval: int   = 60
     stale_cleanup_grace_secs: int = 30
-    dte_min:               int   = 7
+    dte_min:               int   = 7          # fallback for an index not in dte_window
     dte_max:               int   = 30
+    # Expiry window per index, because ladders differ. At 7-30 every index goes blind
+    # for part of each month: 7 skips the nearest weekly, 30 cannot reach the next
+    # monthly, so the selector finds nothing and falls through to pick_nearest_expiry.
+    # Uncovered days per Aug-Sep 2026 on live ladders:
+    #   NIFTY 8 · SENSEX 11 · BANKNIFTY / FINNIFTY / MIDCPNIFTY 15 each
+    # At 7-45 all are 0, and weekly and monthly-only ladders both fit.
+    dte_window: dict  = field(default_factory=lambda: {
+        "NIFTY": (7, 45), "BANKNIFTY": (7, 45), "FINNIFTY": (7, 45),
+        "MIDCPNIFTY": (7, 45), "SENSEX": (7, 45), "BANKEX": (7, 45),
+    })
     otm_offset:            int   = 1
     strike_count:          int   = 8
     no_new_trade_after:    str   = "15:10"
@@ -817,9 +851,9 @@ class MarketConfig:
     greeks_smooth_max_age: float = 180.0
 
     # ── Day-over-day OI (Item 26) ──
-    # Real prev-close-to-now OI change from daily history. Observation only: it is
-    # logged beside the in-session basis and never scored. Costs one daily-history
-    # call per leg, cached for the session since the prev-day close cannot move.
+    # change = now_oi - prev_day_close_oi, from daily history. Logged
+    # beside the in-session basis, never scored. One history call per
+    # leg, cached for the session because the previous close cannot move.
     dod_oi_enabled:        bool  = True
     dod_oi_max_strikes:    int   = 5     # legs each side around ATM — caps the call budget
 
@@ -849,6 +883,7 @@ class MarketConfig:
             lookback_days=int(os.getenv("LOOKBACK_DAYS", str(defaults.lookback_days))),
             dte_min=int(os.getenv("DTE_MIN", str(defaults.dte_min))),
             dte_max=int(os.getenv("DTE_MAX", str(defaults.dte_max))),
+            dte_window=ast.literal_eval(os.getenv("DTE_WINDOW", str(defaults.dte_window))),
             otm_offset=int(os.getenv("OTM_OFFSET", str(defaults.otm_offset))),
             strike_count=int(os.getenv("STRIKE_COUNT", str(defaults.strike_count))),
             signal_check_interval=int(os.getenv("SIGNAL_CHECK_INTERVAL", str(defaults.signal_check_interval))),
@@ -1263,9 +1298,39 @@ class TrailConfig:
 # ── 3f — JournalConfig ────────────────────────────────────────────────────
 @dataclass
 class JournalConfig:
-    """Trade journal file path, analytics flags, and order-ID registry."""
-    trade_journal_path:   str = "/app/strategies/data/trades.csv"
-    known_order_ids_path: str = "/app/strategies/data/known_order_ids.json"
+    """Trade journal file path, analytics flags, and order-ID registry.
+
+    Paths are **relative, resolved against the working directory**, which is the
+    convention OpenAlgo itself uses for the directories it owns:
+
+        STRATEGIES_DIR = Path("strategies") / "scripts"   blueprints/
+        LOGS_DIR       = Path("log") / "strategies"       python_strategy.py:95
+
+    OpenAlgo launches this script with `cwd` set to its own working directory,
+    so under Docker that is /app and these resolve to exactly the same files as
+    the absolute `/app/...` they replaced — the same bytes, no migration. Run
+    natively with `uv run app.py` from a clone, cwd is that clone, and they
+    follow it instead of pointing at a directory that does not exist.
+
+    Relative costs nothing in durability. `/app/strategies` and `/app/log` are
+    named Docker volumes — docker-compose.yaml maps `openalgo_strategies` and
+    `openalgo_log` onto them — so a path resolving *into* the volume survives a
+    container restart, a `compose down`, an image rebuild and a fresh install
+    exactly as an absolute `/app/...` one did. The volume outlives the
+    container; only `docker volume rm` destroys it. Writing `/app` in the source
+    bought no persistence the volume was not already providing, and cost the
+    native run.
+
+    Every writer calls `makedirs(exist_ok=True)`, and the startup banner prints
+    `os.path.abspath()` for each of these, so the resolved location stays
+    visible. Override any of them with the TRADE_JOURNAL_PATH /
+    KNOWN_ORDER_IDS_PATH / PNL_CURVE_DIR environment variables, which still
+    accept an absolute path. `at storage` prints where each one lands on the
+    host, and whether it is on persistent storage.
+    """
+    trade_journal_path:   str = "strategies/data/trades.csv"
+    known_order_ids_path: str = "strategies/data/known_order_ids.json"
+    pnl_curve_dir:        str = "strategies/data/pnl_curve"   # "" disables
     analytics_enabled:    bool = True
 
     @classmethod
@@ -1274,6 +1339,7 @@ class JournalConfig:
         return cls(
             trade_journal_path=os.getenv("TRADE_JOURNAL_PATH", defaults.trade_journal_path),
             known_order_ids_path=os.getenv("KNOWN_ORDER_IDS_PATH", defaults.known_order_ids_path),
+            pnl_curve_dir=os.getenv("PNL_CURVE_DIR", defaults.pnl_curve_dir),
             analytics_enabled=os.getenv("ANALYTICS_ENABLED", str(defaults.analytics_enabled)).lower() in ("1", "true", "yes"),
         )
 
@@ -1290,7 +1356,8 @@ class ChainSnapshotConfig:
     backtesting. Independent of JournalConfig: the journal records fills,
     this records what the strategy SAW, on every scan, not just trades."""
     enabled:  bool = True
-    dir_path: str  = "/app/strategies/data/chain_snapshots"
+    # Relative for the same reason as JournalConfig — see its docstring.
+    dir_path: str  = "strategies/data/chain_snapshots"
 
     @classmethod
     def from_env(cls) -> "ChainSnapshotConfig":
@@ -1435,9 +1502,9 @@ class SignalConfig:
     slow_disagree_floor:        float = 0.5   # multiplier can never drop below this
 
     # ── Data-coverage floor ──
-    # Minimum share of NOMINAL_FAST_MAX that must be available before a score is
-    # tradeable — below it the smaller denominator inflates the score and reports feed
-    # health, not the market, so the signal is forced to NO_TRADE. 0.0 disables the gate.
+    # Share of NOMINAL_FAST_MAX that must be present before a score can trade. Below
+    # it the denominator shrinks and inflates the score, so it measures feed health
+    # rather than the market — forced to NO_TRADE. 0.0 disables the gate.
     min_fast_coverage:          float = 0.70
 
     @classmethod
@@ -1623,9 +1690,8 @@ class ScoreComponent:
     direction: str
     note:      str
     available: bool = True
-    # "fast" = options-statistical (Layers 2-5) — responsive, point-in-time.
-    # "slow" = technical-trend on spot candles (Layer 1) — confirms/dampens fast layer.
-    # Carried from IndicatorSpec/StatisticSpec so score() can group differently (Step 3).
+    # "fast" = options-statistical (Layers 2-5) — responsive, point-in-time. "slow" = technical-trend on spot candles (Layer 1) —
+    # confirms/dampens fast layer. Carried from IndicatorSpec/StatisticSpec so score() can group differently (Step 3).
     tier:      str = "fast"
 
 
@@ -2293,6 +2359,36 @@ class JournalWriter:
             err("[JOURNAL] Write error", exc)
 
 
+class PnlCurveWriter:
+    """Appends one JSON-Line per open position per strategy cycle: the live P&L path.
+
+    Same design as ChainSnapshotWriter and for the same reasons — no lock because the
+    strategy thread is the sole caller, JSON-Lines because this is a growing series, one
+    file per IST day, and fail-open so observing a position can never abort managing it.
+
+    Deliberately NOT a column on the trade journal: a CSV cell cannot be appended to, so
+    a growing array there would mean rewriting the whole file every cycle. Joins to the
+    journal on slot_id. At the default 60s cycle this is a few hundred lines per position
+    per day, not per-tick volume.
+    """
+
+    def __init__(self, dir_path: str):
+        self.dir_path = dir_path
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+
+    def append(self, rows: list[dict]) -> None:
+        if not self.dir_path or not rows:
+            return
+        try:
+            path = os.path.join(self.dir_path, f"pnl_curve_{get_ist_now().strftime('%Y%m%d')}.jsonl")
+            with open(path, "a") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+        except Exception as exc:
+            dbg(f"[PNLCURVE] append failed: {exc}")
+
+
 class ChainSnapshotWriter:
     """Appends one JSON-Line record per scan to a per-underlying, per-day research
     log — the raw option chain, greeks and score breakdown behind every scan
@@ -2437,6 +2533,28 @@ class TradeAnalytics:
             record_type="partial_exit",
             slot_id=pos.slot_id,
             tranche_id=tr.tranche_id,
+            entry_sl_source=pos.entry_sl_source,
+        )
+
+    @staticmethod
+    def build_entry(underlying: str, pos: OptionPosition, paper_trade: bool = False) -> "TradeRecord":
+        """Row written when a position opens. record_type carries a third value, so the
+        column count is unchanged and _ensure_schema() does not archive the journal.
+        Exit-shaped fields are zero/None — nothing has closed. Readers of realised P&L
+        must filter record_type rather than assume every row is a closed trade."""
+        return TradeRecord(
+            timestamp=get_ist_now().strftime("%Y-%m-%d %H:%M:%S"),
+            underlying=underlying, option_symbol=pos.symbol, direction=pos.option_type,
+            qty=pos.core.qty, entry=pos.entry_premium, exit=0.0,
+            pnl_pts=0.0, pnl_abs=0.0, exit_reason="", mode="PAPER" if paper_trade else "LIVE",
+            r_multiple=0.0, entry_conviction=pos.entry_conviction, moneyness=pos.moneyness,
+            exit_price_source="", trail_peak_close=pos.entry_premium, giveback_pts=0.0,
+            trail_activated=False, trail_activation_sl=None, sl_at_exit=pos.initial_sl,
+            trail_method_used="", lock_mode_used="",
+            activation_gain_pts=None, activation_gain_pct=None, activation_time=None,
+            bars_to_activation=None, peak_after_activation=None, bars_after_activation=None,
+            max_favorable_excursion=None, max_adverse_excursion_after_activation=None,
+            record_type="entry", slot_id=pos.slot_id, tranche_id="",
             entry_sl_source=pos.entry_sl_source,
         )
 
@@ -2787,7 +2905,7 @@ class PositionBook:
 class BotState:
     """Thread-safe shared state owned by the orchestrator, passed to all components."""
 
-    def __init__(self, chain_smooth_bars: int = 5):
+    def __init__(self, chain_smooth_bars: int = 5, journal_path: str = ""):
         self.position_book: PositionBook = PositionBook()
         self.positions = self.position_book  # backward-compat alias
         self.ltp_map:         dict[str, float] = {}
@@ -2805,7 +2923,8 @@ class BotState:
         self.spot_price_history: dict[str, deque] = {} # underlying → deque of (timestamp, ltp)
         self._chain_smooth_bars = chain_smooth_bars
         self.entry_in_flight: dict[str, int] = {}
-        self._strike_loss_pts: dict[str, float] = {}
+        self._journal_path = journal_path
+        self._strike_loss_pts: dict[str, float] = self._rebuild_strike_loss()
         self._pending_strike_loss: dict[str, list] = {}  # slot_id → [(pts_loss, qty), ...]  (F98b)
         self.bucket_counter: int = 0
         self.pending_opposite_exit: set[str] = set()
@@ -2888,6 +3007,45 @@ class BotState:
         key = f"{option_symbol}|{direction}"
         with self.state_lock:
             return float(self._strike_loss_pts.get(key, 0.0))
+
+    def _rebuild_strike_loss(self) -> dict[str, float]:
+        """Rebuild today's per-strike accumulated loss from the journal (item 30).
+
+        Runs once, at construction, so a mid-session restart cannot free a strike that
+        has spent its allowance. Every accrue site writes a journal row beside it, so
+        the journal is the source of truth and no second state file can drift from it.
+        Mirrors settle_strike_loss(): one slot's partial exits commit as a qty-weighted
+        mean, never a sum — F98 and F98b were both over-counts of exactly this. Counts
+        today's IST rows only, matching the daily reset; skips wins and `entry` rows."""
+        path = self._journal_path
+        if not path or not os.path.exists(path):
+            return {}
+        today = get_ist_now().strftime("%Y-%m-%d")
+        per_slot: dict[tuple[str, str], tuple[float, int]] = {}   # (slot,key) -> (Σpts*qty, Σqty)
+        try:
+            with open(path, newline="") as f:
+                for row in csv.DictReader(f):
+                    if row.get("record_type") not in ("full_exit", "partial_exit"):
+                        continue
+                    if not str(row.get("timestamp", "")).startswith(today):
+                        continue
+                    pts_loss = max(0.0, -float(row.get("pnl_pts") or 0.0))
+                    qty = int(float(row.get("qty") or 0))
+                    if pts_loss <= 0 or qty <= 0:
+                        continue
+                    ident = (row.get("slot_id") or "", f"{row.get('option_symbol')}|{row.get('direction')}")
+                    w, q = per_slot.get(ident, (0.0, 0))
+                    per_slot[ident] = (w + pts_loss * qty, q + qty)
+        except Exception as exc:
+            err("[STATE] Strike-loss rebuild failed — starting empty", exc)
+            return {}
+        out: dict[str, float] = {}
+        for (_slot, key), (w, q) in per_slot.items():
+            if q > 0:
+                out[key] = out.get(key, 0.0) + w / q
+        if out:
+            inf(f"[STATE] Rebuilt strike loss for {len(out)} strike(s) from today's journal")
+        return out
 
     def reset_strike_loss_pts(self) -> None:
         self._strike_loss_pts.clear()
@@ -3129,9 +3287,8 @@ class OIFlowAnalyzer:
 
     @staticmethod
     def call_wall(chain_rows: list[dict]) -> float | None:
-        # A chain with no CE open interest anywhere has no wall. Without the >0 test,
-        # max() over an all-equal key returns the FIRST row, so an untraded chain
-        # reports its lowest strike as a wall and reads downstream as real resistance.
+        # A chain with no CE open interest anywhere has no wall. Without the >0 test, max() over an all-equal key returns the FIRST row, so
+        # an untraded chain reports its lowest strike as a wall and reads downstream as real resistance.
         if not chain_rows:
             return None
         top = max(chain_rows, key=lambda r: r.get("ce_oi", 0) or 0)
@@ -3671,8 +3828,7 @@ def _compute_oi_zscore(ctx, cfg, intermediates):
     symbol = ctx.get("symbol", "")
     if not chain_rows or not oi_z_buffers or not symbol:
         return None
-    # Without an OI-change series net_oi is exactly 0.0 — feeding that would bias the
-    # z-score baseline with a fabricated observation.
+    # Without an OI-change series net_oi is exactly 0.0 — feeding that would bias the z-score baseline with a fabricated observation.
     if not _has_oi_change_basis(chain_rows):
         return None
     if symbol not in oi_z_buffers:
@@ -3779,9 +3935,8 @@ STATISTIC_REGISTRY: list[StatisticSpec] = [
 ]
 
 
-# Full fast-tier budget when every feed is healthy. score() divides by the budget of the
-# specs actually available, so a shrinking denominator inflates the score — this nominal
-# gives the coverage ratio the entry gate compares against.
+# Full fast-tier budget when every feed is healthy. score() divides by the budget of the specs actually available, so a shrinking
+# denominator inflates the score — this nominal gives the coverage ratio the entry gate compares against.
 NOMINAL_FAST_MAX: float = sum(
     spec.score_max
     for spec in (*INDICATOR_REGISTRY, *STATISTIC_REGISTRY)
@@ -3905,9 +4060,9 @@ class SignalEngine:
         trap_score = min(100, trap_score)
 
         # ── Final Score ──────────────────────────────────────────────────────
-        # Two-stage combine: fast (L2-5) sets direction and magnitude; slow (L1) only
-        # dampens fast_raw via confirm_mult on disagreement (floored by
-        # slow_disagree_floor), mult=1.0 when agreeing or neutral.
+        # final = fast_raw × confirm_mult. Fast (L2-5) sets direction and size;
+        # slow (L1) only damps it on disagreement, floored by
+        # slow_disagree_floor. confirm_mult = 1.0 when slow agrees or is neutral.
         fast_components = [c for c in components if c.tier == "fast" and c.available and c.score_max > 0]
         slow_components = [c for c in components if c.tier == "slow" and c.available and c.score_max > 0]
 
@@ -4189,10 +4344,8 @@ class DataFetcher:
                 return [], None, 0.0
             if isinstance(raw, dict):
                 expiry_date = raw.get("expiry_date")
-                # Sibling of expiry_date in the same payload. Upstream refuses to emit a
-                # success response without it (option_chain_service.py:330-335), so on
-                # success it is always present — but it can legitimately be 0, hence the
-                # `or 0` here and the caller's own truthiness guard.
+                # Sibling of expiry_date in the same payload. Upstream will not return success without it (option_chain_service.py:330-335),
+                # so it is always present here — but it can legitimately be 0, hence `or 0` and the caller's own truthiness guard.
                 ul_ltp = float(raw.get("underlying_ltp") or 0)
                 nested = raw.get("chain", raw.get("data", []))
             else:
@@ -4512,6 +4665,8 @@ class DataFetcher:
         expiry_list = self._expiry_list(symbol)
         if not expiry_list:
             return None
+        mkt = self.config.market
+        lo, hi = mkt.dte_window.get(symbol, (mkt.dte_min, mkt.dte_max))
         now = get_ist_now().date()
         for exp in expiry_list:
             exp_text = str(exp).strip().upper()
@@ -4525,7 +4680,7 @@ class DataFetcher:
             if exp_date is None:
                 continue
             dte = (exp_date - now).days
-            if self.config.market.dte_min <= dte <= self.config.market.dte_max:
+            if lo <= dte <= hi:
                 return exp_date.strftime("%d%b%y").upper()
         return None
 
@@ -4763,8 +4918,7 @@ class TrailSLEngine:
             if self._data_skip_logged:
                 self._data_skip_logged.clear()
             confirmed_close = opt_ltp
-            # Defence in depth — the quote-API fallback can still hold a 0, which would
-            # poison trail_peak_close.
+            # Defence in depth — the quote-API fallback can still hold a 0, which would poison trail_peak_close.
             if confirmed_close is None or confirmed_close <= 0:
                 continue
             prior_trail_peak_close = (pos.trail_peak_close if pos.trail_peak_close is not None else pos.entry_premium)
@@ -4798,10 +4952,9 @@ class TrailSLEngine:
                     _signal_trail_boost = 1.0 + (_sig_strength * 0.5)
             
             # ── Mode Processing ────────
-            # spot_ltp resolved above (L4380) and never reassigned since. Only the
-            # spot-consuming modes may gate on it — premium trail never reads spot,
-            # so an unconditional gate here silently froze the default-config trail
-            # whenever the spot feed went stale, with no [DATA-MISS] log (F92).
+            # Gate on spot_ltp only in the modes that read spot. Premium
+            # trail does not, so gating it here froze the default trail on a
+            # stale spot feed, silently and with no [DATA-MISS] log (F92).
             if cfg.trail.sl_method == "key_level":
                 if spot_ltp is None:
                     continue
@@ -4988,9 +5141,8 @@ class TrailSLEngine:
         if not pos.premium_trail_active:
             new_sl = confirmed_close - step_pts
 
-            # Profit-lock ladder: guarantee a minimum locked profit at activation.
-            # ATR skips the floor so its first SL stays below BE and the position has
-            # room; the natural ratchet lifts SL above BE as premium grows.
+            # Profit-lock ladder: guarantee a minimum locked profit at activation. ATR skips the floor so its first SL stays below BE and
+            # the position has room; the natural ratchet lifts SL above BE as premium grows.
             if cfg.trail.sl_method == "atr":
                 _lock_floor = 0.0  # no floor — SL sits at confirmed_close - step_pts
             else:
@@ -5017,9 +5169,8 @@ class TrailSLEngine:
                     self._last_pl_pct[pos.slot_id] = _pct_of_target
                     new_sl = max(new_sl, _lock_floor)
                 else:
-                    # No positive target gain (tgt <= ep, e.g. PREMIUM_TARGET_PTS=0 or a
-                    # restored broker LIMIT at/below entry). Breakeven IS the floor here —
-                    # bind it explicitly so the _lock_type read below stays defined (F91).
+                    # No positive target gain (PREMIUM_TARGET_PTS=0, or a restored LIMIT at/below entry). Breakeven is
+                    # the floor here — bind it explicitly so the _lock_type read below stays defined (F91).
                     _lock_floor = ep
                     new_sl = max(new_sl, _lock_floor)
 
@@ -5591,11 +5742,10 @@ class StrikeSelector:
                 best_row  = row
 
         # ── Stage 5: Conviction-scaled minimum quality gate ───────────────────
-        # Institutional logic: strong signal → more willing to execute on a
-        # slightly imperfect strike.  Weak signal → insist on cleaner setup.
-        # Scales between [threshold * 0.80, threshold * 1.00]:
-        #   conviction=0.0 → min = threshold × 1.00  (strictest)
-        #   conviction=1.0 → min = threshold × 0.80  (relaxed 20%)
+        # min = threshold × (1.00 - 0.20 × conviction). A strong signal accepts a
+        # slightly worse strike; a weak one demands a clean setup.
+        #   conviction 0.0 → threshold × 1.00  (strictest)
+        #   conviction 1.0 → threshold × 0.80  (20% looser)
         min_asym = cfg.entry.asym_score_threshold * (1.00 - conviction * 0.20)
         if best_asym < min_asym:
             inf(
@@ -5934,8 +6084,7 @@ class WebSocketManager:
             if option_symbol not in self._delta_fetch_inflight:
                 if len(self._delta_fetch_inflight) < self._delta_fetch_limit:
                     self._delta_fetch_inflight.add(option_symbol)
-                    # Use thread pool instead of unlimited daemon spawn
-                    # Pass fetcher to reuse cached greeks instead of duplicate API call
+                    # Use thread pool instead of unlimited daemon spawn Pass fetcher to reuse cached greeks instead of duplicate API call
                     self._delta_executor.submit(self._fetch_and_cache_delta, underlying, option_symbol, self._fetcher)
                 else:
                     inf(f"[WS] Delta fetch suppressed because {len(self._delta_fetch_inflight)} requests are pending")
@@ -6037,6 +6186,19 @@ class WebSocketManager:
           Part A — option premium trail (premium trail SL)
           Part B — spot trail (spot-based SL ratchet for indices)
         """
+        # ── Session recorder — the one explicit call ───────────────────────
+        # Own try/except, placed ahead of anything that matters:
+        # a fault in the recorder must not cost a tick. `_rec`
+        # is None when it is missing or failed to start.
+        _rec = getattr(self, "_rec", None)
+        if _rec is not None:
+            try:
+                _rec.on_tick(data)
+            except Exception:                        # noqa: BLE001
+                # Deliberately silent per tick — this fires thousands of times a session, and a broken recorder must not flood the log or
+                # slow the trail. `at doctor` reports capture health instead.
+                pass
+
         # ── RAW CALLBACK DIAGNOSTIC — fires on EVERY WS message ────────────
         self._raw_cb_count += 1
         _raw_cnt = self._raw_cb_count
@@ -6054,13 +6216,11 @@ class WebSocketManager:
         if not isinstance(data, dict):
             return
             
-        # OpenAlgo SDK encapsulates actual market data inside a nested 'data' dictionary.
-        # Fallback to root level just in case.
+        # OpenAlgo SDK encapsulates actual market data inside a nested 'data' dictionary. Fallback to root level just in case.
         inner_data = data.get("data") if isinstance(data.get("data"), dict) else data
         
         symbol = inner_data.get("symbol") or data.get("symbol", "")
-        # None-aware, not `or` — an inner ltp of 0 must reach the guard below, not be
-        # swapped for the root key.
+        # None-aware, not `or` — an inner ltp of 0 must reach the guard below, not be swapped for the root key.
         ltp = inner_data.get("ltp")
         if ltp is None:
             ltp = data.get("ltp")
@@ -6210,9 +6370,8 @@ class WebSocketManager:
                     err("[WS] Stop-path disconnect error", _disc_exc)
                 break
             try:
-                # One client instance, one connect(), many subscriptions (SDK contract).
-                # Re-instantiating api() per attempt leaks SDK threads until the OS limit,
-                # so reuse self.client and disconnect() the transport before reconnecting.
+                # One client instance, one connect(), many subscriptions (SDK contract). Re-instantiating api() per attempt leaks SDK
+                # threads until the OS limit, so reuse self.client and disconnect() the transport before reconnecting.
                 inf(f"[WS] Connecting... (active OS threads: {threading.active_count()})")
                 try:
                     self.client.disconnect()   # Release previous transport threads
@@ -6379,6 +6538,16 @@ class WebSocketManager:
 
     def stop(self) -> None:
         """Shut down thread pool executors and signal WS thread to stop."""
+        # Close the capture first so the footer is written and the gzip stream ends cleanly. A
+        # truncated capture is still readable, but a closed one carries the session summary.
+        _rec = getattr(self, "_rec", None)
+        if _rec is not None:
+            try:
+                _rec.close()
+                self._rec = None
+            except Exception as _rec_exc:            # noqa: BLE001
+                err("[TAPE] close failed", _rec_exc)
+
         self._ws_stop_event.set()
         try:
             self.client.disconnect()
@@ -6612,9 +6781,8 @@ class OrderManager:
         else:
             tranche.sl_order_id = None
             tranche.tgt_order_id = None
-            # pos.sl_order_id / pos.tgt_order_id are deliberately left set — they belong
-            # to the runner tranche, and clearing them here would make the next verify
-            # pass reissue duplicates.
+            # pos.sl_order_id / pos.tgt_order_id are deliberately left set — they belong to the runner
+            # tranche, and clearing them here would make the next verify pass reissue duplicates.
         inf(f"[PARTIAL] {underlying} {opt_sym}: filled {filled_qty} @ \u20b9{price:.2f} P&L \u20b9{tr_pnl:.0f} | residual {tranche.qty}")
 
     def _raw_order_status(self, order_id: str) -> dict | None:
@@ -6794,8 +6962,8 @@ class OrderManager:
                     dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
                     key = f"{tr.tranche_id}_{attr_name}"
                     if broker_stat in ("complete", "filled", "executed") and key not in broker_filled:
-                        # Tradebook is the trusted price source, not average_price. May be
-                        # None — consumers must not treat that as a zero fill.
+                        # Tradebook is the trusted price source, not average_price.
+                        # May be None — consumers must not treat that as a zero fill.
                         executed_price = self._resolve_fill_price(
                             oid, pos.symbol, data,
                             context=f"post-cancel {attr_name} {underlying} t={tr.tranche_id}",
@@ -6891,8 +7059,7 @@ class OrderManager:
             if broker_stat is not None:
                 dbg(f"[ORDER] Post-cancel status {oid}: {broker_stat}")
                 if broker_stat in ("complete", "filled", "executed") and attr_name not in broker_filled:
-                    # Tradebook is the trusted price source, not average_price. May be
-                    # None — consumers must not treat that as a zero fill.
+                    # Tradebook is the trusted price source, not average_price. May be None — consumers must not treat that as a zero fill.
                     executed_price = self._resolve_fill_price(oid, pos.symbol, data, context=f"post-cancel {attr_name} {underlying}")
                     broker_filled[attr_name] = {"order_id":    oid, "executed":    executed_price, "order_status": broker_stat}
                     dbg(f"[ORDER] Post-cancel check detected {attr_name} already filled: {oid} @ {executed_price}")
@@ -7209,8 +7376,7 @@ class OrderManager:
                             data = resp.get("data") or resp
                             broker_stat = str(data.get("order_status", "")).lower()
                             if broker_stat in ("complete", "filled", "executed"):
-                                # Resolve via tradebook, then last LTP — a 0 books the full
-                                # premium as strike loss.
+                                # Resolve via tradebook, then last LTP — a 0 books the full premium as strike loss.
                                 executed_price = self._resolve_fill_price(
                                     oid, pos.symbol, data,
                                     context=f"protection fill {attr_name} {underlying} t={tr.tranche_id}",
@@ -7236,8 +7402,7 @@ class OrderManager:
                     data = resp.get("data") or resp
                     broker_stat = str(data.get("order_status", "")).lower()
                     if broker_stat in ("complete", "filled", "executed"):
-                        # Resolve via tradebook, then last LTP — a 0 books the full premium
-                        # as strike loss.
+                        # Resolve via tradebook, then last LTP — a 0 books the full premium as strike loss.
                         executed_price = self._resolve_fill_price(
                             oid, pos.symbol, data,
                             context=f"protection fill {attr_name} {underlying}",
@@ -7355,6 +7520,8 @@ class OrderManager:
         pos.tranches = _build_tranches(pos, qty, cfg)
         with self._state.state_lock:
             self._state.positions.add(pos)
+        # Without this a trade that opens and never exits leaves no trace at all.
+        self._journal.write(TradeAnalytics.build_entry(underlying, pos, cfg.broker.paper_trade))
         # Link snapshot cache with the active option symbol
         self._state.snapshot_cache.set_option_symbol(underlying, option_symbol)
 
@@ -7988,9 +8155,8 @@ class OrderManager:
                         self._journal.write(tr_exit_record)
                         dbg(f"[ORDER] Tranche {tr_id} {attr_name} filled at broker — P&L ₹{tr_pnl:.0f}")
             if pos.remaining_qty == 0:
-                # All tranches exited via broker fills — cleanup without _finalize_exit
-                # to avoid double-recording P&L and duplicate full-exit journal row.
-                # This path bypasses closing record_exit() — settle streak here (F97).
+                # All tranches exited via broker fills — cleanup without _finalize_exit to avoid double-recording P&L and duplicate
+                # full-exit journal row. This path bypasses closing record_exit() — settle streak here (F97).
                 self._state.settle_strike_loss(pos.slot_id)
                 self._risk.close_trade(pos.slot_id)
                 opt_sym = pos.symbol
@@ -8015,10 +8181,11 @@ class OrderManager:
             pos.exit_pending = False
             return
 
-        # F100 defence in depth: never sell more than the broker holds. positionbook is account-wide,
-        # not strategy-scoped — suppressing the SELL is always sound (naked-short risk is account-level),
-        # but booking the exit is NOT (qty may be netted by another strategy). Always suppress, never
-        # finalize here; leave the slot tracked for the next reconciliation cycle.
+        # F100: never sell more than the broker actually holds.
+        #   - positionbook qty is account-wide, not per-strategy
+        #   - suppress the SELL: always safe, naked-short risk is account-level
+        #   - book the exit: NOT safe, another strategy may have netted the qty
+        # So suppress and leave the slot tracked; reconciliation closes it later.
         if not cfg.broker.paper_trade:
             _held = self._broker_net_qty(pos.symbol)
             if _held is not None:
@@ -8113,8 +8280,7 @@ class OrderManager:
                         9,
                     )
 
-            # Safe to release the exit lock so the next SL trigger from the WS trail can
-            # retry the exit on the next tick.
+            # Safe to release the exit lock so the next SL trigger from the WS trail can retry the exit on the next tick.
             dbg(f"[ORDER] Exit order not submitted for {underlying} — releasing for retry")
             with self._state.exit_lock:
                 self._state.exit_queue.discard(pos.slot_id)
@@ -8130,17 +8296,15 @@ class OrderManager:
             )
         filled = self.poll_order_status(order_id)
         if not filled:
-            # Order submitted but fill could not be confirmed within the poll window.
-            # Leave pending_exits intact so check_pending_exits() reconciles on the
-            # next strategy cycle; position and exit_pending stay as-is.
+            # Order submitted but fill could not be confirmed within the poll window. Leave pending_exits intact so check_pending_exits()
+            # reconciles on the next strategy cycle; position and exit_pending stay as-is.
             inf(f"[ORDER] Exit fill unconfirmed for {underlying} (order {order_id}) — leaving in pending_exits for reconciliation")
             if sellable_qty < pos.remaining_qty:
                 pos.exit_pending = False
             return
 
         data           = filled.get("data") or filled
-        # Never book (0 - entry) * qty on an unpopulated average_price — resolve via
-        # tradebook, or defer to reconciliation.
+        # Never book (0 - entry) * qty on an unpopulated average_price — resolve via tradebook, or defer to reconciliation.
         _resolved_px   = self._resolve_fill_price(order_id, pos.symbol, data, context=f"exit {underlying}")
         if _resolved_px is None:
             inf(f"[ORDER] Exit fill price unresolved for {underlying} (order {order_id}) — leaving in pending_exits for reconciliation")
@@ -8454,14 +8618,45 @@ class OptionsBuyerEdgeBot:
         if cfg.broker.ws_url:
             api_kwargs["ws_url"] = cfg.broker.ws_url   # explicit override; otherwise SDK derives from host
         self.client  = api(**api_kwargs)
-        self.state   = BotState(chain_smooth_bars=cfg.market.chain_smooth_bars)
+        self.state   = BotState(chain_smooth_bars=cfg.market.chain_smooth_bars,
+                                journal_path=cfg.journal.trade_journal_path)
+        self._pnl_curve = PnlCurveWriter(cfg.journal.pnl_curve_dir) if cfg.journal.pnl_curve_dir else None
         self.risk    = RiskManager(self.client, cfg, self.state)
         self.fetcher = DataFetcher(self.client, cfg, notify_callback=self._send_alert)
+
+        # ── Attach the session recorder, if it is installed ─────────────
+        # One call wraps the fetcher's read methods, so every quote, chain and
+        # candle is captured with no other change. `_rec` is None when absent.
+        self._rec = None
+        if not _TAPE_OK:
+            inf(f"[TAPE] WARNING: recorder not available ({_TAPE_WHY}) — "
+                "running WITHOUT market-data capture. Trading is unaffected. "
+                "Install it with: at recorder install")
+        else:
+            try:
+                # Relative, like OpenAlgo's own LOGS_DIR — /app/log/tape under
+                # Docker, <clone>/log/tape when run natively.
+                _tape_path = os.environ.get("MCP_TAPE_DIR", "log/tape")
+                self._rec = _tape_attach(
+                    self.fetcher,
+                    path=_tape_path,
+                    session=os.environ.get("STRATEGY_ID", "BuyerEdgeStrategy"),
+                    meta={"strategy": os.environ.get("STRATEGY_NAME", "BuyerEdgeStrategy")},
+                )
+                inf(f"[TAPE] recording to {_tape_path}")
+            except Exception as _e:                  # noqa: BLE001
+                # A recorder that cannot start is a recorder that is off, not a strategy that cannot run.
+                self._rec = None
+                inf(f"[TAPE] WARNING: could not start ({type(_e).__name__}: {_e}) — "
+                    "continuing without capture. Trading is unaffected.")
         self.sl_policy      = EntryStopLossPolicy(self.fetcher, cfg)
         self.trail_engine   = TrailSLEngine(self.fetcher, cfg)
         self.scorer         = SignalEngine(cfg)
         self.strikes        = StrikeSelector(self.fetcher, cfg)
         self.ws             = WebSocketManager(self.client, cfg, self.state)
+        # The tick stream is not a fetcher method, so `attach()` cannot wrap it. Hand the recorder
+        # to the object that receives ticks; None is fine and is what `_on_ws_data` checks for.
+        self.ws._rec = self._rec
         self.orders         = OrderManager(self.client, cfg, self.state, self.risk, self.ws, self.fetcher, self._send_alert)
         self.chain_snapshot_writer = ChainSnapshotWriter(cfg.chain_snapshot.dir_path)
         # Wire callbacks and dependencies to break circular dependency + consolidate API calls
@@ -8736,9 +8931,8 @@ class OptionsBuyerEdgeBot:
                 if restored_spot <= 0:
                     restored_spot = entry_px
 
-                # entry_conviction is not persisted, so it restores as 0.0 — trail
-                # activation is deliberately later post-restart. Delta is recovered from
-                # greeks.delta (never top-level, F96); zero maps to None → Unknown band.
+                # entry_conviction is not persisted, so it restores as 0.0 — trail activation is deliberately later post-restart. Delta is
+                # recovered from greeks.delta (never top-level, F96); zero maps to None → Unknown band.
                 _restore_delta = None
                 try:
                     _greeks = self.client.optiongreeks(symbol=sym, exchange=cfg.market.fno_exchange)
@@ -8870,8 +9064,7 @@ class OptionsBuyerEdgeBot:
             with self.state.state_lock:
                 if pos.exit_pending:
                     continue
-                # No exit_lock — the write is covered by state_lock, and this path never
-                # touches exit_queue.
+                # No exit_lock — the write is covered by state_lock, and this path never touches exit_queue.
                 pos.exit_pending = True
             inf(f"[TIME-EXIT] {ul}: held {held_minutes:.0f}m >= max {cfg.market.max_hold_minutes}m — exiting (theta guard)")
             self.orders.place_exit(ul, f"MaxHoldTime({cfg.market.max_hold_minutes}m)", slot_id=pos.slot_id)
@@ -9076,7 +9269,7 @@ class OptionsBuyerEdgeBot:
         inf(f"  Activation Lock : lock_pct={cfg.trail.activation_lock_pct:.0%} of target gain at activation")
         inf(f"  Long Only Mode  : {cfg.entry.long_only_mode}")
         inf(f"  Broker SL Orders: {cfg.broker.broker_sl_orders}")
-        inf(f"  DTE Range       : {cfg.market.dte_min} – {cfg.market.dte_max} days")
+        inf(f"  DTE Range       : {cfg.market.dte_min}–{cfg.market.dte_max} days default, per-index {cfg.market.dte_window}")
         inf(f"  Candle Interval : {cfg.market.candle_interval}")
         inf(f"  Check Interval  : {cfg.market.signal_check_interval}s")
         _os_auto = " (auto-complete entries)" if cfg.broker.order_stream_complete_entries else ""
@@ -9098,6 +9291,13 @@ class OptionsBuyerEdgeBot:
             inf(f"  Trade Journal   : {os.path.abspath(cfg.journal.trade_journal_path)}")
         if cfg.journal.known_order_ids_path:
             inf(f"  Known Order IDs : {os.path.abspath(cfg.journal.known_order_ids_path)}")
+        # The remaining two writers are the ones a restart-loses-data problem
+        # would show up in first, so resolve them here too rather than leaving
+        # them to be inferred from the relative default.
+        if cfg.journal.pnl_curve_dir:
+            inf(f"  P&L Curve       : {os.path.abspath(cfg.journal.pnl_curve_dir)}")
+        if cfg.chain_snapshot.enabled and cfg.chain_snapshot.dir_path:
+            inf(f"  Chain Snapshots : {os.path.abspath(cfg.chain_snapshot.dir_path)}")
         if cfg.broker.paper_trade:
             inf("\n  *** PAPER TRADE MODE — no real orders will be sent ***")
         inf("=" * 70)
@@ -9185,10 +9385,8 @@ class OptionsBuyerEdgeBot:
                 inf(f"[SCAN] {symbol}: no expiry available — skip")
                 return
 
-        # Fetch option chain
-        # Spot rides in on the chain payload — one fewer quote call per symbol per
-        # scan. Cost of the trade: the no-spot bail now happens after the expiry and
-        # chain fetches instead of before them.
+        # Fetch option chain Spot rides in on the chain payload — one fewer quote call per symbol per scan. Cost of the trade: the no-spot
+        # bail now happens after the expiry and chain fetches instead of before them.
         chain_rows, expiry_used, spot = self.fetcher.fetch_option_chain(symbol, expiry)
         if not chain_rows:
             inf(f"[SCAN] {symbol}: empty option chain")
@@ -9261,9 +9459,8 @@ class OptionsBuyerEdgeBot:
             if attach_dod_oi(smoothed, _prev_oi):
                 inf(f"{_dod_flow_note(smoothed)} | {symbol}")
 
-        # Prefetch greeks only for what this scan consumes — ATM CE/PE (L3 delta), near-ATM
-        # strikes with OI > 0 (GEX), and liquidity-qualified strikes (selection delta gate).
-        # Restricted to near-ATM to stay inside the rate budget.
+        # Prefetch greeks only for what this scan consumes — ATM CE/PE (L3 delta), near-ATM strikes with OI > 0 (GEX), and
+        # liquidity-qualified strikes (selection delta gate). Restricted to near-ATM to stay inside the rate budget.
         _atm_idx = strikes.index(atm_k)
         _near_strikes = set(strikes[max(0, _atm_idx - cfg.market.strike_count):
                                      _atm_idx + cfg.market.strike_count + 1])
@@ -9628,9 +9825,9 @@ class OptionsBuyerEdgeBot:
             qty = fixed_qty
             inf(f"[SCAN] {symbol}: qty={qty} (risk-based sizing disabled — using fixed lot_mult)")
 
-        # ── WS connectivity guard — must run last so all preflight logs are printed ──
-        # When WS is down, trail/target detection is blind; broker SL-M provides minimum protection.
-        # Block entry entirely if broker_sl_orders=False (no fallback protection at all).
+        # ── WS connectivity guard — runs last so every preflight log is printed ──
+        # WS down = trail and target detection blind. Broker SL-M is the only cover
+        # left, so with broker_sl_orders=False there is none — block entry outright.
         if not self.ws.is_connected():
             if not cfg.broker.broker_sl_orders:
                 inf(f"[SCAN] {symbol}: entry BLOCKED — WS disconnected and broker_sl_orders=False. No protection available.")
@@ -9889,6 +10086,20 @@ class OptionsBuyerEdgeBot:
                 if _invariant_cycle % 60 == 0:
                     validate_state(self.state, {})
 
+                if self._pnl_curve is not None:
+                    with self.state.state_lock:
+                        _curve_pos = self.state.positions.all_positions()
+                    _ts = get_ist_now().isoformat()
+                    _rows = []
+                    for _p in _curve_pos:
+                        _snap = self.state.snapshot_cache.get_option(_p.spot_symbol)
+                        _ltp = _snap.option_ltp if _snap else None
+                        if not _ltp:
+                            continue
+                        _rows.append({"slot_id": _p.slot_id, "ts": _ts, "symbol": _p.symbol,
+                                      "ltp": float(_ltp), "pnl_pts": float(_ltp) - _p.entry_premium})
+                    self._pnl_curve.append(_rows)
+
                 if LIVE_PNL_ALERT_INTERVAL > 0 and self._is_market_hours():
                     with self.state.state_lock:
                         pnl_positions = self.state.positions.all_positions()
@@ -9898,8 +10109,8 @@ class OptionsBuyerEdgeBot:
                             self._send_live_pnl_alert(pnl_positions)
                             self._last_pnl_alert_time = now_ts
 
-                # Own interval, no market-hours gate — a safety net must not switch off
-                # with P&L alerts, and must outlast the 15:13 square-off.
+                # Own interval, no market-hours gate — a safety net must not switch
+                # off with P&L alerts, and must outlast the 15:13 square-off.
                 if NAKED_SHORT_CHECK_INTERVAL > 0:
                     now_ts = time.time()
                     if now_ts - self._last_naked_short_check_time >= NAKED_SHORT_CHECK_INTERVAL:
