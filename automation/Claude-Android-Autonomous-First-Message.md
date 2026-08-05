@@ -191,8 +191,10 @@ Then repeat **Step 1** and **Step 2** to clean-push and re-register.
 
 - **24/7 operation:** the first message of each fresh 5-hr window is sent automatically,
   day or night.
-- **Quiet between windows:** the phone sleeps (screen off, locked) for most of the window
-  and only wakes near expiry.
+- **Quiet between windows:** the phone's screen stays off for most of the window and only
+  wakes near expiry. A partial wake lock (CPU-only, screen still off) is held during the
+  loop's sleep so the device cannot deep-sleep and freeze the timer; it is released as soon
+  as the loop wakes.
 - **Robust wake path:** if the screen is off and locked, the script wakes it (`keyevent 26`)
   and unlocks via `wm dismiss-keyguard` (only a short swipe if still locked) — then handles
   the notification shade **after** unlock so the unlock swipe never drags the shade down.
@@ -950,16 +952,22 @@ echo "" >> "$LOG"
 ```sh
 #!/system/bin/sh
 
-# Claude Keep-Alive – Main Loop (v4.1)
+# Claude Keep-Alive – Main Loop (v4.2)
 # 24/7: sends the FIRST message of each 5-hr window whenever the window
 # is fresh, day or night. Uses smart sleep: reads the next-check
 # timestamp written by claude_keepalive.sh and sleeps until then,
 # instead of polling every 5 minutes.
+#
+# v4.2: Holds a partial wake lock during sleep so the device cannot
+# deep-sleep (which freezes a userspace `sleep` timer and stalls the
+# loop). Lock released after waking.
 
 SCRIPT=/data/local/tmp/claude_keepalive.sh
 LOG=/data/local/tmp/claude_loop.log
 NEXT_CHECK=/data/local/tmp/claude_next_check
 PID_FILE=/data/local/tmp/claude_loop.pid
+WL_NAME="claude_keepalive_wl"
+WL_PATH="/sys/power/wake_lock"
 MAX_SLEEP=6000      # cap a single sleep at 100 min (safety)
 
 # Format seconds → "X hr Y min" / "X min" / "X S" (omit empty parts)
@@ -1012,6 +1020,14 @@ cleanup_stale() {
     echo "$$" > "$PID_FILE"
 }
 
+# Take a partial wake lock so the device stays awake during a long sleep.
+wl_acquire() {
+    echo "$WL_NAME" > "$WL_PATH" 2>/dev/null
+}
+wl_release() {
+    echo "$WL_NAME" > /sys/power/wake_unlock 2>/dev/null
+}
+
 sleep_until() {
     # $1 = epoch timestamp to wake up at
     local now wait target
@@ -1025,7 +1041,9 @@ sleep_until() {
     fi
     target=$(epoch_to_ist "$1")
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sleeping $(fmt_secs $wait) (wake at $target IST)" >> "$LOG"
+    wl_acquire
     sleep "$wait"
+    wl_release
 }
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Loop started (24/7, smart sleep)" >> "$LOG"
