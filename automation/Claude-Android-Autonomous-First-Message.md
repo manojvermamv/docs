@@ -7,6 +7,7 @@ by sending **only the first message of each 5-hour rolling window**, then stayin
 until the window is about to expire.
 
 It does **not** send keep-alive pings every few minutes. Instead it:
+
 1. Reads the Usage page and classifies the window state.
 2. When the window is **fresh** (`0% used`, no reset timer), sends one message
    `Hello From India? <full IST datetime>`.
@@ -16,7 +17,9 @@ It does **not** send keep-alive pings every few minutes. Instead it:
    repeats — 24/7, day or night.
 
 The two scripts run as a background daemon (`nohup`) and self-clean stale instances on
-startup.
+startup. The loop holds a **partial wake lock** while sleeping so the device cannot
+deep-sleep and freeze the timer, and every UI action is **package-checked** so it never
+fires against a non-Claude window.
 
 ---
 
@@ -28,7 +31,8 @@ startup.
 | Android device | USB debugging enabled, connected via USB, **rooted** |
 | Root access | `input text` / `input keyevent` / `wm dismiss-keyguard` need `su -c` (`INJECT_EVENTS` restriction) |
 | Claude app | Installed and logged in on the device |
-| Screen resolution | All coordinates are for **1080x2460**. For other screens, dump UI and re-measure. |
+| Lock-screen security | **Swipe / None** only — `wm dismiss-keyguard` cannot unlock a PIN/pattern/password |
+| Screen resolution | Reference coordinates are for **1080x2460**; Settings/Usage are found dynamically, so layout changes are tolerated |
 | Files | `claude_keepalive.sh` and `claude_loop.sh` (see below) |
 
 ### Verify ADB Connection
@@ -38,6 +42,7 @@ startup.
 ```
 
 Expected:
+
 ```
 List of devices attached
 <SERIAL>    device
@@ -56,8 +61,8 @@ Both live on the device at `/data/local/tmp/`. Working copies are kept on the PC
 
 | File | Role |
 |------|------|
-| `claude_keepalive.sh` | One unit of work: wake, unlock, network check, navigate to Usage, classify state, optionally send + verify the first message, then write the next-check time. |
-| `claude_loop.sh` | Daemon that sleeps until the next-check time, runs `claude_keepalive.sh`, and self-cleans stale instances. |
+| `claude_keepalive.sh` | One unit of work: wake, unlock, network check, navigate to Usage, classify state, optionally send + verify the first message, then write the next-check time. **v6.4** |
+| `claude_loop.sh` | Daemon that sleeps until the next-check time (holding a wake lock), runs `claude_keepalive.sh`, and self-cleans stale instances. **v4.2** |
 
 ### On-device files / logs
 
@@ -69,7 +74,7 @@ Both live on the device at `/data/local/tmp/`. Working copies are kept on the PC
 | `/data/local/tmp/claude_loop.log` | Loop daemon log |
 | `/data/local/tmp/claude_next_check` | Epoch (seconds) of the next check |
 | `/data/local/tmp/claude_loop.pid` | PID of the running loop (single-instance guard) |
-| `/data/local/tmp/claude_keepalive.lock` | Lock file held while a keep-alive unit runs |
+| `/data/local/tmp/claude_keepalive.lock` | Lock file held while a keep-alive unit runs (stale >30 min auto-removed) |
 
 ---
 
@@ -84,6 +89,121 @@ Both live on the device at `/data/local/tmp/`. Working copies are kept on the PC
 
 **Key rule:** a message is sent **only** when the state is `TYPE3_FRESH`. It is never sent
 while the window still has time remaining, so it can never count against an expiring window.
+
+---
+
+## Architecture & Execution Flow (v6.4)
+
+Every navigation/action tap is wrapped in `nav_step()`: **tap → 3s delay → verify the
+focused window is `com.anthropic.claude`**. If the app crashes, a system dialog grabs
+focus, or HOME/shade steals it, the script force-stops + relaunches Claude and restarts
+navigation from scratch (up to 3 attempts). Settings/Usage taps are located dynamically
+by `text`/`content-desc` (Claude-scoped) so app layout changes do not break navigation.
+
+Two additions in v6.4 keep the run robust:
+
+- **Drift detection.** `detect_screen()` now returns `DRIFTED` for **any** unrecognized
+  in-app page — Settings sub-pages (Notifications, Profile, Billing, …), modals,
+  conversations, etc. — not just pages with a `Go back` button. `UNKNOWN` is reserved for
+  the case where the UI dump could not be produced. Recovery from a drift is a **fresh
+  relaunch** (force-stop + relaunch) — far more reliable than navigating back from a page
+  whose layout is unknown — then navigation restarts via the normal path.
+- **Screen wake lock.** The loop daemon's partial wake lock keeps the CPU awake but not
+  the display, so a long run could hit `screen_off_timeout` (60 s here) mid-operation.
+  While working, the keepalive raises the display timeout to 30 min
+  (`screen_lock_on`), restoring the saved value on exit (`screen_lock_off`), so the
+  screen stays on for the whole run.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     LOOP DAEMON (claude_loop.sh)                │
+│   start → cleanup_stale (kill old loop/orphans) → while true:   │
+│     read next_check → due?  YES → run claude_keepalive.sh       │
+│                              NO  → sleep_until (holds wake lock)│
+└───────────────────────────────────┬─────────────────────────────┘
+                                    │  keep-alive unit
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  KEEP-ALIVE UNIT (claude_keepalive.sh)          │
+│  [Lock guard: fresh lock → exit; stale lock (>30m) → clean]     │
+│                     │                                           │
+│                     ▼                                           │
+│  [Network check] ──(no net)──► [write next_check = +10m] → exit │
+│                     │ (OK)                                      │
+│                     ▼                                           │
+│  [Wake screen + dismiss keyguard] (Swipe/None security only)    │
+│                     ▼                                           │
+│  [Launch Claude] → [STRICT PACKAGE CHECK GATE]                  │
+│                     │ YES                    │ NO               │
+│                     ▼                        ▼                  │
+│          [Dump UI & detect screen]  [force-stop + relaunch]     │
+│   detect_screen() → in-app screen state:                        │
+│     LOGIN / NOT_CLAUDE → force-stop + relaunch Claude           │
+│     USAGE              → already there (skip navigation)        │
+│     CHAT_HOME / UNKNOWN → menu (66,182) → Settings → Usage      │
+│     MENU_DRAWER        → Settings → Usage                       │
+│     SETTINGS           → tap Usage                              │
+│     DRIFTED (sub-page) → force-stop + relaunch fresh            │
+│   [each tap: nav_step package check; retry max 3 from scratch]  │
+│   [detect_screen returns] → next: PARSE & CLASSIFY below        │
+│                    ┌─────────────────────────────┐              │
+│                    │ PARSE & CLASSIFY USAGE STATE│              │
+│                    └───────┬──────────┬──────────┴──────────┐   │
+│                            ▼          ▼                     ▼   │
+│                     TYPE1_ACTIVE  TYPE2_LIMIT           TYPE3_FRESH
+│                     (%1–99, timer) (100%, wait reset)   (0%, no timer)
+│                            │          │                     │
+│                            ▼          ▼                     ▼
+│                    schedule =      reset known?        [SEND VERIFY LOOP]
+│                    expiry − 10m    YES → reset + 2m     cycle 1: send message
+│                                    NO  → +5m          goto_usage + refresh
+│                                                       verified / state changed?
+│                                                        YES → schedule expiry−10m
+│                                                        NO  → backoff 2→4→6…m
+│                                                               (max 15 cycles)
+│                            └──────► write next_check ──► HOME → exit
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Usage State Classification
+
+```
+                                  [Dump UI XML]
+                                        │
+                                        ▼
+                         Does XML contain Login strings?
+                         ("Continue with Google", etc.)
+                                 ├── YES ──► [State = LOGIN] (Abort execution)
+                                 └── NO
+                                        │
+                                        ▼
+                            Extract `X% used` Value
+                            Extract `Resets in ...` Text
+                                        │
+                                        ▼
+            ┌───────────────────────────┼───────────────────────────┐
+            ▼                           ▼                           ▼
+  Is % used >= 100%?            Is Reset Text absent         Is % used between
+            │                    AND % used == 0%?             1% and 99% WITH
+            ▼                           │                    Reset Text present?
+  [STATE = TYPE2_LIMIT]                 ▼                           │
+   • Window exhausted.          [STATE = TYPE3_FRESH]               ▼
+   • Waiting for reset.          • Fresh window ready!       [STATE = TYPE1_ACTIVE]
+                                 • Target for message.      • Timer currently running.
+                                                           • Do not send message.
+```
+
+### Scheduling after each run
+
+| State at end of run | Next check |
+|--------------------|------------|
+| `TYPE1_ACTIVE` (still time left) | `now + (remaining − 10 min)` → just before expiry |
+| `TYPE1_ACTIVE` (near expiry, ≤10 min left) | `now + 10 min` (poll until it flips) |
+| `TYPE2_LIMIT` (reset time known) | `now + (reset_min + 2 min)` → first message tried promptly after reset |
+| `TYPE2_LIMIT` (reset time unknown) | `now + 5 min` |
+| `TYPE3_FRESH` (send failed) | `now + 5 min` (retry) |
+| `UNKNOWN` | `now + 10 min` |
+| **No network** | `now + 10 min`, then abort |
 
 ---
 
@@ -120,14 +240,25 @@ more than one runner.
 & $adb shell "cat /data/local/tmp/claude_keepalive.log" | Select-Object -Last 20
 ```
 
+For **realtime log monitoring** (streams both logs as the loop wakes, Ctrl+C to stop):
+
+```powershell
+& "C:\Program Files (x86)\Minimal ADB and Fastboot\adb.exe" shell "tail -f /data/local/tmp/claude_loop.log /data/local/tmp/claude_keepalive.log"
+```
+
 A healthy first run logs roughly:
+
 ```
 === Starting keep-alive ===
 Network OK (IP: <WAN_IP>)
 --- Screen readiness check ---
 … screen ON / unlocked / home …
 Initial screen: CHAT_HOME
-Screen after navigation: USAGE
+Screen before goto_usage (attempt 1): CHAT_HOME
+On chat (or unknown) → menu → Settings → Usage
+Settings found dynamically at (104 2323)
+Usage found dynamically at (227 913)
+Screen after navigation (attempt 1): USAGE
 Usage: 1% | Remaining: 2 hr 13 min | State: TYPE1_ACTIVE
 TYPE1: window already active … → nothing to send
 Scheduling next check in 2 hr 3 min …
@@ -135,47 +266,29 @@ Scheduling next check in 2 hr 3 min …
 Sleeping 1 hr 40 min (wake at 03:29 AM IST)
 ```
 
-### Step 4 — How it decides and sleeps
-
-After reading the Usage page, `claude_keepalive.sh` writes the next-check epoch:
-
-| State at end of run | Next check |
-|--------------------|------------|
-| `TYPE1_ACTIVE` (still time left) | `now + (remaining − 10 min)` → just before expiry |
-| `TYPE1_ACTIVE` (near expiry, ≤10 min left) | `now + 10 min` (poll until it flips) |
-| `TYPE2_LIMIT` | `now + 30 min` (wait for reset) |
-| `TYPE3_FRESH` (send failed) | `now + 5 min` (retry) |
-| `UNKNOWN` | `now + 10 min` |
-| **No network** | `now + 10 min`, then abort |
-
-The loop reads `claude_next_check` and `sleep`s until then (each individual sleep capped
-at 100 min as a safety; it re-checks the schedule on wake). This is why it goes quiet for
-hours instead of polling every few minutes.
-
-### Step 5 — Sending and verifying the first message
+### Step 4 — Sending and verifying the first message
 
 When the state is `TYPE3_FRESH`, the keep-alive runs `send_verify_loop`:
 
-1. Cycle 1: **send** the message, then navigate to Usage and **pull-to-refresh**.
+1. Cycle 1: **send** the message (`send_hi`), then navigate to Usage and **pull-to-refresh**.
 2. Accept success if the state is now `VERIFIED` (`TYPE1_ACTIVE`, usage 1–99%) **or** any
    new non-fresh state appeared.
 3. If still `TYPE3_FRESH`, wait `2 min`, retry; on next failure wait `4 min`, then `6 min`,
    etc. (increment by 2 min each cycle).
 4. If still not verified after **15 cycles**, stop this run and schedule a retry in 5 min
-   (the lock is released; the loop retries on the next scheduled run — a temporary give-up,
-   not a permanent stop).
+   (the lock is released; the loop retries on the next scheduled run).
 
 The message text is `Hello From India? YYYY-MM-DD HH:MM:SS IST`. Spaces are escaped as
 `%s` for `input text`; the IST datetime is produced with `TZ=Asia/Kolkata`.
 
-### Step 6 — Manual run / forced check
+### Step 5 — Manual run / forced check
 
 ```powershell
 & $adb shell "su -c 'rm -f /data/local/tmp/claude_keepalive.lock'"
 & $adb shell "su -c 'sh /data/local/tmp/claude_keepalive.sh'"
 ```
 
-### Step 7 — Stop everything / full clean reinstall
+### Step 6 — Stop everything / full clean reinstall
 
 ```powershell
 $adb = "C:\Program Files (x86)\Minimal ADB and Fastboot\adb.exe"
@@ -198,10 +311,21 @@ Then repeat **Step 1** and **Step 2** to clean-push and re-register.
 - **Robust wake path:** if the screen is off and locked, the script wakes it (`keyevent 26`)
   and unlocks via `wm dismiss-keyguard` (only a short swipe if still locked) — then handles
   the notification shade **after** unlock so the unlock swipe never drags the shade down.
+- **Package-gated actions:** every tap/type/swipe is preceded by a post-delay check that
+  the focused window is still `com.anthropic.claude`; on focus loss the app is relaunched
+  and navigation restarts (max 3 attempts).
+- **Drift-aware:** if a Settings tap lands on any in-app sub-page (Notifications, Profile,
+  Billing, …), the script detects `DRIFTED` and force-stops + relaunches Claude fresh, then
+  re-navigates — so a single mis-tap never breaks the run.
+- **Screen stays on while working:** `screen_off_timeout` is temporarily raised to 30 min
+  during the run and restored afterwards, so the display never blanks mid-operation.
+- **Dynamic targeting:** Settings/Usage are found by `text`/`content-desc` at runtime, so
+  app layout changes don't break navigation (hardcoded coords are only a fallback).
+- **Self-healing:** one loop runs (PID-file guard); stale instances are killed on start; a
+  stale `claude_keepalive.lock` older than 30 min is auto-removed; a stuck verify loop
+  gives up after 15 cycles and retries later.
 - **Network-aware:** if there is no network, it aborts and retries in 10 min rather than
   failing mid-navigation.
-- **Self-healing:** only one loop runs (PID-file guard); a crashed/stale instance is killed
-  on next start; a stuck verify loop gives up after 15 cycles and retries later.
 
 ---
 
@@ -211,41 +335,112 @@ Then repeat **Step 1** and **Step 2** to clean-push and re-register.
 |-------|-------|----------|
 | `INJECT_EVENTS` error on `input …` | Device security blocks input | Always prefix with `su -c` (root required) |
 | `input text` drops spaces | ADB limitation | Escape spaces as `%s` (already done for the message) |
-| Hardware back does nothing | **Claude ignores `keyevent 4`** | Use in-app buttons only: menu `(66,182)`; Settings `(104,2323)`; Usage `(227,913)` |
+| Hardware back does nothing | **Claude ignores `keyevent 4`** | Use in-app buttons only: menu `(66,182)`; Settings/Usage found dynamically |
 | Navigation stuck after relaunch | Notification shade grabbed focus | Collapse the shade *after* confirming unlocked; swipe top→bottom |
 | `uiautomator dump` stale | Animations / transitions | Wait (`sleep 2+`) before dumping |
 | Verify loop never ends | Usage page never updates (network/app glitch) | Built-in 15-cycle cap → retries on next scheduled run |
 | Two loops running | Old instance left from before PID guard | The `cleanup_stale` guard kills the previous loop on start |
-| Wrong coordinates | Different screen resolution | Dump UI and re-measure bounds; scale proportionally |
+| Daemon stalls forever | Abrupt kill left a stale `claude_keepalive.lock` | v6.3 auto-removes any lock older than 30 min |
+| Settings/Usage tap misses after app update | Layout padding / scaling changed | v6.3 finds them by `text`/`content-desc` at runtime; coords are only a fallback |
+| Settings tap opens a sub-page (Notifications etc.) | Hardcoded coordinate hit the wrong row | v6.4 detects `DRIFTED` (any unrecognized page) → force-stops + relaunches Claude fresh, then re-navigates |
+| `refresh_usage` swiped on the wrong screen | Pull-to-refresh ran while not actually on Usage (e.g. after a failed `goto_usage`) | v6.4 re-navigates to Usage before swiping; parse is never run against a non-Usage screen |
+| Screen blanks mid-run | `screen_off_timeout` hit during long navigation/verify waits | v6.4 raises the display timeout to 30 min while working, restores it on exit |
+| Unlock fails after reboot | Device has PIN/Pattern/Password | Keyguard only dismisses for Swipe/None — configure **Swipe/None** |
+
+> **Lock-screen requirement:** `wm dismiss-keyguard` only works for **Swipe / None**
+> security. If the device has a PIN, pattern, or password, keyguard dismissal fails silently
+> and every tap misses. Keep the test device on Swipe/None (or remove credentials before
+> running).
 
 ---
 
 ## Navigation / Coordinate Reference (1080x2460)
 
-| Action | Tap |
-|--------|-----|
-| Open menu (back arrow) | `(66,182)` |
-| Settings (in drawer) | `(104,2323)` |
-| Usage (in Settings) | `(227,913)` |
-| Chat input | Found dynamically via `class="android.widget.EditText"`; fallback `(545,1214)` |
+Settings and Usage taps are **found dynamically at runtime** via `get_bounds_center()`
+(matches `text` or `content-desc` on a `com.anthropic.claude` node). The hardcoded
+coordinates below are the fallback when the node is not found:
+
+| Action | Dynamic target | Fallback tap |
+|--------|----------------|--------------|
+| Open menu (back arrow) | *(no text — always hardcoded)* | `(66,182)` |
+| Settings (in drawer) | `content-desc="…, Settings"` | `(104,2323)` |
+| Usage (in Settings) | `text="Usage"` | `(227,913)` |
+| Chat input | `class="android.widget.EditText"` | `(545,1214)` |
 
 > Navigation uses **only in-app buttons** because the Claude app ignores the hardware back
 > button (`keyevent 4`). `keyevent 3` (HOME) is used at the end of a run to background the app.
 
 ---
 
+## Current Goal Status (as of 2026-08-05)
+
+| Goal | Status | Verified |
+|------|--------|----------|
+| 24/7 operation: first message of each fresh 5-hr window sent automatically | ✅ **ACHIEVED** | Live since 01:26 IST, running continuously |
+| Only first message per window (no periodic keep-alive pings) | ✅ **ACHIEVED** | TYPE1_ACTIVE never sends; only TYPE3_FRESH triggers send |
+| First message tried ~2 min after reset (not 20+ min wait) | ✅ **ACHIEVED** | Reset 08:40 → first send 08:42 (2 min) |
+| Send-verify backoff 2→4→6 min active | ✅ **ACHIEVED** | Cycle 2 fired at +7 min (08:49), verified at 08:50 |
+| Verified at TYPE1_ACTIVE 1% (true window activation) | ✅ **ACHIEVED** | 08:50:10 confirmed 1% / 4h49m |
+| Wake lock prevents deep-sleep freeze | ✅ **ACHIEVED** | `claude_keepalive_wl` held during all sleeps; no timer overrun since v4.2 |
+| Smart sleep: sleeps until next-check epoch (capped 100 min) | ✅ **ACHIEVED** | Loop wakes, re-checks, re-sleeps — no polling |
+| Self-healing: PID guard, stale cleanup, 15-cycle verify cap | ✅ **ACHIEVED** | Stale loop killed on restart; verify cap tested |
+| Network check with IP logging, 10-min retry on failure | ✅ **ACHIEVED** | Live IP logged: 47.15.97.13, 47.15.100.68, 47.15.106.133 |
+| Robust wake/unlock + notification shade handling | ✅ **ACHIEVED** | Tested multiple cycles; no stuck shade |
+| Dynamic Settings/Usage targeting (v6.3) | ✅ **ACHIEVED** | `Settings found dynamically at (104 2323)`; `Usage … (227 913)` |
+| Stale-lock auto-recovery (v6.3) | ✅ **ACHIEVED** | 3600s-old lock detected & cleaned, run proceeded |
+| In-app drift detection (v6.4) | ✅ **ACHIEVED** | Billing page (≠Notifications) → `DRIFTED` detected → fresh relaunch → Usage reached |
+| Screen wake lock while working (v6.4) | ✅ **ACHIEVED** | `Screen wake lock ON` at run start; restored to 60000 ms at exit |
+| Pull-to-refresh verified | ✅ **CONFIRMED** | Swipe `(540,700)→(540,1800)` triggers a `ProgressBar`; refresh completes |
+| `refresh_usage` screen-gated (v6.4) | ✅ **ACHIEVED** | Re-navigates to Usage before swiping; never parses a non-Usage screen |
+
+---
+
 ## Appendix — Full Source Code
 
-Both files below are the current deployed versions. Save them locally as
-`claude_keepalive.sh` and `claude_loop.sh`, then follow **Step 1** to install.
+Both files below are the current deployed versions (keepalive **v6.4**, loop **v4.2**).
+Save them locally as `claude_keepalive.sh` and `claude_loop.sh`, then follow **Step 1** to install.
 
 ### `claude_keepalive.sh` (unit script)
 
 ```sh
 #!/system/bin/sh
 # ============================================================
-# Claude Keep-Alive – Native Android Bash (v6.1)
+# Claude Keep-Alive – Native Android Bash (v6.4)
 # Screen: 1080x2460 (change coordinates if needed)
+#
+# v6.4 changes:
+#   - DRIFT DETECTION. detect_screen() now returns DRIFTED for ANY
+#     unrecognized in-app page (not just pages with a "Go back"
+#     button): Settings sub-pages (Notifications, Profile, Billing,
+#     …), modals, conversations, etc. UNKNOWN is reserved for the
+#     case where the UI dump could not be produced. Recovery from a
+#     drift is a FRESH RELAUNCH (force-stop + relaunch) — far more
+#     reliable than navigating back from a page whose layout is
+#     unknown — then navigation resumes normally. send_hi() relaunches
+#     to chat; refresh_usage() re-navigates to Usage before swiping.
+#   - SCREEN WAKE LOCK. The loop daemon holds a partial wake lock
+#     (CPU only) so the display can still turn off mid-operation
+#     (screen_off_timeout is 60 s here). The keepalive now bumps
+#     screen_off_timeout to 30 min while working and restores it on
+#     exit, so the screen stays on for the whole run.
+#
+# v6.3 changes:
+#   - DYNAMIC NODE TARGETING. Settings / Usage taps now use
+#     get_bounds_center("text") to extract node bounds from the
+#     live UI tree, so layout changes do not silently break
+#     navigation. Hardcoded coords remain as fallbacks.
+#   - STALE-LOCK GUARD. If claude_keepalive.lock survives an
+#     abrupt kill (OOM/signal) it is auto-removed when older than
+#     30 minutes instead of stalling the daemon forever.
+#
+# v6.2 changes:
+#   - STRICT PACKAGE CHECK GATE. Every navigation/action tap is
+#     wrapped in nav_step(): tap → 3s delay → verify the focused
+#     window is com.anthropic.claude. On failure the app is
+#     force-stopped + relaunched and navigation restarts from
+#     scratch (goto_usage now retries up to 3 times).
+#   - Package guards added to send_hi() and refresh_usage() so no
+#     typing/swiping ever fires against a non-Claude window.
 #
 # v6 changes:
 #   - PACKAGE-CONSTRAINED screen detection. Every UI parse is
@@ -316,6 +511,29 @@ fmt_mins() {
 }
 
 # ------------------------------------------------------------
+# Screen wake lock. The loop daemon's partial wake lock keeps the
+# CPU awake but NOT the display, so a long keep-alive run could
+# still hit screen_off_timeout mid-operation. While working on the
+# Claude app we temporarily raise the display timeout (saved and
+# restored), keeping the screen on for the whole run.
+# ------------------------------------------------------------
+SCREEN_TIMEOUT_SAVED=""
+
+screen_lock_on() {
+    SCREEN_TIMEOUT_SAVED=$(settings get system screen_off_timeout 2>/dev/null)
+    settings put system screen_off_timeout 1800000 2>/dev/null
+    log "Screen wake lock ON (display timeout raised while working)"
+}
+
+screen_lock_off() {
+    if [ -n "$SCREEN_TIMEOUT_SAVED" ]; then
+        settings put system screen_off_timeout "$SCREEN_TIMEOUT_SAVED" 2>/dev/null
+        log "Screen wake lock OFF (display timeout restored to ${SCREEN_TIMEOUT_SAVED} ms)"
+    fi
+    SCREEN_TIMEOUT_SAVED=""
+}
+
+# ------------------------------------------------------------
 # Package + Screen detection helpers
 # ------------------------------------------------------------
 # Returns the package of the current focused window
@@ -339,6 +557,8 @@ dump_ui() {
     while [ $i -lt 5 ]; do
         uiautomator dump "$UI_XML" >/dev/null 2>&1
         if [ -f "$UI_XML" ] && [ -s "$UI_XML" ]; then
+            # Keep a Claude copy; detection already gates on package,
+            # so this just marks the dump as belonging to Claude.
             cp "$UI_XML" "$UI_CLAUDE" 2>/dev/null
             return 0
         fi
@@ -360,7 +580,8 @@ claude_xml() {
 
 # Detect current screen inside Claude.
 # Possible return values:
-#   CHAT_HOME | MENU_DRAWER | SETTINGS | USAGE | LOGIN | UNKNOWN | NOT_CLAUDE
+#   CHAT_HOME | MENU_DRAWER | SETTINGS | USAGE | LOGIN |
+#   DRIFTED | UNKNOWN | NOT_CLAUDE
 detect_screen() {
     if ! is_claude_focused; then
         echo "NOT_CLAUDE"
@@ -411,7 +632,13 @@ detect_screen() {
         return
     fi
 
-    echo "UNKNOWN"
+    # --- DRIFTED: inside Claude but on ANY unrecognized in-app page.
+    # --- This is the fallback for every page that is not one of the
+    # --- known screens above — a Settings sub-page (Notifications,
+    # --- Profile, Billing, …), a modal, a conversation, or any other
+    # --- page the app has moved to. UNKNOWN is now reserved for the
+    # --- case where the UI dump itself could not be produced.
+    echo "DRIFTED"
 }
 
 # Convenience wrapper: dump + detect in one call
@@ -447,6 +674,8 @@ ensure_screen_ready() {
         wm dismiss-keyguard 2>/dev/null
         sleep 2
         if ! is_unlocked; then
+            # Lockscreen may need a swipe; use a short upward drag only
+            # if still locked, then re-check before any shade interaction.
             log "Still locked → short unlock swipe"
             input swipe 540 1800 540 1200 150
             sleep 2
@@ -468,7 +697,8 @@ ensure_screen_ready() {
         log "Unlocked OK"
     fi
 
-    # Only handle the notification shade AFTER we are confirmed unlocked.
+    # Only handle the notification shade AFTER we are confirmed unlocked,
+    # so the unlock swipe never misinterprets as a shade pull.
     if not_on_shade; then
         log "No notification shade"
     else
@@ -546,73 +776,176 @@ launch_claude() {
 }
 
 # ------------------------------------------------------------
-# Navigate to Usage page (screen-aware).
-# Returns 0 if USAGE reached, 1 otherwise. parse_usage is called.
+# Package-enforced navigation step: tap, let the UI react, then
+# verify the focused window is still Claude. If the app crashed,
+# a system dialog grabbed focus, or HOME/shade stole it, relaunch
+# Claude and signal failure so the caller restarts navigation.
 # ------------------------------------------------------------
-goto_usage() {
-    local screen
-    screen=$(get_screen)
-    log "Screen before goto_usage: $screen"
-
-    case "$screen" in
-        USAGE)
-            log "Already on Usage page"
-            ;;
-        SETTINGS)
-            log "On Settings → tapping Usage"
-            tap 227 913
-            sleep 4
-            ;;
-        MENU_DRAWER)
-            log "Drawer open → tapping Settings then Usage"
-            tap 104 2323
-            sleep 3
-            tap 227 913
-            sleep 4
-            ;;
-        CHAT_HOME|UNKNOWN)
-            log "On chat (or unknown) → menu → Settings → Usage"
-            tap 66 182          # menu
-            sleep 3
-            tap 104 2323        # Settings
-            sleep 3
-            tap 227 913         # Usage
-            sleep 4
-            ;;
-        NOT_CLAUDE|LOGIN)
-            log "Not inside Claude or on login → relaunching Claude"
-            launch_claude
-            sleep 2
-            tap 66 182
-            sleep 3
-            tap 104 2323
-            sleep 3
-            tap 227 913
-            sleep 4
-            ;;
-        *)
-            log "Unexpected screen ($screen) → default menu → Settings → Usage"
-            tap 66 182
-            sleep 3
-            tap 104 2323
-            sleep 3
-            tap 227 913
-            sleep 4
-            ;;
-    esac
-
-    # Final verification
-    screen=$(get_screen)
-    log "Screen after navigation: $screen"
-    if [ "$screen" != "USAGE" ]; then
-        log "WARNING: failed to reach Usage page (now on $screen)"
+nav_step() {
+    local x="$1" y="$2"
+    input tap "$x" "$y"
+    sleep 3
+    if ! is_claude_focused; then
+        log "PACKAGE CHECK: focus lost after tap (${x},${y}) → focused: $(current_package). Relaunching..."
+        launch_claude
         return 1
     fi
-    parse_usage
+    return 0
+}
+
+# ------------------------------------------------------------
+# Dynamic node targeting: find a Claude-owned node whose text OR
+# content-desc contains the given label and print its center as
+# "X Y". Returns nothing on failure so the caller falls back to a
+# hardcoded coordinate. The full <node ...> element is captured
+# first so the package= attribute (which may precede the matched
+# attribute) is included, then filtered to com.anthropic.claude
+# to avoid e.g. MIUI's home-screen Settings shortcut. Used for
+# Settings / Usage so layout changes do not break navigation.
+# ------------------------------------------------------------
+get_bounds_center() {
+    local label="$1"
+    local XML
+    XML=$(claude_xml)
+    [ -f "$XML" ] || return 1
+    local NODE attr B X1 Y1 X2 Y2
+    NODE=""
+    for attr in text content-desc; do
+        NODE=$(grep -o '<node[^>]*>' "$XML" | \
+               grep "${attr}=\"[^\"]*${label}[^\"]*\"" | \
+               grep 'package="com.anthropic.claude"' | head -1)
+        [ -n "$NODE" ] && break
+    done
+    [ -n "$NODE" ] || return 1
+    B=$(echo "$NODE" | grep -oE '\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]' | head -1)
+    [ -n "$B" ] || return 1
+    X1=$(echo "$B" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\1/')
+    Y1=$(echo "$B" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\2/')
+    X2=$(echo "$B" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\3/')
+    Y2=$(echo "$B" | sed -E 's/\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]/\4/')
+    echo "$(( (X1 + X2) / 2 )) $(( (Y1 + Y2) / 2 ))"
+}
+
+# Navigate to Settings (dynamic text/content-desc target, hardcoded fallback).
+goto_settings() {
+    local c
+    dump_ui
+    c=$(get_bounds_center "Settings")
+    if [ -n "$c" ]; then
+        log "Settings found dynamically at ($c)"
+        nav_step $c
+    else
+        log "Settings node not found → using fallback (104,2323)"
+        nav_step 104 2323
+    fi
+}
+
+# Navigate to Usage (dynamic text/content-desc target, hardcoded fallback).
+goto_usage_item() {
+    local c
+    dump_ui
+    c=$(get_bounds_center "Usage")
+    if [ -n "$c" ]; then
+        log "Usage found dynamically at ($c)"
+        nav_step $c
+    else
+        log "Usage node not found → using fallback (227,913)"
+        nav_step 227 913
+    fi
+}
+
+# ------------------------------------------------------------
+# Navigate to Usage page (screen-aware + package-enforced).
+# Every tap is followed by a post-delay package check (nav_step);
+# if focus is lost, Claude is relaunched and navigation restarts
+# from scratch (max 3 attempts). parse_usage is called on success.
+# ------------------------------------------------------------
+goto_usage() {
+    local screen attempt
+    attempt=0
+    while [ $attempt -lt 3 ]; do
+        attempt=$((attempt + 1))
+        screen=$(get_screen)
+        log "Screen before goto_usage (attempt ${attempt}): $screen"
+
+        case "$screen" in
+            USAGE)
+                log "Already on Usage page"
+                ;;
+            DRIFTED)
+                # Inside Claude but on an unrecognized page (Settings
+                # sub-page, modal, conversation, etc.). Recovery is a
+                # fresh relaunch — force-stop + relaunch is far more
+                # reliable than trying to navigate back from an unknown
+                # page whose layout we do not know. After the relaunch,
+                # simply restart the loop so the normal CHAT_HOME path
+                # (menu → Settings → Usage) handles navigation.
+                log "Drifted to an unrecognized in-app page → relaunching fresh"
+                launch_claude
+                sleep 2
+                continue
+                ;;
+            SETTINGS)
+                log "On Settings → tapping Usage"
+                goto_usage_item || continue
+                sleep 2
+                ;;
+            MENU_DRAWER)
+                log "Drawer open → tapping Settings then Usage"
+                goto_settings || continue
+                sleep 2
+                goto_usage_item || continue
+                sleep 2
+                ;;
+            CHAT_HOME|UNKNOWN)
+                log "On chat (or unknown) → menu → Settings → Usage"
+                nav_step 66 182 || continue          # menu (back-arrow, no text → hardcoded)
+                sleep 2
+                goto_settings || continue
+                sleep 2
+                goto_usage_item || continue
+                sleep 2
+                ;;
+            NOT_CLAUDE|LOGIN)
+                log "Not inside Claude or on login → relaunching Claude"
+                launch_claude
+                sleep 2
+                nav_step 66 182 || continue
+                sleep 2
+                goto_settings || continue
+                sleep 2
+                goto_usage_item || continue
+                sleep 2
+                ;;
+            *)
+                log "Unexpected screen ($screen) → default menu → Settings → Usage"
+                nav_step 66 182 || continue
+                sleep 2
+                goto_settings || continue
+                sleep 2
+                goto_usage_item || continue
+                sleep 2
+                ;;
+        esac
+
+        # Final verification (package-gated via get_screen/detect_screen)
+        screen=$(get_screen)
+        log "Screen after navigation (attempt ${attempt}): $screen"
+        if [ "$screen" = "USAGE" ]; then
+            parse_usage
+            return 0
+        fi
+        log "WARNING: not on Usage page (now on $screen) → retrying navigation from scratch"
+        launch_claude
+        sleep 2
+    done
+    log "ERROR: failed to reach Usage page after $attempt attempts"
+    return 1
 }
 
 # ------------------------------------------------------------
 # Focus the chat input field (Claude-only, found dynamically).
+# Falls back to known fresh-chat coordinate if EditText not found.
 # ------------------------------------------------------------
 focus_input() {
     dump_ui
@@ -637,7 +970,7 @@ focus_input() {
 }
 
 # ------------------------------------------------------------
-# Send the first-message (screen-aware).
+# Send keep-alive message (screen-aware).
 # ------------------------------------------------------------
 send_hi() {
     local screen TS TS_IST MSG
@@ -652,6 +985,19 @@ send_hi() {
     case "$screen" in
         CHAT_HOME|MENU_DRAWER)
             log "Already in a good place for sending"
+            ;;
+        DRIFTED)
+            # Drifted to an unrecognized in-app page before send.
+            # Fresh relaunch is the reliable recovery — we cannot trust
+            # navigation back from an unknown layout.
+            log "Drifted to an unrecognized in-app page before send → relaunching fresh"
+            launch_claude
+            sleep 2
+            screen=$(get_screen)
+            if [ "$screen" != "CHAT_HOME" ] && [ "$screen" != "MENU_DRAWER" ]; then
+                log "Not on chat after relaunch (${screen}) → relaunching Claude"
+                launch_claude
+            fi
             ;;
         USAGE|SETTINGS)
             log "Leaving Usage/Settings → back to chat via menu button"
@@ -669,12 +1015,24 @@ send_hi() {
             ;;
     esac
 
+    # Package gate before typing: if we lost Claude focus, stop.
+    if ! is_claude_focused; then
+        log "PACKAGE CHECK: not in Claude before send → relaunching"
+        launch_claude
+        sleep 2
+    fi
+
     focus_input
     input text "$MSG"
     sleep 2
     # re-focus in case the keyboard stole focus
     focus_input
     sleep 1
+    if ! is_claude_focused; then
+        log "PACKAGE CHECK: lost Claude focus during send → relaunching"
+        launch_claude
+        sleep 2
+    fi
     input keyevent 66
     log "Sent: Hello From India? ${TS_IST}"
     sleep 6
@@ -682,8 +1040,23 @@ send_hi() {
 
 # ------------------------------------------------------------
 # Pull-to-refresh on the current (Usage) screen, then re-parse.
+# Package-gated: never swipe unless Claude still has focus.
+# Screen-gated: never swipe unless we are actually on Usage (a
+# pull-to-refresh gesture only makes sense there), otherwise
+# re-navigate first.
 # ------------------------------------------------------------
 refresh_usage() {
+    local s
+    if ! is_claude_focused; then
+        log "PACKAGE CHECK: not in Claude before refresh → relaunching"
+        launch_claude
+        sleep 2
+    fi
+    s=$(get_screen)
+    if [ "$s" != "USAGE" ]; then
+        log "Not on Usage before refresh (now on $s) → re-navigating to Usage"
+        goto_usage || { log "Could not reach Usage for refresh → skipping"; return 1; }
+    fi
     log "Pull-to-refresh on Usage screen"
     input swipe 540 700 540 1800 400
     sleep 4
@@ -715,7 +1088,7 @@ is_verified() {
 # After the send, pull-to-refresh on the Usage screen. If the state
 # still hasn't changed (still TYPE3_FRESH / pending), wait incrementally
 # (2 min, then 4, then 6, ...) and retry. Keeps checking & trying until
-# a NEW state appears on the Usage screen. Safety cap at 15 cycles.
+# a NEW state appears on the Usage screen. No cap on attempts.
 # ------------------------------------------------------------
 send_verify_loop() {
     local scenario="$1"
@@ -839,15 +1212,22 @@ reset_state() {
 log "=== Starting keep-alive ==="
 
 # ---- Lock guard: don't run if a previous instance is still in
-# ---- its 2-min internal send-verify loop.
+# ---- its 2-min internal send-verify loop. A stale lock from an
+# ---- abrupt kill (OOM, signal) is detected by age and removed.
 LOCK="/data/local/tmp/claude_keepalive.lock"
 if [ -f "$LOCK" ]; then
-    log "Another keep-alive instance still running → exiting this cycle"
-    echo "" >> "$LOG"
-    exit 0
+    lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK" 2>/dev/null || echo 0) ))
+    if [ "$lock_age" -gt 1800 ]; then
+        log "WARNING: stale lock detected (${lock_age}s old) → cleaning up"
+        rm -f "$LOCK"
+    else
+        log "Another keep-alive instance still running → exiting this cycle"
+        echo "" >> "$LOG"
+        exit 0
+    fi
 fi
 touch "$LOCK"
-trap 'rm -f "$LOCK"' EXIT
+trap 'rm -f "$LOCK"; screen_lock_off' EXIT
 
 # ---------- Network check ----------
 if ! has_network; then
@@ -865,6 +1245,9 @@ if ! ensure_screen_ready; then
     echo "" >> "$LOG"
     exit 1
 fi
+
+# Keep the screen on while we drive the Claude app.
+screen_lock_on
 
 # ---------- Launch Claude ----------
 launch_claude
@@ -923,8 +1306,16 @@ case "$STATE" in
         fi
         ;;
     TYPE2_LIMIT)
-        NEXT=$(( now + 30 * 60 ))
-        log "Scheduling next check in 30 min (100% limit used, waiting for reset)"
+        # Wake just after the reset so the first message is tried promptly
+        # (the send-verify loop's 2→4→6 min backoff then handles retries).
+        # If the reset time is unknown (REMAIN_MIN=0), fall back to a short poll.
+        if [ "$REMAIN_MIN" -gt 0 ]; then
+            NEXT=$(( now + (REMAIN_MIN + 2) * 60 ))
+            log "Scheduling next check in $(fmt_mins $((REMAIN_MIN + 2))) (100% used, resetting in $REMAIN_MIN min)"
+        else
+            NEXT=$(( now + 5 * 60 ))
+            log "Scheduling next check in 5 min (100% limit used, reset time unknown)"
+        fi
         ;;
     TYPE3_FRESH)
         NEXT=$(( now + 5 * 60 ))
