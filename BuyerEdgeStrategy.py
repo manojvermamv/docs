@@ -37,7 +37,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # Deployment State   : Production
 # Structural Risk    : None Known
 # Research Status    : Active Calibration
-# Closed Findings    : F1–F64, F71–F93, F96–F105 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓ · Review P1-a…P1-e ✓ P2-a ✓ P2-f ✓ P2-g ✓ P2-h ✓ P3-a ✓
+# Closed Findings    : F1–F64, F71–F93, F96–F106 (F28, F49–F51 reserved; F65–F70 unused; F95 open) · External Audit: F-A1 ✓ F-A2 ⬇ F-A3 ✓ · Review P1-a…P1-e ✓ P2-a ✓ P2-f ✓ P2-g ✓ P2-h ✓ P3-a ✓
 # Runtime Pending    : F53 (multi-tranche signal-deterioration — awaiting live session)
 #
 #
@@ -70,7 +70,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #
 # FINDING STATUS
 # ------------------------------------------------------------------------------
-# Closed Findings:               F1–F64, F71–F93, F96–F105 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
+# Closed Findings:               F1–F64, F71–F93, F96–F106 (F28, F49–F51 reserved; F65–F70 unused; F95 open)
 # External Audit:                F-A1 ✓ F-A2 ⬇ F-A3 ✓
 # Runtime Verification Pending:  F53 (live multi-tranche signal-deterioration)
 # External Audit Findings:       F-A1 ✓ Fixed · F-A2 ⬇ Accepted · F-A3 ✓ Fixed
@@ -239,7 +239,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #       Also note the derived value is a within-session window delta, NOT the day-over-day OI
 #       change the "Call Buying"/"Call Writing" labels conventionally imply. A real day change
 #       needs daily history per strike — oi_profile_service does that internally but is exposed
-#       only via a Flask blueprint, not restx_api, so no SDK call exists. findings-master.md PART 6.
+#       only via a Flask blueprint, not restx_api, so no SDK call exists. history/upstream-findings.md PART 6.
 # P2-h ✓ Fixed (HIGH): The exit_pending test-and-set was guarded by TWO DIFFERENT locks in
 #       different places. _trigger_exit (WS SL/target) claims a position under state_lock; the EOD
 #       square-off loop in _strategy_thread claimed it under exit_lock. Guarding one invariant with
@@ -358,6 +358,12 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 #       option moved -3.45 -> +2.05 -> -4.80 pts, a peak error of Rs 163.50 reported as loss when
 #       the position was in profit. Fixed by marking against the snapshot-cache tick (the same
 #       one pnl_curve uses) with the broker figure kept as a cross-check and divergence logged.
+# F106 ✓ Added (instrumentation): A journal row could not be joined to the scan that produced it,
+#       and carried no entry time — 0 of 90 rows had a computable holding period, so every
+#       hour-of-day figure was silently exit-hour. Added scan_id (minted once per scan, carried
+#       through the chain snapshot, the order and the journal) and entry_time. chain_snapshots
+#       also records `stages`, the full pipeline path, so "which gate cost the entry" is
+#       answerable where `outcome` only ever named the one that fired first.
 #
 # ==============================================================================
 # CODING CONVENTIONS
@@ -1798,6 +1804,10 @@ class PositionCore:
     spot_entry:      float
     reward_dist:     float
     entry_delta:     float | None  = None
+    #: The scan that produced this entry. Joins a journal row to the [SCORE] and
+    #: [SCAN] lines that caused it; without it the only link is timestamp
+    #: proximity across ~8k lines a session (PART 40 item 1).
+    scan_id:         str           = ""
     moneyness:       str           = "Unknown"
     initial_sl:      float         = 0.0
     tgt:             float         = 0.0
@@ -1957,7 +1967,7 @@ class OptionPosition:
               sl=0.0, initial_sl=0.0, tgt=0.0,
               entry_time=None, entry_conviction=0.0, trail_act_mult=1.0,
               entry_bucket=0, slot_id=None,
-              entry_sl_source="") -> "OptionPosition":
+              entry_sl_source="", scan_id="") -> "OptionPosition":
         _ts = int(time.time() * 1_000_000)
         _sid = slot_id or f"{underlying}_{option_type}_{_ts}"
         _ep = entry_premium
@@ -1971,6 +1981,7 @@ class OptionPosition:
                 entry_time=entry_time or get_ist_now(),
                 entry_conviction=entry_conviction, trail_act_mult=trail_act_mult,
                 entry_bucket=entry_bucket, entry_sl_source=entry_sl_source,
+                scan_id=scan_id,
             ),
             broker=PositionBroker(),
             trail=TrailState(sl=sl),
@@ -2117,6 +2128,8 @@ class OptionPosition:
     def activation_time(self, val): self.analytics.activation_time = val
     @property
     def entry_bucket(self) -> int: return self.core.entry_bucket
+    @property
+    def scan_id(self) -> str: return self.core.scan_id
     @property
     def entry_sl_source(self) -> str: return self.core.entry_sl_source
     @entry_sl_source.setter
@@ -2295,6 +2308,12 @@ class TradeRecord:
     #: They differ only when normalize() did not recognise it — the case worth
     #: keeping. See PositionAnalytics.exit_reason_raw.
     exit_reason_raw: str = ""
+    #: Entry wall-clock. `timestamp` is the EXIT, so without this no holding
+    #: period is computable from the journal — 0 of 90 rows had one, and every
+    #: hour-of-day figure was silently exit-hour (PART 40 item 2).
+    entry_time: str = ""
+    #: The scan that produced the entry. See PositionCore.scan_id.
+    scan_id: str = ""
 
     header: ClassVar[list[str]] = [
         "timestamp", "underlying", "option_symbol", "direction", "qty",
@@ -2307,7 +2326,7 @@ class TradeRecord:
         "bars_to_activation", "peak_after_activation", "bars_after_activation",
         "max_favorable_excursion", "max_adverse_excursion_after_activation",
         "record_type", "slot_id", "tranche_id", "entry_sl_source",
-        "exit_reason_raw",
+        "exit_reason_raw", "entry_time", "scan_id",
     ]
 
     def to_row(self) -> list[str]:
@@ -2346,6 +2365,8 @@ class TradeRecord:
             self.tranche_id,
             self.entry_sl_source,
             self.exit_reason_raw,
+            self.entry_time,
+            self.scan_id,
         ]
 
 
@@ -2522,6 +2543,8 @@ class TradeAnalytics:
             # Falls back to the normalised value, never blank: an empty cell
             # cannot be told apart from a path that captures no raw at all.
             exit_reason_raw=pos.exit_reason_raw or exit_reason,
+            entry_time=pos.entry_time.strftime("%Y-%m-%d %H:%M:%S") if pos.entry_time else "",
+            scan_id=pos.scan_id,
         )
 
     @staticmethod
@@ -2565,6 +2588,8 @@ class TradeAnalytics:
             slot_id=pos.slot_id,
             tranche_id=tr.tranche_id,
             entry_sl_source=pos.entry_sl_source,
+            entry_time=pos.entry_time.strftime("%Y-%m-%d %H:%M:%S") if pos.entry_time else "",
+            scan_id=pos.scan_id,
         )
 
     @staticmethod
@@ -2587,6 +2612,8 @@ class TradeAnalytics:
             max_favorable_excursion=None, max_adverse_excursion_after_activation=None,
             record_type="entry", slot_id=pos.slot_id, tranche_id="",
             entry_sl_source=pos.entry_sl_source,
+            entry_time=pos.entry_time.strftime("%Y-%m-%d %H:%M:%S") if pos.entry_time else "",
+            scan_id=pos.scan_id,
         )
 
 
@@ -5218,7 +5245,14 @@ class TrailSLEngine:
                     pos.trail_activation_sl = new_sl
                     pos.sl = new_sl
                     _lock_type = "breakeven" if _lock_floor >= ep else "none"
-                    inf(f"[TRAIL-ACT] {underlying} {pos.symbol}: threshold={activate_pts:.1f}, premium={confirmed_close:.1f}, gain={move:.1f}")
+                    # sl_vs_entry = new_sl - entry_premium. Negative means the trail
+                    # arms with the stop BELOW entry, so "activated" is protecting no
+                    # profit — it is a wider stop under another name, and every exit
+                    # it causes books as PREMIUM_TRAIL (PART 40 item 6).
+                    _sl_vs_ep = new_sl - ep
+                    inf(f"[TRAIL-ACT] {underlying} {pos.symbol}: threshold={activate_pts:.1f}, "
+                        f"premium={confirmed_close:.1f}, gain={move:.1f}, "
+                        f"sl_vs_entry={_sl_vs_ep:+.2f}{' BELOW_ENTRY' if _sl_vs_ep < 0 else ''}")
                     inf(f"[TRAIL] Premium ACTIVATED {underlying}: peak {ltp:.2f} SL→{new_sl:.2f} (speed={_trail_speed:.1f}x)")
                     if _lock_floor >= ep:
                         _advance_stage(pos, LifecycleStage.LOCKED)
@@ -6618,6 +6652,8 @@ class OrderManager:
         self._notify = notify
         self._journal = JournalWriter(self.config.journal.trade_journal_path)
         self._reconcile_alerted: set[str] = set()  # slot_ids already alerted for suppressed-SELL (F100)
+        #: underlying -> scan_id of the entry order in flight, popped on fill.
+        self._scan_id_by_ul: dict[str, str] = {}
         self._pending_tranche_exits: dict[str, str] = {}  # key=f"{underlying}_{tr.tranche_id}" → order_id
         self._pending_tranche_exits_lock: threading.Lock = threading.Lock()
         self._known_order_ids_lock: threading.Lock = threading.Lock()
@@ -6914,7 +6950,13 @@ class OrderManager:
         if not self._state.positions.has_siblings(pos.slot_id):
             self._ws.unsubscribe_spot(pos.spot_symbol)
         _advance_stage(pos, LifecycleStage.CLOSED)
-        inf(f"[TRAIL-EXIT] {underlying} {pos.symbol}: reason={reason_str}, final_sl={pos.sl:.1f}, peak={pos.trail_peak_close or 0:.1f}")
+        # exit_px and the SL it breached are what make a stop-out replayable against
+        # the tape; reason and peak alone say it happened, not why it fired here
+        # (PART 40 item 5). giveback = peak - exit_px, the points handed back.
+        _giveback = (pos.trail_peak_close or pos.entry_premium) - executed_price
+        inf(f"[TRAIL-EXIT] {underlying} {pos.symbol}: reason={reason_str}, final_sl={pos.sl:.1f}, "
+            f"peak={pos.trail_peak_close or 0:.1f}, exit_px={executed_price:.2f}, "
+            f"giveback={_giveback:+.2f}, pnl_pts={executed_price - pos.entry_premium:+.2f}")
         with self._state.state_lock:
             self._state.positions.pop(pos.slot_id, None)
             self._state.pending_opposite_exit.discard(underlying)
@@ -6926,10 +6968,34 @@ class OrderManager:
     def _resolve_option_ltp(self, underlying: str, symbol: str) -> float | None:
         """Resolve option LTP from snapshot cache, falling back to ltp_map.
         Used by all 5 option-price resolution sites — eliminates the identical
-        3-line snap + fallback pattern."""
+        3-line snap + fallback pattern.
+
+        Logs which source answered, and the gap when both hold a price. Silent
+        fallback is how a stale map entry reaches an exit price indistinguishable
+        from a live tick (PART 40 item 3). Quiet on the common path — a hot
+        function that logs every call is a log nobody reads.
+        """
         snap = self._state.snapshot_cache.get(underlying)
-        return (snap.option_ltp if snap and snap.option_ltp is not None
-                else self._state.ltp_map.get(symbol))
+        _snap_ltp = snap.option_ltp if snap and snap.option_ltp is not None else None
+        _map_ltp = self._state.ltp_map.get(symbol)
+
+        if _snap_ltp is None:
+            if _map_ltp is not None:
+                # timestamp defaults to 0 on a snapshot that exists but has never
+                # been updated; time.time() - 0 is an epoch, not an age. Report
+                # "never" rather than a number that reads like a measurement.
+                _ts = getattr(snap, "timestamp", 0) if snap else 0
+                _age = f"{time.time() - _ts:.1f}s" if _ts else "never-updated"
+                inf(f"[LTP-SRC] {symbol}: snapshot empty, using ltp_map={_map_ltp:.2f} "
+                    f"(snapshot_age={_age}) — price is not from a live tick")
+            return _map_ltp
+
+        # divergence = snapshot - ltp_map. Both live means the WS tick and the
+        # last REST/map value disagree, which is the feed drifting while connected.
+        if _map_ltp is not None and abs(_snap_ltp - _map_ltp) >= 1.0:
+            inf(f"[LTP-SRC] {symbol}: snapshot={_snap_ltp:.2f} vs ltp_map={_map_ltp:.2f} "
+                f"divergence={_snap_ltp - _map_ltp:+.2f} — using snapshot")
+        return _snap_ltp
 
     def _cancel_tranche_orders(self, underlying: str, pos: OptionPosition) -> dict:
         """Cancel outstanding orders for all open tranches. Returns dict of filled orders."""
@@ -7545,6 +7611,10 @@ class OrderManager:
             trail_act_mult=act_mult,
             entry_bucket=self._state.bucket_counter,
             entry_sl_source=entry_sl_source,
+            # Popped, not read: the id belongs to the order this fill answers, and
+            # leaving it behind would attach it to the next entry on the same
+            # underlying. Empty when a fill arrives with no order of ours pending.
+            scan_id=self._scan_id_by_ul.pop(underlying, ""),
         )
         pos.tranches = _build_tranches(pos, qty, cfg)
         with self._state.state_lock:
@@ -7780,10 +7850,13 @@ class OrderManager:
         entry_delta: float | None = None,
         entry_conviction: float = 0.0,
         entry_sl_source: str = "",
+        scan_id: str = "",
     ) -> bool:
         """Place a market BUY order, poll for fill, then register the position with moneyness tracking."""
         cfg = self.config
         resolved_sl_pts = sl_pts if (sl_pts is not None and sl_pts > 0) else cfg.entry.premium_stop_pts
+        if scan_id:
+            self._scan_id_by_ul[underlying] = scan_id
         allowed, reason = self._state.position_book.can_enter(underlying, direction, cfg)
         if not allowed:
             dbg(f"[ORDER] {underlying} blocked by position guard: {reason}")
@@ -8216,6 +8289,7 @@ class OrderManager:
                 except Exception as _rearm_exc:
                     err(f"[ORDER] Protection re-arm raised for {underlying}", _rearm_exc)
                 if pos.sl_order_id or pos.tgt_order_id:
+                    pos.broker_protection = True
                     dbg(f"[ORDER] Protection re-armed for {underlying} (sl={pos.sl_order_id}, tgt={pos.tgt_order_id})")
                 else:
                     self._notify(
@@ -9272,7 +9346,10 @@ class OptionsBuyerEdgeBot:
         Thin wrapper over _scan_underlying_impl() so the chain snapshot is written
         exactly once per scan whatever early return fires.
         """
-        _ctx: dict[str, Any] = {}
+        # scan_id = <symbol>-<epoch_us>. One per scan, carried into the chain
+        # snapshot, the [SCORE]/[SCAN] lines and the journal row, so a trade joins
+        # to the signal that caused it instead of being matched on timestamp.
+        _ctx: dict[str, Any] = {"scan_id": f"{symbol}-{int(time.time() * 1_000_000)}"}
         try:
             self._scan_underlying_impl(symbol, _ctx)
         finally:
@@ -9323,7 +9400,10 @@ class OptionsBuyerEdgeBot:
             """
             # This closure already runs at all 13 terminal points with a stage label,
             # so capturing here gives the snapshot its `outcome` for free.
+            # outcome keeps last-write-wins for compatibility; stages is the whole
+            # path, so "which gate cost the entry" stops being "which fired first".
             _ctx["outcome"] = stage
+            _ctx.setdefault("stages", []).append(stage)
             perf = self.fetcher.greeks_perf_snapshot(symbol)
             dbg(
                 f"  [PERF] {symbol} [{stage}] greeks: "
@@ -9815,6 +9895,7 @@ class OptionsBuyerEdgeBot:
             entry_delta=best.get("_abs_delta"),
             entry_conviction=entry_conviction,
             entry_sl_source=entry_sl_source,
+            scan_id=_ctx.get("scan_id", ""),
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -9859,6 +9940,8 @@ class OptionsBuyerEdgeBot:
                 "underlying": symbol,
                 "expiry": _ctx.get("expiry"),
                 "outcome": _ctx.get("outcome", "unknown"),
+                "scan_id": _ctx.get("scan_id", ""),
+                "stages": _ctx.get("stages", []),
                 "spot": _ctx.get("spot"),
                 "atm_strike": _ctx.get("atm_strike"),
                 "session_label": _ctx.get("session_label"),
