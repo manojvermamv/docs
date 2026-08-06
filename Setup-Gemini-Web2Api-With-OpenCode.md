@@ -187,8 +187,9 @@ A Windows **Scheduled Task at logon** was attempted first but failed with `Regis
 Option Explicit
 Dim shell, exePath
 exePath = "C:\Users\Manoj\AppData\Roaming\Python\Python314\Scripts\gemini-web2api.exe"
+cfgPath = "C:\Users\Manoj\.config\gemini-web2api\config.json"
 Set shell = CreateObject("WScript.Shell")
-shell.Run """" & exePath & """", 0, False
+shell.Run Chr(34) & exePath & Chr(34) & " --config " & Chr(34) & cfgPath & Chr(34), 0, False
 Set shell = Nothing
 ```
 
@@ -434,3 +435,22 @@ Anonymous access routes `3.1-pro` to Flash. Real Pro routing requires a Gemini A
 | bash/python `PATH` | edited | `...\Python314\Scripts` for `gemini-web2api` |
 
 Open questions intentionally not changed: whether to later expose the server on `0.0.0.0` (LAN) or move from local-only `127.0.0.1` — not done, to keep the default secure.
+
+---
+
+Done. Installed and configured end to end, with two deviations from the doc due to your machine:
+
+**Installed**
+- Cloned `gemini-web2api` v1.1.0 to `C:\Users\Manoj\tools\gemini-web2api` + applied the setuptools `packages` fix
+- `pip install -e "...[streaming]"` (httpx 0.28.1 already present)
+- Script resolved on PATH at `...\Python313\Scripts` (you have **Python 3.13 Store**, not 3.14 — I used the real paths throughout)
+
+**Configured & verified**
+- `C:\Users\Manoj\.config\gemini-web2api\config.json` — port 8085, host 127.0.0.1, generated shared API key. Fixed a UTF-8 BOM issue (PowerShell 5.1 writes BOM by default, which broke Python's JSON parser)
+- Server running on `127.0.0.1:8085`; `/v1/models` returns all 8 Gemini models; chat completion returns real replies
+- Auto-start: `start-hidden.vbs` (hidden, points at the actual 3.13 exe path) + `gemini-web2api.lnk` in the Startup folder — verified it relaunches the listener
+- `opencode.jsonc` — `gemini-web2api` provider with `@ai-sdk/openai-compatible`, baseURL `http://127.0.0.1:8085/v1`, 8 models
+- `auth.json` — `gemini-web2api` api credential; `opencode auth list` shows 1 credential
+- Confirmed via OpenCode: `opencode run "..." --model gemini-web2api/gemini-3.5-flash` → returned a real Gemini reply
+
+The API key is saved at `C:\Users\Manoj\AppData\Local\Temp\opencode\gwa_key.txt` if you ever need it; same value is in `config.json` and `auth.json`. Note `gemini-3.1-pro` will behave like Flash without an Advanced cookie (as documented).
