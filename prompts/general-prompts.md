@@ -1,5 +1,15 @@
 # General Use Prompts
 
+## Simplify & Summary Prompt
+`````text
+Simplify the below into 3 blocks: **What’s Done, What Remains, What Needs to Be Decided**, plus an optional **Suggested Decisions** block if there’s enough context: 
+````
+AI_ANSWER_PLACEHOLDER
+````
+`````
+
+---
+
 ## Runbook Refinement Prompt / Compact Docs Rewrite
 ```text
 Redesign this Markdown into a compact, production-quality operations document with clean hierarchy and a logical flow — Overview → Prerequisites → Setup/Installation → Configuration → Verification → Usage → Troubleshooting → Security → Cleanup → Reference — using only the sections that are actually relevant to the content. Combine related shell/CLI commands into a single sequential, executable code block per section rather than scattering one-line commands, so each block can be copied and run top-to-bottom without manual reassembly. Mark any optional steps or commands clearly as optional, with a brief note explaining when or why they apply. Preserve all technical details and accuracy while removing unnecessary explanation, filler, and repetition; surface important notes, warnings, or security considerations only where they genuinely matter — such as while troubleshooting or before a destructive step — not as decoration. In the Reference section, list relevant file paths using relative/home-relative notation (e.g. `~/.ssh/config`), noting which are needed only for production-grade hardening, since not every file requires hardening. Use concise, human-friendly language and minimal but purposeful formatting (headings, code blocks, tables) to produce a polished, self-contained document that's easy to scan, execute, and maintain long-term. Do not degrade quality or accuracy for the sake of brevity — where trimming would sacrifice correctness or completeness, keep the fuller wording instead.
