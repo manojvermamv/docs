@@ -369,7 +369,7 @@ Run: export OPENALGO_API_KEY="your-key" && python BuyerEdgeStrategy.py
 # CODING CONVENTIONS
 # ==============================================================================
 #
-# Full rules: protocols/maintain-audit-and-code.md, PART 2. Summary:
+# Full rules: docs/VERIFICATION.md, PART 2. Summary:
 #
 #   - Attributes: declared in __init__ with a type annotation. No lazy hasattr().
 #   - Line folding: a statement wrapped for no reason folds to one line, budget 140.
@@ -602,6 +602,144 @@ except Exception as _tape_exc:                       # noqa: BLE001
     _TAPE_OK = False
     _TAPE_WHY = f"{type(_tape_exc).__name__}: {_tape_exc}"
 
+# ── Structured events (optional) ───────────────────────────────────────
+# The other half of the recorder story, and the one that replaces parsing.
+# Every `[TAG]` line below also emits a RECORD: named fields, no formatting, so
+# a reader gets `premium=88.15` instead of a regex against an f-string that
+# moves. `mcp_tools/core/eventsource.py` builds every analysis row from these.
+#
+# Same three guarantees as the tape, for the same reason — a recorder that can
+# take the strategy down is worse than no recorder:
+#   - absent unless `framework` is importable AND a directory is configured
+#   - no entry, exit or stop depends on it
+#   - `Emitter` swallows sink failures and counts them; it never raises here
+#
+# Layout is byte-identical to `strategy_host/eventlog.py`
+# (`<dir>/<strategy>/<YYYY-MM-DD>.ndjson`), so the host's readers work on a
+# stream this file wrote without knowing which of the two produced it.
+def _load_events_module():
+    """`framework.runtime.events`, however this file happens to be loaded.
+
+    Three tiers, because this script runs in three places and only one of them
+    has the framework on `sys.path`:
+
+      1. installed/importable — the normal case inside the repository
+      2. beside the repository — the replay loader sets `sys.path[0]` to this
+         file's own directory, so the package is one level up
+      3. copied next to the script — what `at recorder install` does for the
+         tape, and the same answer for a deployed box with no repository
+
+    Tier 2 is not hypothetical: the replay harness loads this module with a
+    restricted path, and without it the whole event surface reported itself
+    unavailable while looking like a configuration problem.
+    """
+    import os as _os
+    import sys as _sys
+
+    try:
+        from framework.runtime import events as _mod
+        return _mod, ""
+    except Exception:                                # noqa: BLE001
+        pass
+
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    for _candidate in (_os.path.dirname(_here), _here):
+        if _candidate and _candidate not in _sys.path:
+            _sys.path.append(_candidate)
+    try:
+        from framework.runtime import events as _mod
+        return _mod, ""
+    except Exception:                                # noqa: BLE001
+        pass
+    try:
+        import events as _mod                        # a sibling copy
+        return _mod, ""
+    except Exception as _exc:                        # noqa: BLE001
+        return None, f"{type(_exc).__name__}: {_exc}"
+
+
+_events, _EVENTS_WHY = _load_events_module()
+_EVENTS_OK = _events is not None
+
+_EMITTER = None
+
+
+def _event_sink(root: str):
+    """Append one record per line, under the record's OWN day.
+
+    Its own day rather than today's: a process running through midnight would
+    otherwise file Tuesday's events in Monday. This repository has met that bug
+    in four separate places.
+    """
+    import json as _json
+    import os as _os
+
+    def write(record: dict) -> None:
+        stamp = str(record.get("at") or "")
+        day = stamp[:10] or "unknown"
+        folder = _os.path.join(root, str(record.get("strategy") or "strategy"))
+        _os.makedirs(folder, exist_ok=True)
+        line = _json.dumps(record, separators=(",", ":"), default=str)
+        with open(_os.path.join(folder, f"{day}.ndjson"), "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+    return write
+
+
+def start_events(strategy_id: str = "") -> str:
+    """Begin emitting. Returns why it is off, or "" when it is on.
+
+    Off by default and off without configuration: a strategy that starts
+    writing files nobody asked for is a strategy that fills a disk on a box
+    nobody was watching.
+    """
+    global _EMITTER
+    import os as _os
+
+    root = _os.environ.get("MCP_STRATEGY_EVENTS_DIR", "").strip()
+    if not root:
+        return "MCP_STRATEGY_EVENTS_DIR is unset"
+    if not _EVENTS_OK:
+        return f"framework.runtime.events is unavailable ({_EVENTS_WHY})"
+    name = strategy_id or _os.environ.get("STRATEGY_NAME") or "buyer_edge"
+    try:
+        _EMITTER = _events.Emitter(str(name).strip().lower().replace(" ", "_"),
+                                   _event_sink(root))
+    except Exception as exc:                         # noqa: BLE001
+        _EMITTER = None
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def ev(kind: str, **fields) -> None:
+    """One structured record beside the log line above it.
+
+    **A field is a field and is never a formatted message.** That rule is what
+    makes the record readable without a regex, and `Event.problems()` enforces
+    it — an emit carrying `msg=` is refused and counted, not written.
+
+    Silent and total when events are off, which is the default.
+    """
+    if _EMITTER is None:
+        return
+    try:
+        _EMITTER.emit(kind, **fields)
+    except Exception:                                # noqa: BLE001
+        # Belt and braces. `Emitter.emit` already swallows sink failures; this
+        # catches the one thing it cannot — a caller passing something that
+        # breaks before the emitter sees it.
+        pass
+
+
+def events_summary() -> dict:
+    """What was emitted and what was refused. For the shutdown banner."""
+    if _EMITTER is None:
+        return {"enabled": False, "why": _EVENTS_WHY or "not started"}
+    out = dict(_EMITTER.summary())
+    out["enabled"] = True
+    return out
+
+
 # Ensure UTF-8 output on Windows (cp1252 console cannot encode ₹ and other Unicode chars).
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -669,9 +807,14 @@ STRIKE_DELTA_WEIGHT_RANGE = 0.20   # added at max conviction — 0.30 total, max
 
 STRIKE_RANGE_PCT = 0.05     # strike search radius as a fraction of spot, each side — ±5%
 
-# ── Conviction Risk Engine — shared by SL sizing, breakeven and all trail functions ──
+# ── Conviction SL sizing — entry stop distance only ───────────────────────────
 # adj = CONV_BE_BASE - conviction × CONV_BE_RANGE, so 1.10× at zero conviction down to
 # 0.90× at full. Kept narrow: a wider range breaks even too early on strong setups.
+#
+# Read by _scan_underlying_impl's entry SL sizing and nothing else. The trail
+# functions once shared this pair and no longer do — they read
+# cfg.trail.conv_trail_act_base / conv_trail_act_range, which default to 1.20 /
+# 0.40 and are env-overridable. Two engines, two ranges, on purpose.
 CONV_BE_BASE  = 1.10
 CONV_BE_RANGE = 0.20
 
@@ -766,7 +909,12 @@ class ExitReason:
 # ── 3a — BrokerConfig ─────────────────────────────────────────────────────
 @dataclass
 class BrokerConfig:
-    """OpenAlgo API connection, paper trade, basket protection."""
+    """OpenAlgo API connection, order stream, basket protection.
+
+    No paper-trade flag: F104 removed it as a second simulator competing with
+    OpenAlgo's own analyzer, which is the compensating control that actually
+    holds.
+    """
     api_key:              str   = "openalgo-apikey"
     api_host:             str   = "http://127.0.0.1:5000"
     ws_url:               str   = ""
@@ -1870,6 +2018,8 @@ def _advance_stage(pos: "OptionPosition", target: LifecycleStage) -> bool:
     at target; otherwise delegates to _safe_transition for legality and stamps
     stage_entered_at on success. Returns True iff the stage actually changed."""
     inf(f"[LIFECYCLE] Attempting to transition {pos.trail.stage.value} -> {target.value}")
+    ev("lifecycle", frm=pos.trail.stage.value, to=target.value,
+       slot=getattr(pos, "slot_id", ""), symbol=getattr(pos, "symbol", ""))
     if pos.trail.stage == target or not _safe_transition(pos.trail.stage, target):
         return False
     pos.trail.stage = target
@@ -4198,6 +4348,13 @@ class SignalEngine:
             f"slow_norm={slow_norm:.3f} mult={confirm_mult:.3f} ({_disagree}) "
             f"cov={fast_coverage:.0%} → "
             f"final={final_score} min={effective_min_score} signal={signal} old_style={_old_score}")
+        # The scoring components as fields. `agreement` is the word the log line
+        # prints in brackets; a reader should not have to know that.
+        ev("decision", fast_raw=fast_raw, fast_max=FAST_MAX, fast_norm=fast_norm,
+           slow_norm=slow_norm, mult=confirm_mult, agreement=_disagree,
+           coverage=fast_coverage, final_score=final_score,
+           min_score=effective_min_score, signal=signal,
+           old_style_score=_old_score, trap_score=trap_score)
 
         label = "Bullish" if final_score > 15 else "Bearish" if final_score < -15 else "Neutral"
         direction: str | None = "CE" if final_score > 0 else ("PE" if final_score < 0 else None)
@@ -4943,6 +5100,14 @@ class TrailSLEngine:
                 f"EP=[{', '.join(_ep_strs)}]  "
                 f"GAIN=[{', '.join(_gain_strs)}]  "
                 f"ACT=[{', '.join(_act_strs)}]")
+            # The sweep heartbeat. A ladder that held for 300 bars and a ladder
+            # that was never called look identical from the stop alone.
+            # No comprehension here, deliberately. `ev()` cannot guard its own
+            # ARGUMENTS — they evaluate before the call — and the first version
+            # of this line iterated `positions` as objects when they are
+            # `(underlying, position)` tuples. That is an AttributeError on
+            # every trail sweep, in the one function that moves stops.
+            ev("cycle", phase="sweep", pos_count=len(positions))
 
         for underlying, pos in positions:
             if pos.exit_pending:
@@ -5193,6 +5358,18 @@ class TrailSLEngine:
             f"UnrealPnL={_unrealized_pnl_pts:.2f}pts ({_unrealized_pnl_pct:.1f}%) ₹{_unrealized_pnl_abs:.0f} | "
             f"PeakClose={pos.trail_peak_close:.2f} | LTP={confirmed_close:.2f}"
         )
+        # Every number on the line above, as fields. `mcp_tools/sim/trailsim.py`
+        # replays an entire trailing ladder from these, so a format change here
+        # used to make a replay WRONG rather than absent.
+        ev("cycle", phase="premium", underlying=underlying, symbol=pos.symbol,
+           slot=pos.slot_id, roi_pct=_roi_pct, gamma_tier=_gamma_tier,
+           ker=trend_efficiency, ker_net=_net_move, ker_path=_path_length,
+           ker_factor=trend_efficiency_factor, speed=_trail_speed,
+           base_step=_base_step_pts, final_step=step_pts, cap=ep * 0.50,
+           unreal_pts=_unrealized_pnl_pts, unreal_pct=_unrealized_pnl_pct,
+           unreal_rupees=_unrealized_pnl_abs,
+           peak_close=pos.trail_peak_close, ltp=confirmed_close,
+           sl=pos.sl, armed=bool(pos.premium_trail_active))
 
         # Trail activation and ratchet placement use confirmed periodic closes.
         _prev_sl = pos.sl
@@ -5213,17 +5390,46 @@ class TrailSLEngine:
                     elif _pct_of_target >= 0.50: _lock_floor = ep + _target_gain * 0.10
                     else:                        _lock_floor = ep + _target_gain * cfg.trail.activation_lock_pct
 
-                    # Profit-lock milestone log
+                    # Profit-lock milestone log.
+                    #
+                    # HIGHEST FIRST. Ordered lowest-first this chain could only
+                    # ever print "50%": reaching the 75% arm requires the 50%
+                    # arm to be false, and with _prev_pl_pct at its 0.0 default
+                    # that means _pct_of_target < 0.50 — which contradicts the
+                    # >= 0.75 it is then tested against. Both upper arms were
+                    # unreachable at every price path, so a position that armed
+                    # at 120% of target gain logged 50%.
+                    #
+                    # The stop is unaffected and always was: _lock_floor above
+                    # is a separate chain, already ordered highest-first, and it
+                    # picked the right tier. Only the reported milestone was
+                    # wrong, and only ever in the direction of understating how
+                    # far the position had run. _advance_stage fires under
+                    # exactly the same condition as before — any arm taken means
+                    # _pct_of_target >= 0.50, which is what the old chain's one
+                    # reachable arm required.
                     _prev_pl_pct = self._last_pl_pct.get(pos.slot_id, 0.0)
-                    if _pct_of_target >= 0.50 and _prev_pl_pct < 0.50:
+                    if _pct_of_target >= 1.0 and _prev_pl_pct < 1.0:
                         _advance_stage(pos, LifecycleStage.PROFIT_LOCK)
-                        inf(f"[PROFIT-LOCK] {underlying}: milestone 50% ({_lock_floor:.1f}) at peak_gain={_peak_gain:.1f}")
+                        inf(f"[PROFIT-LOCK] {underlying}: milestone 100%+ ({_lock_floor:.1f}) at peak_gain={_peak_gain:.1f}")
+                        ev("protection", action="lock", underlying=underlying,
+                           symbol=pos.symbol, slot=pos.slot_id, milestone=1.0,
+                           lock_floor=_lock_floor, peak_gain=_peak_gain,
+                           pct_of_target=_pct_of_target)
                     elif _pct_of_target >= 0.75 and _prev_pl_pct < 0.75:
                         _advance_stage(pos, LifecycleStage.PROFIT_LOCK)
                         inf(f"[PROFIT-LOCK] {underlying}: milestone 75% ({_lock_floor:.1f}) at peak_gain={_peak_gain:.1f}")
-                    elif _pct_of_target >= 1.0 and _prev_pl_pct < 1.0:
-                        inf(f"[PROFIT-LOCK] {underlying}: milestone 100%+ ({_lock_floor:.1f}) at peak_gain={_peak_gain:.1f}")
+                        ev("protection", action="lock", underlying=underlying,
+                           symbol=pos.symbol, slot=pos.slot_id, milestone=0.75,
+                           lock_floor=_lock_floor, peak_gain=_peak_gain,
+                           pct_of_target=_pct_of_target)
+                    elif _pct_of_target >= 0.50 and _prev_pl_pct < 0.50:
                         _advance_stage(pos, LifecycleStage.PROFIT_LOCK)
+                        inf(f"[PROFIT-LOCK] {underlying}: milestone 50% ({_lock_floor:.1f}) at peak_gain={_peak_gain:.1f}")
+                        ev("protection", action="lock", underlying=underlying,
+                           symbol=pos.symbol, slot=pos.slot_id, milestone=0.5,
+                           lock_floor=_lock_floor, peak_gain=_peak_gain,
+                           pct_of_target=_pct_of_target)
                     self._last_pl_pct[pos.slot_id] = _pct_of_target
                     new_sl = max(new_sl, _lock_floor)
                 else:
@@ -5253,12 +5459,26 @@ class TrailSLEngine:
                     inf(f"[TRAIL-ACT] {underlying} {pos.symbol}: threshold={activate_pts:.1f}, "
                         f"premium={confirmed_close:.1f}, gain={move:.1f}, "
                         f"sl_vs_entry={_sl_vs_ep:+.2f}{' BELOW_ENTRY' if _sl_vs_ep < 0 else ''}")
+                    # `below_entry` as a BOOLEAN, not a word inside a sentence.
+                    # It means the trail armed protecting no profit, and every
+                    # exit it causes still books as PREMIUM_TRAIL.
+                    ev("protection", action="activate", underlying=underlying,
+                       symbol=pos.symbol, slot=pos.slot_id,
+                       threshold=activate_pts, premium=confirmed_close,
+                       gain=move, sl_vs_entry=_sl_vs_ep,
+                       below_entry=bool(_sl_vs_ep < 0), frm=_prev_sl,
+                       to=new_sl, step=step_pts, speed=_trail_speed,
+                       method=cfg.trail.sl_method, ladder="premium")
                     inf(f"[TRAIL] Premium ACTIVATED {underlying}: peak {ltp:.2f} SL→{new_sl:.2f} (speed={_trail_speed:.1f}x)")
                     if _lock_floor >= ep:
                         _advance_stage(pos, LifecycleStage.LOCKED)
                         inf(f"[TRAIL-LOCK] {underlying}: sl={new_sl:.1f}, lock_type={_lock_type}")
                 else:
                     inf(f"[TRAIL] Premium activation BLOCKED {underlying}: broker rejected new_sl={new_sl:.2f} — retrying next cycle")
+                    ev("protection", action="blocked", underlying=underlying,
+                       symbol=pos.symbol, slot=pos.slot_id,
+                       cause="broker_rejected", proposed=new_sl,
+                       current=pos.sl, at_stage="activation", ladder="premium")
             else:
                 if new_sl <= pos.sl:
                     dbg(f"[TRAIL] {underlying}: new_sl={new_sl:.2f} <= current sl={pos.sl:.2f} — not yet beneficial, retry next cycle")
@@ -5279,19 +5499,38 @@ class TrailSLEngine:
                         pos.premium_trail_sl = new_sl
                         pos.sl = new_sl
                         inf(f"[TRAIL-RATCHET] {underlying} {pos.symbol}: {_prev_sl:.1f}->{new_sl:.1f}, step={step_pts:.1f}, method={cfg.trail.sl_method}")
+                        ev("protection", action="ratchet", underlying=underlying,
+                           symbol=pos.symbol, slot=pos.slot_id, frm=_prev_sl,
+                           to=new_sl, step=step_pts,
+                           method=cfg.trail.sl_method, speed=_trail_speed,
+                           ladder="premium")
                         inf(f"[TRAIL] Premium RATCHET {underlying}: peak {ltp:.2f} SL→{new_sl:.2f} (speed={_trail_speed:.1f}x)")
                     else:
                         inf(f"[TRAIL-BLOCKED] {underlying} {pos.symbol}: broker rejected new_sl={new_sl:.1f}, retrying next cycle")
+                        ev("protection", action="blocked", underlying=underlying,
+                           symbol=pos.symbol, slot=pos.slot_id,
+                           cause="broker_rejected", proposed=new_sl,
+                           current=pos.sl, at_stage="ratchet", ladder="premium")
                         inf(f"[TRAIL] Premium ratchet BLOCKED {underlying}: broker rejected new_sl={new_sl:.2f} — retrying next cycle")
                 else:
                     if new_sl <= pos.sl:
                         inf(f"[TRAIL-BLOCKED] {underlying} {pos.symbol}: proposed={new_sl:.1f} <= current={pos.sl:.1f} — step too wide")
+                        ev("protection", action="blocked", underlying=underlying,
+                           symbol=pos.symbol, slot=pos.slot_id,
+                           cause="step_too_wide", proposed=new_sl,
+                           current=pos.sl, at_stage="ratchet", ladder="premium")
                         dbg(f"[TRAIL] {underlying}: new high (peak={pos.trail_peak_close:.2f}) but new_sl={new_sl:.2f} <= "
                             f"current sl={pos.sl:.2f} — step too wide for this move, no ratchet")
                     else:
                         inf(f"[TRAIL-BLOCKED] {underlying} {pos.symbol}: proposed={new_sl:.1f} improves current={pos.sl:.1f} by "
                             f"{new_sl - pos.sl:.2f}pt but needs {_min_improvement:.2f}pt "
                             f"({cfg.trail.atr_min_ratchet_improvement_pct:.1f}% of {confirmed_close:.1f}) — margin not met")
+                        ev("protection", action="blocked", underlying=underlying,
+                           symbol=pos.symbol, slot=pos.slot_id,
+                           cause="margin_not_met", proposed=new_sl,
+                           current=pos.sl, improvement=new_sl - pos.sl,
+                           needs=_min_improvement, at_stage="ratchet",
+                           ladder="premium")
 
     def _process_spot_trail(self, underlying: str, pos: OptionPosition, spot_ltp: float, conv_adj: float, signal_trail_boost: float = 1.0) -> None:
         cfg = self._config
@@ -5609,12 +5848,18 @@ class StrikeSelector:
         # ── Guard: IVR too high for buyer edge ────────────────────────────────
         if iv_rank is not None and iv_rank >= cfg.entry.iv_rank_max_entry:
             inf(f"[STRIKE] IVR {iv_rank:.1f}% >= max {cfg.entry.iv_rank_max_entry:.1f}% — buyer edge rejected")
+            ev("gate", stage="strike", passed=False, underlying=symbol,
+               cause="iv_rank_above_max", iv_rank=iv_rank,
+               iv_rank_max=cfg.entry.iv_rank_max_entry)
             return None
 
         # ── Guard: insufficient signal conviction ─────────────────────────────
         abs_score = abs(signal_score)
         if abs_score < _min_score:
             inf(f"[STRIKE] Signal score {signal_score:.0f} < min {_min_score} — insufficient edge")
+            ev("gate", stage="strike", passed=False, underlying=symbol,
+               cause="score_below_min", signal_score=signal_score,
+               min_score=_min_score)
             return None
 
         # ── Conviction scalar ─────────────────────────────────────────────────
@@ -5638,6 +5883,20 @@ class StrikeSelector:
         target_delta_low  = max(0.01, target_delta - STRIKE_DELTA_BAND)
         target_delta_high = min(0.99, target_delta + STRIKE_DELTA_BAND)
         inf(f"[STRIKE] conviction={conviction:.2f} target_delta={target_delta:.3f} band=[{target_delta_low:.2f},{target_delta_high:.2f}]")
+        # `conviction` here is the SELECTION scalar, (|score| - eff_min) /
+        # (100 - eff_min), which is also what the trail reads. It is NOT
+        # |score|/100, which sizing uses. Two numbers, both named.
+        ev("entry", stage="strike", underlying=symbol, conviction=conviction,
+           target_delta=target_delta, band_low=target_delta_low,
+           band_high=target_delta_high, signal_score=signal_score,
+           min_score=_min_score)
+        # `conviction` here is the SELECTION scalar — (|score| - eff_min) /
+        # (100 - eff_min) — which is also what the trail reads. It is not
+        # |score|/100, which sizing uses. Two numbers, both named.
+        ev("entry", stage="strike", underlying=symbol, conviction=conviction,
+           target_delta=target_delta, band_low=target_delta_low,
+           band_high=target_delta_high, signal_score=signal_score,
+           min_score=_min_score)
 
         # ── Stage 1: Price-range filter ───────────────────────────────────────
         # Window scales from config; avoids hardcoding ±5%.
@@ -5970,6 +6229,8 @@ class RiskManager:
             self._session_consecutive_losses += 1
             self._session_consecutive_wins = 0
             inf(f"[RISK] Loss streak: {self._session_consecutive_losses} | Daily P&L ₹{self._daily_pnl:.0f}")
+            ev("gate", stage="risk_checkpoint", passed=True,
+               streak=self._session_consecutive_losses, daily_pnl=self._daily_pnl)
         else:
             self._session_consecutive_losses = 0
             self._session_consecutive_wins += 1
@@ -6386,6 +6647,8 @@ class WebSocketManager:
             return
         if ltp >= _tgt:
             inf(f"[WS] PREMIUM TARGET HIT {underlying}: LTP {ltp:.2f} >= TGT {_tgt:.2f}")
+            ev("exit", kind_detail="target_hit", underlying=underlying,
+               symbol=pos.symbol, slot=pos.slot_id, ltp=ltp, target=_tgt)
             self._trigger_exit(underlying, "premium_target_hit", pos=pos)
             return
 
@@ -6852,6 +7115,9 @@ class OrderManager:
             # pos.sl_order_id / pos.tgt_order_id are deliberately left set — they belong to the runner
             # tranche, and clearing them here would make the next verify pass reissue duplicates.
         inf(f"[PARTIAL] {underlying} {opt_sym}: filled {filled_qty} @ \u20b9{price:.2f} P&L \u20b9{tr_pnl:.0f} | residual {tranche.qty}")
+        ev("exit", kind_detail="partial", underlying=underlying, symbol=opt_sym,
+           slot=pos.slot_id, qty=filled_qty, exit_price=price, pnl_abs=tr_pnl,
+           residual_qty=tranche.qty, tranche_id=str(tranche.tranche_id))
 
     def _raw_order_status(self, order_id: str) -> dict | None:
         """One-shot orderstatus call. Returns the full response dict (data layer)
@@ -6957,6 +7223,11 @@ class OrderManager:
         inf(f"[TRAIL-EXIT] {underlying} {pos.symbol}: reason={reason_str}, final_sl={pos.sl:.1f}, "
             f"peak={pos.trail_peak_close or 0:.1f}, exit_px={executed_price:.2f}, "
             f"giveback={_giveback:+.2f}, pnl_pts={executed_price - pos.entry_premium:+.2f}")
+        ev("exit", underlying=underlying, symbol=pos.symbol, slot=pos.slot_id,
+           reason=reason_str, final_sl=pos.sl, peak=pos.trail_peak_close,
+           exit_px=executed_price, giveback=_giveback,
+           pnl_pts=executed_price - pos.entry_premium,
+           entry_premium=pos.entry_premium, qty=pos.qty, broker_fill=False)
         with self._state.state_lock:
             self._state.positions.pop(pos.slot_id, None)
             self._state.pending_opposite_exit.discard(underlying)
@@ -6988,6 +7259,8 @@ class OrderManager:
                 _age = f"{time.time() - _ts:.1f}s" if _ts else "never-updated"
                 inf(f"[LTP-SRC] {symbol}: snapshot empty, using ltp_map={_map_ltp:.2f} "
                     f"(snapshot_age={_age}) — price is not from a live tick")
+                ev("mark", kind_detail="ltp_source", symbol=symbol, source="ltp_map",
+                   map_ltp=_map_ltp, snapshot_age=_age, live_tick=False)
             return _map_ltp
 
         # divergence = snapshot - ltp_map. Both live means the WS tick and the
@@ -6995,6 +7268,9 @@ class OrderManager:
         if _map_ltp is not None and abs(_snap_ltp - _map_ltp) >= 1.0:
             inf(f"[LTP-SRC] {symbol}: snapshot={_snap_ltp:.2f} vs ltp_map={_map_ltp:.2f} "
                 f"divergence={_snap_ltp - _map_ltp:+.2f} — using snapshot")
+            ev("mark", kind_detail="ltp_source", symbol=symbol, source="snapshot",
+               snapshot_ltp=_snap_ltp, map_ltp=_map_ltp,
+               divergence=_snap_ltp - _map_ltp, live_tick=True)
         return _snap_ltp
 
     def _cancel_tranche_orders(self, underlying: str, pos: OptionPosition) -> dict:
@@ -7635,6 +7911,19 @@ class OrderManager:
             f"delta={entry_delta if entry_delta else 'N/A'} conviction={entry_conviction:.2f} | "
             f"ws_desired={list(self._ws._desired)}"
         )
+        # ONE event where the log needs three lines joined by proximity —
+        # [STRIKE], [DATA] TRADE REGISTERED and [ORDER] Position registered.
+        # Two entries in the same second mis-join through the log; `slot` and
+        # `scan_id` make that impossible here.
+        ev("entry", underlying=underlying, option=option_symbol,
+           exchange=cfg.market.fno_exchange, spot=underlying,
+           spot_exchange=("NSE_INDEX" if underlying in cfg.market.index_underlyings
+                          else cfg.market.spot_exchange),
+           entry=executed, spot_entry=spot, direction=direction,
+           sl=sl, tgt=tgt, sl_pts=resolved_sl_pts, qty=qty,
+           delta=entry_delta, conviction=entry_conviction,
+           moneyness=moneyness, slot=pos.slot_id, scan_id=pos.scan_id,
+           entry_sl_source=entry_sl_source, trail_act_mult=act_mult)
 
         if cfg.broker.broker_sl_orders:
             if cfg.broker.use_basket_protection and hasattr(self.client, "basketorder") and not cfg.tranche.enabled:
@@ -7713,6 +8002,11 @@ class OrderManager:
                         if is_sl:
                             pos.sl_order_id = leg.get("orderid")
                             dbg(f"[ORDER] Basket SL-M placed for {underlying}: trigger ₹{sl:.2f} (id:{pos.sl_order_id})")
+                            # Emitted although the log line is DEBUG: a log captured at INFO is
+                            # missing this entirely, which is not the same as no stop being placed.
+                            ev("protection", action="broker_stop", underlying=underlying,
+                               trigger=sl, orderid=pos.sl_order_id, slot=pos.slot_id,
+                               kind_detail="basket_sl")
                         else:
                             pos.tgt_order_id = leg.get("orderid")
                             dbg(f"[ORDER] Basket LIMIT placed for {underlying}: ₹{tgt:.2f} (id:{pos.tgt_order_id})")
@@ -8186,6 +8480,11 @@ class OrderManager:
                     self._ws.unsubscribe_spot(pos.spot_symbol)
                 _advance_stage(pos, LifecycleStage.CLOSED)
                 inf(f"[TRAIL-EXIT] {underlying} {pos.symbol}: reason={norm_reason}, all-tranche-broker-fill")
+                # The variant carrying no price. `broker_fill` is a BOOLEAN here; the
+                # text form hides it in a magic phrase a reader has to recognise.
+                ev("exit", underlying=underlying, symbol=pos.symbol, slot=pos.slot_id,
+                   reason=norm_reason, broker_fill=True,
+                   entry_premium=pos.entry_premium)
                 with self._state.state_lock:
                     self._state.positions.pop(pos.slot_id, None)
                     self._state.pending_opposite_exit.discard(underlying)
@@ -8724,6 +9023,8 @@ class OptionsBuyerEdgeBot:
                 avg_price  = float(event.get("average_price", 0) or 0)
                 if filled_qty > 0 and avg_price > 0:
                     inf(f"[ORDER-STREAM] Confirmed fill for {order_id}: qty={filled_qty} @ {avg_price} — completing entry immediately")
+                    ev("fill", kind_detail="entry_fill", orderid=str(order_id),
+                       qty=filled_qty, price=avg_price)
                     self.risk.record_entry(pending.underlying)
                     self.orders.register_filled_entry(
                         pending.underlying, pending.symbol, filled_qty,
@@ -8819,12 +9120,16 @@ class OptionsBuyerEdgeBot:
                         # Position-level match (single-tranche path)
                         if getattr(pos, attr_name, None) == order_id:
                             inf(f"[ORDER-STREAM] Protection fill detected: {attr_name} {order_id} → handling immediately")
+                            ev("fill", kind_detail="protection_fill", order_attr=str(attr_name),
+                               orderid=str(order_id), tranche_id=None)
                             self.orders._handle_broker_order_fill(underlying, pos, attr_name, order_id, raw_reason, executed_price)
                             return
                         # Tranche-level match (multi-tranche path)
                         for tr in (pos.tranches or []):
                             if getattr(tr, attr_name, None) == order_id:
                                 inf(f"[ORDER-STREAM] Protection fill detected: {attr_name} t={tr.tranche_id} {order_id} → handling immediately")
+                                ev("fill", kind_detail="protection_fill", order_attr=str(attr_name),
+                                   orderid=str(order_id), tranche_id=str(tr.tranche_id))
                                 self.orders._handle_broker_order_fill(
                                     underlying, pos, attr_name, order_id,
                                     raw_reason, executed_price, tr=tr,
@@ -9089,6 +9394,8 @@ class OptionsBuyerEdgeBot:
                 # No exit_lock — the write is covered by state_lock, and this path never touches exit_queue.
                 pos.exit_pending = True
             inf(f"[TIME-EXIT] {ul}: held {held_minutes:.0f}m >= max {cfg.market.max_hold_minutes}m — exiting (theta guard)")
+            ev("exit", kind_detail="time_exit", underlying=ul,
+               held_minutes=held_minutes, max_minutes=cfg.market.max_hold_minutes)
             self.orders.place_exit(ul, f"MaxHoldTime({cfg.market.max_hold_minutes}m)", slot_id=pos.slot_id)
 
     def _cleanup_stale_positions(self) -> None:
@@ -9219,6 +9526,15 @@ class OptionsBuyerEdgeBot:
                     if abs(_delta) >= 1.0:
                         _div = f" | broker=₹{_broker_pnl:.2f} STALE_BY=₹{_delta:+.2f}"
                 inf(f"[PNL - {_src.upper()}] pnl=₹{pnl:.2f} ltp={_ltp} symbol={pos.symbol}{_div}")
+                # WHICH source produced the number, as a field, with the broker figure
+                # beside it. F105: positionbook's pnl stayed frozen at -103.50 for eight
+                # alerts while the option moved 5.5 points, and only the source told a
+                # live number from a stuck one.
+                ev("mark", source=_src.upper(), pnl=pnl,
+                   ltp=(float(_ltp) if _ltp else None), symbol=pos.symbol,
+                   slot=pos.slot_id, broker_pnl=_broker_pnl,
+                   stale_by=(pnl - _broker_pnl if _broker_pnl is not None and _ltp
+                             else None))
 
                 hold_mins = max(0, int((get_ist_now() - pos.entry_time).total_seconds() / 60))
                 hours = hold_mins // 60
@@ -9676,6 +9992,11 @@ class OptionsBuyerEdgeBot:
 
         if _signal != "EXECUTE":
             inf(f"  {_sig_ico} {_signal}  —  not executing  (score {abs(_s)}/100, min {effective_min_score})")
+            ev("gate", stage="signal", passed=False, underlying=symbol,
+               detail=str(_signal), score=abs(_s), min_score=effective_min_score)
+            ev("gate", stage="signal", passed=False, underlying=symbol,
+               detail=str(_signal), score=abs(_s),
+               min_score=effective_min_score)
             _log_greeks_perf("no-execute", sep_count=79)
             return
 
@@ -9684,6 +10005,10 @@ class OptionsBuyerEdgeBot:
         inf(f"  ✔ EXECUTE  {_dir_ico}  {result.direction}"
             f"  [{symbol}] {_entry_ts}"
             f"  fast_norm={result.fast_norm:.3f} slow_norm={result.slow_norm:.3f} mult={result.confirm_mult:.3f}")
+        ev("decision", outcome="execute", side=result.direction,
+           underlying=symbol, entry_ts=_entry_ts, score=result.score,
+           fast_norm=result.fast_norm, slow_norm=result.slow_norm,
+           mult=result.confirm_mult, min_score=effective_min_score)
 
         # V2-A6: Signal parallel sync — exit opposing active positions on new EXECUTE signal
         if cfg.position.signal_parallel_exit:
@@ -9712,6 +10037,9 @@ class OptionsBuyerEdgeBot:
                 _pos_dir = _pos.option_type
                 if direction != _pos_dir:
                     inf(f"[SIGNAL] {symbol}: signal={direction}({result.score}) vs position={_pos_dir} — OPPOSING")
+                    ev("decision", outcome="signal_sync", underlying=symbol,
+                       signal=direction, position=_pos_dir, score=result.score,
+                       opposing=True)
 
         # V2-A5: Signal-deterioration tranche exit
         if cfg.tranche.enabled:
@@ -9817,8 +10145,11 @@ class OptionsBuyerEdgeBot:
 
         # ── Part 2: Conviction-Driven SL Sizing + Dynamic Cap ──────────────
         # Chain: base → conviction → floor → dynamic ceiling (applied LAST).
+        # NB: this is its own conviction scale — abs(score)/100, NOT the
+        # entry_conviction computed above off effective_min_score. The two
+        # differ and the difference is live behaviour, so it is left alone.
         _sl_raw_conv = min(abs(result.score) / 100.0, 1.0)
-        sl_factor    = 1.10 - (_sl_raw_conv * 0.20)
+        sl_factor    = CONV_BE_BASE - (_sl_raw_conv * CONV_BE_RANGE)
 
         entry_sl_pts = base_sl_pts * sl_factor
         entry_sl_pts = max(5.0, entry_sl_pts)
@@ -10102,6 +10433,13 @@ class OptionsBuyerEdgeBot:
                             eod_underlyings = list(self.state.positions.underlyings())
                         if eod_underlyings:
                             inf(f"[SQUAREOFF] {cfg.market.square_off_time} reached — closing {len(eod_underlyings)} position(s)")
+                            # `position_count` is what the log line carries and
+                            # what the pattern extracts. The list of names was
+                            # me adding beyond parity, and it put a
+                            # comprehension in an argument `ev()` cannot guard.
+                            ev("session", phase="close",
+                               cutoff_time=str(cfg.market.square_off_time),
+                               position_count=len(eod_underlyings))
                             for ul in eod_underlyings:
                                 for pos in self.state.positions.get_all(ul):
                                     # Claim under state_lock — _trigger_exit uses the same
