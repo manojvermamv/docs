@@ -5,15 +5,13 @@
 ### Template 1 — Shorter simplify + final suggestion only
 `````text
 Simplify what's below into plain, simple language. Cover:
-
 - What it means
 - What it's actually doing
 - Why it exists
 - Whether it's describing something planned for before or after implementation
-
 Also cover What's Done, What Remains, and What Needs to Be Decided — only if that applies here.
-
 Then tell me what we should do next, as a higher-level suggestion.
+Along the way, check this against the conversation so far — if something looks like drift or a contradiction, flag it in one short line instead of writing it up.
 
 ````
 CONTENT_PLACEHOLDER
@@ -23,15 +21,13 @@ CONTENT_PLACEHOLDER
 ### Template 2 — Full simplify + status + decisions + direction
 `````text
 Simplify what's below into plain, simple language — using the context boundaries given plus your own deep research on the topic. Cover:
-
 - What it means
 - What it's actually doing
 - Why it exists
 - Whether it's describing something planned for before or after implementation
-
 Also cover What's Done, What Remains, and What Needs to Be Decided — only if that applies here — with your own higher-level suggestions on each.
-
 Finally, tell me what we should do next, in the same higher-level suggestion style.
+Along the way, check this against the conversation so far — if something looks like drift or a contradiction, flag it in one short line instead of writing it up.
 
 ````
 CONTENT_PLACEHOLDER
@@ -41,6 +37,17 @@ CONTENT_PLACEHOLDER
 ### Template 3 — Compare against the previous one
 `````text
 Just for what's below: explain, in plain language, what this is actually saying and how it compares against the previous one. Cover What's Done, What Remains, and What Needs to Be Decided — only if that applies here. Suggest those decisions yourself, and suggest what direction to take next.
+Along the way, check this against the conversation so far — if something looks like drift or a contradiction, flag it in one short line instead of writing it up.
+
+````
+CONTENT_PLACEHOLDER
+````
+`````
+
+### Template 4 — Directional Audit & Drift Detection
+`````text
+Audit what's below against the full context of this conversation — every prompt given so far, in order, and your own reasoning across earlier responses, not just what's pasted below. Look specifically for drift: anywhere this has quietly moved away from, contradicted, or lost track of the direction already set.
+If everything still lines up, say so in one line. If something looks wrong, don't write a report — ask about it in a single, short, conversational paragraph, kept minimal.
 
 ````
 CONTENT_PLACEHOLDER
