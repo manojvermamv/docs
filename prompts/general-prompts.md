@@ -1,10 +1,49 @@
 # General Use Prompts
 
-## Simplify & Summary Prompt
+## Simplify & Summary Prompts
+
+### Template 1 — Shorter simplify + final suggestion only
 `````text
-Simplify the below into 3 blocks: **What’s Done, What Remains, What Needs to Be Decided**, plus an optional **Suggested Decisions** block if there’s enough context: 
+Simplify what's below into plain, simple language. Cover:
+
+- What it means
+- What it's actually doing
+- Why it exists
+- Whether it's describing something planned for before or after implementation
+
+Also cover What's Done, What Remains, and What Needs to Be Decided — only if that applies here.
+
+Then tell me what we should do next, as a higher-level suggestion.
+
 ````
-AI_ANSWER_PLACEHOLDER
+CONTENT_PLACEHOLDER
+````
+`````
+
+### Template 2 — Full simplify + status + decisions + direction
+`````text
+Simplify what's below into plain, simple language — using the context boundaries given plus your own deep research on the topic. Cover:
+
+- What it means
+- What it's actually doing
+- Why it exists
+- Whether it's describing something planned for before or after implementation
+
+Also cover What's Done, What Remains, and What Needs to Be Decided — only if that applies here — with your own higher-level suggestions on each.
+
+Finally, tell me what we should do next, in the same higher-level suggestion style.
+
+````
+CONTENT_PLACEHOLDER
+````
+`````
+
+### Template 3 — Compare against the previous one
+`````text
+Just for what's below: explain, in plain language, what this is actually saying and how it compares against the previous one. Cover What's Done, What Remains, and What Needs to Be Decided — only if that applies here. Suggest those decisions yourself, and suggest what direction to take next.
+
+````
+CONTENT_PLACEHOLDER
 ````
 `````
 
