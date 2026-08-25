@@ -1,3 +1,5 @@
+# Turn 1
+
 I'll start by reading the two entry points that define the scope — your project's knowledge index and the Data-Sources master prompt — before launching the deep research.
 
 This is a large, multi-layered task. Before I orchestrate the audit, I need to scout both directories to build an accurate work-list and read the evaluation criteria. Let me gather the orienting context in parallel.
@@ -42,7 +44,7 @@ That is the empirical proof — the second, independent method the master prompt
 
 The audit workflow is concurrency-starved — 1 result from 29 agents in 40 minutes, so it would run past 15 hours. I have the decisive evidence first-hand and twice cross-checked, so I'm stopping it rather than leaving it burning.
 
-# 1. What you've built
+## 1. What you've built
 
 **AutonomousTrading is a framework with one strategy running on it; `Data-Sources` is not code at all — it's a grading rubric.** That asymmetry matters, because your rubric is written almost entirely about *research method* while your repo's strength is *engineering*.
 
@@ -67,7 +69,7 @@ The measured shape: 162 knowledge concepts (139 generated / 23 authored), 52 kno
 
 ---
 
-# 2. The named check: is there a Pine-style feature layer?
+## 2. The named check: is there a Pine-style feature layer?
 
 **Yes — and the AI cannot see it. That is the answer, and it is worse than the layer being missing.**
 
@@ -107,7 +109,7 @@ This is the most expensive gap in the repo by the master prompt's own test — *
 
 ---
 
-# 3. OCP audit — which axes are open, which are welded shut
+## 3. OCP audit — which axes are open, which are welded shut
 
 The honest headline: **you have five working plugin registries and roughly seven welded axes.** This is not a system that needs redesigning. It's a system where the *pattern you already use correctly in five places* hasn't been applied to the places that now need it.
 
@@ -146,7 +148,7 @@ The strategy axis is genuinely excellent — a new worker is one file and nothin
 
 ---
 
-# 4. Source by source, against your code
+## 4. Source by source, against your code
 
 ### The reading list (research method)
 
@@ -177,7 +179,7 @@ The strategy axis is genuinely excellent — a new worker is one file and nothin
 
 ---
 
-# 5. Consolidated gap map
+## 5. Consolidated gap map
 
 Ordered by damage per unit of effort, not by severity alone.
 
@@ -202,7 +204,7 @@ Ordered by damage per unit of effort, not by severity alone.
 
 ---
 
-# 6. Where the prior analysis is wrong
+## 6. Where the prior analysis is wrong
 
 The master prompt told me to cross-check rather than inherit, so:
 
@@ -216,7 +218,7 @@ Its thesis — *"the engineering is ahead of the methodology"* — I agree with,
 
 ---
 
-# 7. Future direction, in priority order
+## 7. Future direction, in priority order
 
 From `what-is-not-done.md`, the eight `knowledge/open/*.md`, and `open-items.md`:
 
@@ -296,3 +298,44 @@ python -m src.analysis.sim --help
 Find whether there's already a path from `advisor/value.py` view scoring to closed-trade P&L. If there isn't, that join is the highest-value thing you can build this week — it decides which of your three suspected causes is real, and therefore which of the four items above you actually need.
 
 One note on process: I stopped the 29-agent audit workflow at 1 result after 40 minutes — this machine caps it at 2–3 concurrent agents, so it was on a 15-hour path for findings I'd already verified first-hand. Everything in section 2 above is from running the real render function, not from reading it.
+
+
+-----
+
+# Turn 2
+
+I've read the repo end to end, the Data-Sources master prompt and its two analysed sources, and all four completed audit lenses. Here's the picture, then one question before I start the audit.
+
+## What the system is
+
+**A deterministic options desk with an AI control plane bolted alongside it — not an AI that trades.** A tick becomes an order through five stages: capture (your own market store, journalled), decide (one numbered tape → strategy → advisor opinion → framework), send (a ten-stage gate chain → execution gateway → OpenAlgo), record (files in `run/`, then Parquet), look (three MCP gateway processes, `at` CLI, admin console). OpenAlgo owns auth and the broker-facing risk boundary; one arrow in the whole system spends money.
+
+| | |
+|---|---|
+| Code | 60,325 lines in `src/` (278 files) · 47,953 lines of tests (142 files) · the original strategy monolith is 12,339 lines, kept as the control |
+| Surfaces | 11 MCP domains · `at` CLI · Next.js console · 3 gateway processes split by capability |
+| Real money | Orders placed through OpenAlgo 14 and 17 Aug 2026. Not theoretical |
+| Discipline | Findings are append-only registers; docs get deleted when wrong; a knowledge map fails the suite when it drifts |
+
+**The engineering quality here is genuinely unusual** — layering enforced by a test, a determinism gate, a capability layer behind three presentations, refusals recorded as first-class outcomes. The honest weakness is the other axis, and both your own registers and the Data-Sources analysis land on the same one.
+
+**One thing to know about this checkout:** `run/` holds only `market-data` (21 files). No `run/strategies/strategies.json`, no decisions, orders or advisor records. So this box is a dev checkout — the README's claim that five strategies sit at `authority: trade` cannot be checked here, and any audit finding about deployed configuration can only be checked against code, not against the live host.
+
+## What the Data-Sources rubric adds
+
+Two documents, and they test different things. The reading list (Aronson, Bailey PBO, Deflated Sharpe, `pypbo`, Carver, AFML ch.7) tests whether your **research method** can tell a real edge from a search artefact. The four-phase framework (GEX/Vanna/Charm regime → conviction filters → causal reasoning → async execution) tests whether your **architecture** can carry what a desk needs. The master prompt's own named gap — a Pine-style feature scratchpad that carries prior bars forward and takes arbitrary new specs without a pipeline rebuild — is the one your completed lenses have already confirmed is missing.
+
+## Future direction, in priority order
+
+This is my synthesis of your open items, your 52 defects, master spec §24, the Data-Sources gap map and the 42 verified audit findings. Ordered by what unblocks the most, not by size.
+
+| | What | Why it's here | Status |
+|---|---|---|---|
+| **1** | **The model is being judged on a prompt that contains almost nothing.** `render()` transmits 7 of 34 chain fields, zero greeks, and `ctx.bars` is a plain list with no `close[1]` semantics. `AdvisorContext.extra`'s filter is set-equal to its only two producers, so "Strategy evidence:" is structurally dead code | Open item 1 ("negative edge at every horizon") is your headline finding — and it was measured on a 934-character prompt. It tells you a model shown almost nothing can't help. It does not tell you the thing you think it tells you | Verified by two lenses |
+| **2** | **Contract-spec risk.** BANKNIFTY weeklies were discontinued Nov 2024; NIFTY weekly moved Thursday→Tuesday Sept 2025 | If any expiry assumption is baked in, every signal on that underlying is wrong. Cheap to check, catastrophic if wrong. Both Data-Sources documents flag it independently | **Unverified** — this is the pending `expiry-specs` lens |
+| **3** | **Session caps bind nothing, and setting them stops the desk.** `run_framework_live.py:460` passes a blank `Session()`, so all eight `MCP_LIMITS__*` caps evaluate against zeros and pass; setting the one value `.sample.env` documents refuses *every* entry because `capital=0.0` | Touches entry, so the number is yours. The `capital <= 0` half is a plain bug and is correctness work | Verified |
+| **4** | **Research method.** `deflate()` is `t − √(2·ln trials)` with `trials` defaulting to 1; the holdout is a chronological split with no purge or embargo; the evidence screens are diagnostic and feed nothing | You cannot tell a real edge from a search artefact today, which makes every future tuning decision unfalsifiable | **Unverified** — pending `research-method` lens |
+| **5** | **Structural OCP fixes**, in dependency order: a stage registry for `plan()`, a needs registry to replace five hardcoded enumerations, a renderer port, an execution-client Protocol | The composable ordered rule registry you need **already exists** in `riskguard.py` and nothing on the money path uses it. Reuse it; don't build a second one | Verified |
+| **6** | **Regime layer** — GEX, Vanna, Charm, gamma flip, call/put wall, IV rank | Worth building *after* #1, not before. Today nothing computed would reach the model anyway, and `greeks_legs` has been 0 on all 3,850 recorded scans | Partly unverified — pending `greeks-regime` lens |
+
+**The four items marked unverified are exactly what the pending audit lenses cover**, which is why finishing the audit is the right next step rather than acting on the priority order as it stands.
