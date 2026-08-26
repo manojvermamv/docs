@@ -1,0 +1,1075 @@
+if your trading profits are built on an
+
+
+illusion it's only a matter of time
+
+
+before everything crashes down and
+
+
+that's the hidden mistake I see even
+
+
+from traders who think they're
+
+
+profitable you yourself might already be
+
+
+making profits from your trading but
+
+
+there's always that nagging question in
+
+
+the back of your mind is this legit or
+
+
+am I just on a lucky streak and that
+
+
+question matters because if it really is
+
+
+just luck it can vanish in an instant
+
+
+but if you know for sure that you've got
+
+
+a genuine Edge it changes everything
+
+
+you'll handle losses way better you
+
+
+won't be panicking and tweaking your
+
+
+strategy every time something goes wrong
+
+
+because you know that your profitability
+
+
+will bounce back so in this video I'm
+
+
+going to show you how to confirm once
+
+
+and for all whether you genuinely have
+
+
+an edge or if it's all Just an Illusion
+
+
+and if you follow what I'm about to
+
+
+share with you you'll fundamentally
+
+
+change how you look at every single
+
+
+trait not only will this help prove if
+
+
+you do have an edge or not it will help
+
+
+you to enhance your Edge or even set you
+
+
+up to actually develop one in the first
+
+
+place and by the way if you're serious
+
+
+about developing your trading Edge
+
+
+you're going to want to check out the
+
+
+free trading that I've Linked In the
+
+
+description box down below but more
+
+
+about that later all right let's dive in
+
+
+so how do most Traders try to confirm if
+
+
+they have an edge they'll usually look
+
+
+at metrics like their profit Factor
+
+
+Traders equation maybe even just their
+
+
+overall returns but there's a huge issue
+
+
+here those measurements just rely on the
+
+
+results of your trades the profit
+
+
+profits and losses I mean sure that
+
+
+sounds logical like why wouldn't you use
+
+
+p&l data but let me show you an example
+
+
+to expose why this is so misleading this
+
+
+is the actual performance of a trading
+
+
+strategy that generated profits of over
+
+
+140% that's amazing right steady growth
+
+
+frequent but small losses seems like
+
+
+it's a solid risk profile nothing too
+
+
+adventurous and you know doesn't look
+
+
+like the account is going to crash and
+
+
+burn if you plug this into the usual
+
+
+tools profit Factor Sharp ratio you name
+
+
+it you'd get the green light that this
+
+
+strategy has a real Edge but check this
+
+
+out now you're looking at 200 trading
+
+
+strategies that are completely random no
+
+
+Edge at all basically coin flips and
+
+
+that awesome performance that I showed
+
+
+you before it's just this line here pure
+
+
+luck yet most common tools would say yes
+
+
+this is a profitable trading system keep
+
+
+doing what you're doing and that's
+
+
+dangerous because since there's no real
+
+
+Edge behind that strategy that same
+
+
+strategy could easily follow a path like
+
+
+this one in the next 200 trades wiping
+
+
+out all gains in fact over a long enough
+
+
+period of time you'd expect it to fall
+
+
+back to being around break even so then
+
+
+the question is how do we fix this well
+
+
+it all comes down to probabilities let's
+
+
+clear something up what exactly is a
+
+
+trading Edge when you open a trade
+
+
+you're basically making a judgment about
+
+
+probabilities even even if you don't
+
+
+realize it like for example let's say
+
+
+that you're planning a trade on WTI oil
+
+
+you've got your stop loss below these
+
+
+lows here and a Target at the top here
+
+
+it's a classic one to2 risk reward setup
+
+
+if you have no Edge the raw maths says
+
+
+that there's a 33.3% chance for a profit
+
+
+and a 66.7% chance for a loss so that's
+
+
+just break even over a large sample or
+
+
+actually a loss once you factor in
+
+
+transaction costs like the spread and so
+
+
+on so we call those probabilities the
+
+
+base rate the probability of an
+
+
+opportunity if you had no Edge at all
+
+
+but here's the key if you decide to take
+
+
+that trade you're implicitly stating
+
+
+that you believe the probability of a
+
+
+profit is higher than the base rate of
+
+
+33.3% otherwise why would you be taking
+
+
+the trade so what this means and I'm
+
+
+going to really oversimplify things just
+
+
+to get the points across is that having
+
+
+a trading Edge doesn't mean being able
+
+
+to choose which op opportunities are
+
+
+going to result in a profit it means
+
+
+being able to estimate the probabilities
+
+
+of a situation differently to the base
+
+
+rate and on average be right and if you
+
+
+are right on average you're going to be
+
+
+making money and if you're not right you
+
+
+won't now assuming that you are accurate
+
+
+with your probability estimates the
+
+
+further you are from the base rate the
+
+
+bigger your Edge will be and the more
+
+
+profits you'll be able to reliably make
+
+
+so that means if you want to know
+
+
+whether you do have an edge and how big
+
+
+that edge is there are two things you
+
+
+need to measure how far your estimates
+
+
+are from the base rate and how accurate
+
+
+those estimates are and if you stay
+
+
+tuned I'm going to walk you through a
+
+
+step-by-step way to measure exactly that
+
+
+just imagine the confidence that you're
+
+
+going to gain when you know that your
+
+
+probabilities line up with reality
+
+
+that's what I want for you so let's get
+
+
+into the details First Step start making
+
+
+explicit probability estimates for every
+
+
+trade if you're not quantifying the
+
+
+probability of a profitable outcome how
+
+
+do you know if you're right or not so
+
+
+open up a new spreadsheet and log the
+
+
+following columns trade ID base rate
+
+
+your estimated probability estimated
+
+
+probability divided by base rate and
+
+
+then the actual outcome was it a profit
+
+
+or a loss so it might look something
+
+
+like this so the estimated probability
+
+
+divided by base rate which I'll call the
+
+
+epbr from now on that ratio shows us how
+
+
+much further your estimate is compared
+
+
+to the base rate so for example if the
+
+
+base rate is
+
+
+33.3% and you estimate 40% your eppr is
+
+
+1.2 but if you estimated
+
+
+66.7% your epbr is two so the higher the
+
+
+number the more aggressively you think
+
+
+you're beating the base rate probability
+
+
+which as I mentioned a moment ago is one
+
+
+aspect of your Edge if you're right with
+
+
+it listen I know most Traders don't use
+
+
+probabilities in their trading so most
+
+
+people watching this won't be using
+
+
+probabilities most trading Educators
+
+
+despite saying trading is a game of
+
+
+probabilities don't teach about it why
+
+
+because they are just making things up
+
+
+as they go along they don't really have
+
+
+any real depth of knowledge or
+
+
+experience but that's a whole discussion
+
+
+for another time so if you're not sure
+
+
+where to start with all of this check
+
+
+out the free training that's in
+
+
+description box down below so in that
+
+
+training I'll start teaching you exactly
+
+
+what you need to know and I'll even
+
+
+follow up with more free training
+
+
+afterwards so it's a real no-brainer go
+
+
+and check it out the link is down below
+
+
+now something that you might have been
+
+
+thinking about is that each individual
+
+
+trade only has one outcome it's not like
+
+
+it ends up being a 60% profit and a 40%
+
+
+loss and therefore your probability
+
+
+estimate was exactly right it's only one
+
+
+outcome so we can't directly say whether
+
+
+your exact probability estimate was spot
+
+
+on for each individual trade but here's
+
+
+the trick if we analyze groups of Trades
+
+
+we can see how accurate you are on
+
+
+average now I have to give a massive
+
+
+shout out here to a member of our
+
+
+community Kento IA he helped us to
+
+
+refine our original process for these
+
+
+next steps that I'm going to walk you
+
+
+through and he helped us to make them a
+
+
+lot better now this guy is so switched
+
+
+on when it comes to the data side of
+
+
+trading and he also helps out other
+
+
+members of our community with their data
+
+
+and finding these optimizations and
+
+
+insight sites and that's really the
+
+
+benefit of having an amazing Community
+
+
+with really smart people everyone can
+
+
+learn and level up so here are the next
+
+
+steps that you need to follow you're
+
+
+going to group your trades together
+
+
+based on the epbr ratio which means
+
+
+we're grouping them based on how
+
+
+aggressive our estimates were and you
+
+
+can group them in other ways as well
+
+
+which we'll talk about in just a moment
+
+
+now we can open a new tab in the
+
+
+spreadsheet and add the following
+
+
+columns the label for the group in this
+
+
+case it will be the
+
+
+epbr the mean average of the base rate
+
+
+for that group the mean average of the
+
+
+estimated probabilities the actual
+
+
+result percentage profitable that is so
+
+
+we want that as a percentage the sample
+
+
+size the mean
+
+
+epbr then the actual results divided by
+
+
+the mean base rate we can then take this
+
+
+data and plot it onto a chart so that we
+
+
+can analyze our performance so we're
+
+
+going to plot the mean EP PBR and the
+
+
+actual result divided by the mean base
+
+
+rate and you can see we've added the
+
+
+dotted line at one this is Break Even
+
+
+which means anything above this is
+
+
+profitable and anything below it is
+
+
+losing if the actual result divided by
+
+
+mean base rate is above one that's good
+
+
+it means you're profiting however just
+
+
+like we discussed earlier in the video
+
+
+that could be just pure luck you know
+
+
+that amazing performance that I showed
+
+
+you from the completely random trading
+
+
+strategy would ALS also be above one
+
+
+overall but it had no Edge so here's
+
+
+where things get fun your epbr line is
+
+
+what you expected before entering the
+
+
+trade and the closer the actual result
+
+
+line is to this epbr line the more
+
+
+accurate your estimates were let's put
+
+
+this into perspective if your results
+
+
+were profitable for a group of Trades
+
+
+you'd expect that that days a point for
+
+
+this line would be above one but if your
+
+
+epbr line is very far from that it means
+
+
+that although you were profitable your
+
+
+estimates and reality were not aligned
+
+
+so there's a chance that the profits may
+
+
+have been luck at best we can say that
+
+
+you do have an edge but the profits are
+
+
+unreliable and you can't depend on your
+
+
+performance in future on the other hand
+
+
+if the estimates and reality are very
+
+
+close it means your estimates are much
+
+
+more accurate there's something that
+
+
+you're reading in the market that allows
+
+
+you to accurately predict what may
+
+
+happen next that means your profits are
+
+
+less likely to be luck and are going to
+
+
+be more reliable because they're an
+
+
+accurate reflection of what you
+
+
+anticipated whatever you're analyzing in
+
+
+the markets is clearly meaningful but no
+
+
+one is ever going to be perfectly
+
+
+accurate with this there will always be
+
+
+ways to improve whether that's because
+
+
+you're currently below base rate so
+
+
+you're losing or you're above base rate
+
+
+but inaccurate so you want to refine the
+
+
+skill to make sure you're not trading
+
+
+just based on luck and this is where
+
+
+grouping the data in different ways can
+
+
+help you reveal insights about which
+
+
+areas you need to work on a bit more you
+
+
+know at the moment we're grouping the
+
+
+data based on the epbr that means that
+
+
+we're seeing how we perform depending on
+
+
+how ambitious our estimates are so for
+
+
+example it might be the case for you
+
+
+that the higher the epbr ratio where
+
+
+you're further from the base rate the
+
+
+more overconfident you are and that
+
+
+might mean that in future you can just
+
+
+recalibrate because when there's a
+
+
+higher epbr for an opportunity you just
+
+
+adjust your estimated probability down a
+
+
+touch and that's how you recalibrate
+
+
+then but really this is the fun bit
+
+
+where you get to really dig deeper into
+
+
+different ways of categorizing your
+
+
+trades to find those insights like for
+
+
+example what if you group The trades
+
+
+based on different market conditions
+
+
+different setup types different aspects
+
+
+of your analysis different times of day
+
+
+or days of the week the possibilities
+
+
+are endless and each layer of insight
+
+
+helps you to refine your approach you
+
+
+can cut out losing scenarios refine
+
+
+what's working you might even realize
+
+
+that your whole trading approach is just
+
+
+entirely meaningless and you've just
+
+
+been trading based on luck now that's a
+
+
+bit of pill to swallow but it's always
+
+
+better to find that out rather than just
+
+
+continuing with your head buried in the
+
+
+sand not knowing whether it's luck or
+
+
+not so this video is getting on a bit
+
+
+and you can see it's getting quite dark
+
+
+in here so let's start wrapping things
+
+
+up hopefully now you can see how
+
+
+important this data can be and how the
+
+
+data that you're currently tracking
+
+
+probably isn't helping you to improve in
+
+
+specific ways most measures don't tell
+
+
+you specific specifically what's working
+
+
+or what to change they're usually just
+
+
+vanity metrics but using probabilities
+
+
+to analyze your performance will show
+
+
+you exactly where things stand so you
+
+
+can make logical changes much more
+
+
+intelligently all right so a couple of
+
+
+things firstly if you found this helpful
+
+
+hit the thumbs up button drop a comment
+
+
+down below and share this with another
+
+
+Trader that you know let's help more
+
+
+people wake up to the fact that luck is
+
+
+not a strategy there are so many Traders
+
+
+out there who need this training and in
+
+
+fact many trading mentors and gurus
+
+
+probably need it the most so be the good
+
+
+guy and share it with them as well next
+
+
+check out the link in the description
+
+
+for my free training that I mentioned
+
+
+earlier that will get you on the right
+
+
+track with all of this and start using a
+
+
+meaningful trading approach that isn't
+
+
+just based on luck if you're stuck using
+
+
+outdated methods that the industry just
+
+
+keeps trying to shove down your throat
+
+
+this training will open your eyes and
+
+
+save you loads of time and frustration
+
+
+and finally remember all of this
+
+
+probability data is only meaningful if
+
+
+you've got enough trades in your sample
+
+
+if one of the groups that you're
+
+
+analyzing only has a small number of
+
+
+Trades you can't come to a reliable
+
+
+conclusion about it so on screen now
+
+
+you'll see two videos one shows you
+
+
+exactly how large your sample size needs
+
+
+to be and we talk about that and the
+
+
+other is a trading simulator guide that
+
+
+will help you gather reliable data much
+
+
+quicker so go and watch those now
+
+
+because once you've got enough trades
+
+
+under your belt and you're analyzing
+
+
+them in the right way you'll never have
+
+
+to second guess if your profits are real
+
+
+or just a lucky streak and then you can
+
+
+optimize your way to success so I'll see
+
+
+you in one of those videos in a second
+
+
+but until then trade logically and let's
+
+
+keep building your Edge
