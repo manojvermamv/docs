@@ -1,120 +1,130 @@
-Our current system already covers much of the SPEC's intent: canonical market data, shared live/replay contracts, deterministic planning, execution boundary, reconciliation, append-only evidence, and fail-closed controls. Your current README explicitly says the architecture is retained rather than replaced with parallel `bus`, `supervisor`, `risk`, `authority`, `portfolio`, or `replay` subsystems. 
+I think the AI agent is being too manual here.
 
-### What should be cleared before future deeper AI work
+### Why the agent asks for this every day
 
-```text
-                 FINAL ARCHITECTURE RECONCILIATION
-                               │
-        ┌──────────────────────┼──────────────────────┐
-        ↓                      ↓                      ↓
-   Architecture           Contracts               Wiring
-   boundaries             + identity              + runtime
-        │                      │                      │
-        └──────────────────────┼──────────────────────┘
-                               ↓
-                    Freeze the core foundation
-                               ↓
-                    AI / Research evolution
-```
+The receipt is basically a **daily safety acknowledgment**:
 
-Specifically, make sure these are settled:
+> “Before today's strategy starts, verify the account state and confirm today's configured limits are based on current facts.”
 
-**Replay:** same strategy-facing contracts and deterministic clock/input seams, with evidence-bounded outcomes. Your current design already does this. 
-
-**Authority:** distinguish **tool permission**, **strategy authority**, and future **earned AI autonomy**. Do not let these collapse into one field.
-
-**Risk/breakers:** confirm that all true hard limits are deterministic and outside AI-tunable space.
-
-**Portfolio truth:** keep reconciled book as truth; don't add a portfolio optimizer unless the system actually needs one.
-
-**Eventing:** keep the existing append-only event surface unless scale proves it insufficient. Don't add Kafka/Redis just because the external SPEC mentions buses.
-
-**Supervision:** ensure service health, reconciliation, recovery and runtime ownership are actually wired consistently; this is more important than adding a new supervisor package.
-
-**AI research lifecycle:** this is where the real remaining architectural work begins.
-
-### What I would *not* do
-
-Do **not** do this:
+It checks:
 
 ```text
-Current system
-      +
-new SPEC bus
-      +
-new SPEC supervisor
-      +
-new SPEC replay
-      +
-new SPEC risk
-      +
-new SPEC authority
-      ↓
-two competing architectures
+capital
++ P&L
++ exposure
++ broker state
++ session limits
+        ↓
+daily receipt
+        ↓
+strategy allowed to start
 ```
 
-That would create duplicate sources of truth—the exact problem your previous work has repeatedly exposed.
+It exists because those values can change from one session to another, and the system does not want yesterday's approval silently reused.
 
-### The real checkpoint
+Also, it is **not an order approval**. It is a check that the strategy's daily operating assumptions are still valid.
 
-I would consider the architecture “cleared” when this is true:
+### But the current implementation is unnecessarily manual
+
+The current model is:
 
 ```text
-Market observation
-      ↓
-Strategy / AI
-      ↓
-Intent
-      ↓
-Deterministic planning
-      ↓
-Risk / breakers / authority
-      ↓
-Execution
-      ↓
-OpenAlgo
-      ↓
-Broker result
-      ↓
-Reconciliation
-      ↓
-Research evidence
-      ↺
-Future strategy / AI
+Every day
+   ↓
+Human reviews
+   ↓
+runs governance_evidence.py manually
+   ↓
+strategy starts
 ```
 
-and **every box has exactly one authoritative implementation and one clear owner**.
+For a real autonomous desk, this should become:
 
-Your current README already states the key ownership boundary: strategies don't open broker connections, all intents pass through the same planning gates, and only the live execution adapter reaches OpenAlgo. 
+```text
+Session start
+      ↓
+Auto-read current capital/P&L/exposure/broker state/config
+      ↓
+Validate against configured rules
+      ↓
+Generate signed/recorded receipt automatically
+      ↓
+Strategy starts
+```
+
+Then:
+
+```text
+Anything changed?
+   YES → invalidate receipt → re-check
+   NO  → existing receipt remains valid for this session
+```
+
+That is much better than asking a human to manually run a command every morning.
+
+### The important distinction
+
+I would **not remove the safety check**.
+
+I would remove only the **manual ceremony**.
+
+So the desired behavior is:
+
+```text
+MANUAL TODAY
+human must create receipt
+
+TARGET
+system creates receipt automatically
+          ↓
+if checks pass → READY
+if checks fail → BLOCKED
+```
+
+The human should only be required when the system detects something that genuinely needs judgment, such as:
+
+```text
+capital changed unexpectedly
+broker position mismatch
+risk limit changed
+P&L state abnormal
+configuration changed
+data unavailable
+```
+
+### Best architecture
+
+I'd make it **session-scoped**, not simply “expires every 24 hours.”
+
+```text
+New session
+    ↓
+governance check
+    ↓
+receipt(session_id, strategy, config_hash, broker_state_hash, reviewed_at)
+    ↓
+START
+```
+
+And invalidate it when material inputs change:
+
+```text
+capital changed        ┐
+P&L state changed       │
+exposure changed        ├──→ receipt invalid
+broker state changed    │
+risk/session caps changed
+                        ┘
+```
+
+This is more precise than a blunt daily expiration.
 
 ### Bottom line
 
-**Yes: Do one final architecture-surface cleanup/reconciliation, also pass against the SPEC, then freeze the core architecture and work only on genuine gaps before deep-diving into AI.**
+**Keep the governance concept. Automate the receipt generation and validation.**
 
-But the objective should be:
+The ideal rule is:
 
-**“prove the current architecture satisfies the needed parts of the SPEC and identify only real missing contracts/wiring”**
+> **The strategy must prove its current operating state is valid before starting; a human should not have to manually produce that proof every day when the system can verify it itself.**
 
-—not:
-
-**“implement the SPEC.”**
-
-After that, I would freeze the execution/core architecture and move almost entirely upward into the **AI research → experiment → validation → promotion → outcome → learning loop**, because that is now the largest gap between your current system and a genuinely systemic AI edge desk. The README itself says the current AI can observe and propose, but automatic promotion remains disabled and the model has not yet demonstrated an edge. 
-
----
-
-One thing I would do during the architecture cleanup is make sure the architecture has a clear place for future promotion:
-```
-Research Evidence
-      ↓
-Candidate
-      ↓
-Evaluation
-      ↓
-Promotion Decision
-      ↓
-Authority / deployment
-```
-
-You don't need to enable it yet. You only need to make sure the architecture can support it cleanly later without redesigning the execution core.
-
+That would be a meaningful improvement toward your autonomous-desk goal without weakening the safety boundary.
