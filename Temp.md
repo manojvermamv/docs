@@ -1,77 +1,120 @@
-The systemic desk implementation is pushed and deployed, but live trading remains correctly blocked by two owner-controlled governance requirements: the Telegram approver is incomplete, and tomorrow needs a reviewed session_cap_snapshot.
+Our current system already covers much of the SPEC's intent: canonical market data, shared live/replay contracts, deterministic planning, execution boundary, reconciliation, append-only evidence, and fail-closed controls. Your current README explicitly says the architecture is retained rather than replaced with parallel `bus`, `supervisor`, `risk`, `authority`, `portfolio`, or `replay` subsystems. 
 
-Architecture now follows the required shared-mode path:
+### What should be cleared before future deeper AI work
 
-Live input ─┐
-            ├─ Canonical contracts → StrategyEngine → Intent → Plan
-Replay input┘                         → Risk/Authority → Execution FSM
-                                      → OpenAlgo → Reconciliation
-                                      → Outcomes/Research
+```text
+                 FINAL ARCHITECTURE RECONCILIATION
+                               │
+        ┌──────────────────────┼──────────────────────┐
+        ↓                      ↓                      ↓
+   Architecture           Contracts               Wiring
+   boundaries             + identity              + runtime
+        │                      │                      │
+        └──────────────────────┼──────────────────────┘
+                               ↓
+                    Freeze the core foundation
+                               ↓
+                    AI / Research evolution
+```
 
-Live and replay share the strategy, decision, plan, event, lifecycle, outcome, and research contracts. They differ only by clock, input source, and broker adapter.
+Specifically, make sure these are settled:
 
-Key results:
+**Replay:** same strategy-facing contracts and deterministic clock/input seams, with evidence-bounded outcomes. Your current design already does this. 
 
-Branch pushed: claude/openalgo-trading-architecture-uu1bxn
+**Authority:** distinguish **tool permission**, **strategy authority**, and future **earned AI autonomy**. Do not let these collapse into one field.
 
-Final commit: 6784e029
+**Risk/breakers:** confirm that all true hard limits are deterministic and outside AI-tunable space.
 
-Full suite: 4,260 passed, 4 skipped, 0 failed
+**Portfolio truth:** keep reconciled book as truth; don't add a portfolio optimizer unless the system actually needs one.
 
-Determinism: 32 intents and 251 consultations byte-identical across seeds 0/77; digest 2fc3a81f59a5a5ce
+**Eventing:** keep the existing append-only event surface unless scale proves it insufficient. Don't add Kafka/Redis just because the external SPEC mentions buses.
 
-MarketView live proof: spot 24,001.15, 17 option rows, 34 Greek legs, correct provider attribution, no resolver error
+**Supervision:** ensure service health, reconciliation, recovery and runtime ownership are actually wired consistently; this is more important than adding a new supervisor package.
 
-OpenAlgo: healthy Docker container, analyze mode, 0 orders, 0 fills, 0 positions
+**AI research lifecycle:** this is where the real remaining architectural work begins.
 
-Reconciliation: 0 broker-only and 0 framework-only records
+### What I would *not* do
 
-Session P&L: ₹0 realised, ₹0 unrealised; cash ₹166,656.18
+Do **not** do this:
 
-No strategy thresholds, scores, sizing, stops, or entry logic changed
+```text
+Current system
+      +
+new SPEC bus
+      +
+new SPEC supervisor
+      +
+new SPEC replay
+      +
+new SPEC risk
+      +
+new SPEC authority
+      ↓
+two competing architectures
+```
 
+That would create duplicate sources of truth—the exact problem your previous work has repeatedly exposed.
 
-Persistent host services are enabled and active independently of Codex:
+### The real checkpoint
 
-at-monitor
+I would consider the architecture “cleared” when this is true:
 
-at-e2e-account-pnl
+```text
+Market observation
+      ↓
+Strategy / AI
+      ↓
+Intent
+      ↓
+Deterministic planning
+      ↓
+Risk / breakers / authority
+      ↓
+Execution
+      ↓
+OpenAlgo
+      ↓
+Broker result
+      ↓
+Reconciliation
+      ↓
+Research evidence
+      ↺
+Future strategy / AI
+```
 
-at-e2e-glance
+and **every box has exactly one authoritative implementation and one clear owner**.
 
-at-e2e-snapshot
+Your current README already states the key ownership boundary: strategies don't open broker connections, all intents pass through the same planning gates, and only the live execution adapter reaches OpenAlgo. 
 
-public, console, and desk MCP gateways
+### Bottom line
 
-admin console
+**Yes: Do one final architecture-surface cleanup/reconciliation, also pass against the SPEC, then freeze the core architecture and work only on genuine gaps before deep-diving into AI.**
 
+But the objective should be:
 
-All report NRestarts=0 after the closed-session deployment.
+**“prove the current architecture satisfies the needed parts of the SPEC and identify only real missing contracts/wiring”**
 
-Fixed live defects include false at morning READY reporting, process-local market data contradicting the canonical tape, replay outcome wiring, UNKNOWN reconciliation cadence, clock propagation, protective-fill monitoring, and replay/live contract parity.
+—not:
 
-The complete action and evidence record is in framework-findings.md, PARTS 211–215. Architecture and implementation records are in design, plan, and gap map.
+**“implement the SPEC.”**
 
-Remaining owner actions:
+After that, I would freeze the execution/core architecture and move almost entirely upward into the **AI research → experiment → validation → promotion → outcome → learning loop**, because that is now the largest gap between your current system and a genuinely systemic AI edge desk. The README itself says the current AI can observe and propose, but automatic promotion remains disabled and the model has not yet demonstrated an edge. 
 
-1. Configure the enabled approval gate:
+---
 
+One thing I would do during the architecture cleanup is make sure the architecture has a clear place for future promotion:
+```
+Research Evidence
+      ↓
+Candidate
+      ↓
+Evaluation
+      ↓
+Promotion Decision
+      ↓
+Authority / deployment
+```
 
+You don't need to enable it yet. You only need to make sure the architecture can support it cleanly later without redesigning the execution core.
 
-at approver setup
-
-2. After reviewing capital, P&L, exposure, broker state, and configured caps, create tomorrow’s receipt:
-
-
-
-./.venv/bin/python scripts/governance_evidence.py \
-  session_cap_snapshot buyer_edge \
-  --day 2026-09-02 \
-  --reviewer NAME \
-  --evidence-json '{...}'
-
-3. Tomorrow, prove recording before 09:15. Today started at 11:25 and covered only 245 of 375 session minutes, so the complete-day evidence gap remains open.
-
-
-
-The separate strategy-supervisor live-day proof also remains open. The strategy was not restarted and no governance evidence was fabricated.
