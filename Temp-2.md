@@ -46,18 +46,19 @@ Updated architecture reconciliation
 
 The earlier conclusion—“do not freeze the architecture yet”—is no longer current. The proven core wiring defects were fixed without adding competing subsystems.
 
-Area	Updated status	What changed
+| Area                        | Updated status                                      | What changed                                                                                                                                                                                                                              |
+| --------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Live/replay contract parity | ✅ Done                                              | New records use one canonical run root; legacy nested history remains readable. Live reconciled outcomes and replay outcomes now share the same envelope while retaining fill-versus-mark semantics                                       |
+| Session governance          | ✅ Startup complete; 🟡 continuous rebinding partial | Machine attestation replaced the daily manual receipt. Mid-session code/account/book fingerprint invalidation is not implemented inside the receipt lifecycle                                                                             |
+| Capital contract            | ✅ Done                                              | Real OpenAlgo funds no longer resolve silently to 0.0; object and scalar legacy shapes remain compatible                                                                                                                                  |
+| One-in-flight protection    | ✅ Done                                              | The earlier assessment that an equivalent gate made this unnecessary was incorrect. guard_one_in_flight was genuinely unwired and is now called by the execution gateway                                                                  |
+| Gap inventory               | ✅ Reconciled                                        | False entries were removed; intentionally unwired AI promotion remains explicitly listed                                                                                                                                                  |
+| Current-state documentation | 🟡 Mostly corrected                                 | Telegram and manual-receipt claims were corrected. defects.md still contains stale operational rows claiming nothing runs locally and that a full tick day is pending; live systemd state and the 31 August capture contradict those rows |
+| AI provenance and lineage   | ✅ Done                                              | Model, prompt/instruction, tool/schema, evidence/input, output and causal identity are explicit without changing execution gates                                                                                                          |
+| AI promotion                | ⛔ Deliberately not enabled                          | Promotion evaluation and receipt writing still have no production caller; model-driven money authority remains fail-closed                                                                                                                |
+| Monitoring ownership        | ✅ Done                                              | Persistent systemd services own monitoring independently of this Codex session                                                                                                                                                            |
+| OpenAlgo authentication     | ✅ Done currently                                    | The active public API is reachable; current monitoring reports all 69 discovered API paths                                                                                                                                                |
 
-Live/replay contract parity	✅ Done	New records use one canonical run root; legacy nested history remains readable. Live reconciled outcomes and replay outcomes now share the same envelope while retaining fill-versus-mark semantics
-Session governance	✅ Startup complete; 🟡 continuous rebinding partial	Machine attestation replaced the daily manual receipt. Mid-session code/account/book fingerprint invalidation is not implemented inside the receipt lifecycle
-Capital contract	✅ Done	Real OpenAlgo funds no longer resolve silently to 0.0; object and scalar legacy shapes remain compatible
-One-in-flight protection	✅ Done	The earlier assessment that an equivalent gate made this unnecessary was incorrect. guard_one_in_flight was genuinely unwired and is now called by the execution gateway
-Gap inventory	✅ Reconciled	False entries were removed; intentionally unwired AI promotion remains explicitly listed
-Current-state documentation	🟡 Mostly corrected	Telegram and manual-receipt claims were corrected. defects.md still contains stale operational rows claiming nothing runs locally and that a full tick day is pending; live systemd state and the 31 August capture contradict those rows
-AI provenance and lineage	✅ Done	Model, prompt/instruction, tool/schema, evidence/input, output and causal identity are explicit without changing execution gates
-AI promotion	⛔ Deliberately not enabled	Promotion evaluation and receipt writing still have no production caller; model-driven money authority remains fail-closed
-Monitoring ownership	✅ Done	Persistent systemd services own monitoring independently of this Codex session
-OpenAlgo authentication	✅ Done currently	The active public API is reachable; current monitoring reports all 69 discovered API paths
 
 
 What remains, and what blocks it
