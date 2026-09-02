@@ -2,20 +2,21 @@ Automate the receipt generation and validation is done for session startup. It i
 
 Current status
 
-Capability |	Status |	Evidence
+| Capability                                                                         | Status            | Evidence                                                                                                                                                            |
+| ---------------------------------------------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Automatically query OpenAlgo at startup                                            | ✅ Done            | Reads analyzer mode, funds, positions, orders, trades and holdings concurrently in session_attestation.py                                                           |
+| Automatically generate the receipt                                                 | ✅ Done            | governance_preflight() writes session_state_attestation before strategy startup in run_framework_live.py                                                            |
+| Separate machine evidence from human review                                        | ✅ Done            | Receipt records actor_type: system; it does not pretend that a person reviewed it                                                                                   |
+| Validate integrity and exact configured caps                                       | ✅ Done            | Digest, identity, required fields and exact cap values are checked in evidence.py                                                                                   |
+| Fail closed on bad OpenAlgo data                                                   | ✅ Done            | Missing cash, malformed books, mode disagreement, unresolved orders and position divergence block startup                                                           |
+| Remove daily manual ceremony                                                       | ✅ Done            | Automatic attestation is enabled by default. Manual session_cap_snapshot is only the explicitly disabled-automation fallback                                        |
+| Correct capital reading                                                            | ✅ Done            | Machine funds and legacy object/scalar receipts resolve correctly in session_state.py                                                                               |
+| Revalidate changed cap values during runtime                                       | ✅ Done            | Each session snapshot compares the receipt against the active cap name/value map                                                                                    |
+| Continuous P&L and exposure enforcement                                            | ✅ Done separately | Fresh broker positions and canonical lifecycle state feed deterministic session gates; ordinary P&L movement does not require rewriting the startup receipt         |
+| Invalidate receipt immediately when code/account/book identity changes mid-session | 🟡 Partial        | A restart creates a fresh receipt, but the running process does not continuously recompute those fingerprints                                                       |
+| Bind receipt to a unique run ID and complete configuration identity                | 🟡 Partial        | Current session_id is strategy:day; it records entrypoint SHA, Git identity and Python version, but not the later runtime run_id or a complete configuration digest |
+| Bind market-data source/freshness into this receipt                                | 🟡 Partial        | Market readiness is enforced by the separate strategy preflight and monitoring services, not included in session_state_attestation                                  |
 
-Automatically query OpenAlgo at startup	✅ Done	Reads analyzer mode, funds, positions, orders, trades and holdings concurrently in session_attestation.py
-Automatically generate the receipt	✅ Done	governance_preflight() writes session_state_attestation before strategy startup in run_framework_live.py
-Separate machine evidence from human review	✅ Done	Receipt records actor_type: system; it does not pretend that a person reviewed it
-Validate integrity and exact configured caps	✅ Done	Digest, identity, required fields and exact cap values are checked in evidence.py
-Fail closed on bad OpenAlgo data	✅ Done	Missing cash, malformed books, mode disagreement, unresolved orders and position divergence block startup
-Remove daily manual ceremony	✅ Done	Automatic attestation is enabled by default. Manual session_cap_snapshot is only the explicitly disabled-automation fallback
-Correct capital reading	✅ Done	Machine funds and legacy object/scalar receipts resolve correctly in session_state.py
-Revalidate changed cap values during runtime	✅ Done	Each session snapshot compares the receipt against the active cap name/value map
-Continuous P&L and exposure enforcement	✅ Done separately	Fresh broker positions and canonical lifecycle state feed deterministic session gates; ordinary P&L movement does not require rewriting the startup receipt
-Invalidate receipt immediately when code/account/book identity changes mid-session	🟡 Partial	A restart creates a fresh receipt, but the running process does not continuously recompute those fingerprints
-Bind receipt to a unique run ID and complete configuration identity	🟡 Partial	Current session_id is strategy:day; it records entrypoint SHA, Git identity and Python version, but not the later runtime run_id or a complete configuration digest
-Bind market-data source/freshness into this receipt	🟡 Partial	Market readiness is enforced by the separate strategy preflight and monitoring services, not included in session_state_attestation
 
 
 The live host generated today’s receipt automatically at 02:27:33 UTC. It records:
