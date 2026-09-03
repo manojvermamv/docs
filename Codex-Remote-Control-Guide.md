@@ -2,77 +2,87 @@
 
 ## Overview
 
-This document describes the verified setup for running **Codex CLI on a Linux server** and accessing that server through **ChatGPT Mobile → Codex → Remote**.
+This document records the verified setup, operating procedure, failure history, and recovery process for using **Codex CLI on a Linux server with ChatGPT Mobile → Codex → Remote**.
 
-The setup was successfully established with Codex CLI `0.151.0`, later experienced a managed-daemon failure during the `0.151.0 → 0.152.1` update, and was subsequently brought back to a healthy managed-daemon state on `0.153.0`.
+The environment was initially working with Codex `0.151.0`, later experienced a managed-daemon failure during the `0.151.0 → 0.152.1` update, and was subsequently restored on Codex `0.153.0`.
 
-The latest unresolved problem is **not the App Server or Remote Control connection itself**. The current problem is specifically the **Remote Control pairing operation returning `401 token_revoked`** after authentication changes.
+The **latest confirmed state** is:
+
+```text
+Codex CLI                    0.153.0
+ChatGPT CLI login            Logged in using ChatGPT
+Managed App Server           Running
+Remote Control process       Running
+Unix control socket          Present
+Foreground Remote Control   Connected
+Remote Control pairing       Failing with HTTP 401 token_revoked
+```
+
+The current failure is therefore isolated to **Remote Control pairing/enrollment authentication**, not the managed App Server itself.
+
+OpenAI's current help documentation describes the mobile Remote experience as a way to access supported remote Codex work from the ChatGPT mobile app.
 
 ---
 
 # 1. Confirmed Architecture
 
-The working architecture is:
+The verified Linux-side architecture is:
 
 ```text
-┌──────────────────────────────┐
-│ ChatGPT Mobile               │
-│                              │
-│ Codex → Remote               │
-└──────────────┬───────────────┘
-               │
-               │ Remote Control / pairing
-               ▼
-┌──────────────────────────────┐
-│ Linux Server                 │
-│                              │
-│ Codex CLI                    │
-│ Managed App Server           │
-│ Remote Control               │
-│                              │
-│ Project workspace            │
-└──────────────────────────────┘
+┌─────────────────────────┐
+│ ChatGPT Mobile         │
+│                         │
+│ Codex → Remote          │
+└────────────┬────────────┘
+             │
+             │ Remote Control
+             │ pairing / relay
+             ▼
+┌─────────────────────────┐
+│ Linux Server            │
+│                         │
+│ Codex CLI               │
+│ Managed App Server      │
+│ Remote Control          │
+│                         │
+│ Project workspace       │
+└─────────────────────────┘
 ```
 
-The managed App Server runs locally on the Linux server.
-
-In the confirmed configuration it uses:
+The managed App Server runs locally with:
 
 ```text
-unix://
+--listen unix://
 ```
 
-and the control socket:
+and uses:
 
 ```text
 ~/.codex/app-server-control/app-server-control.sock
 ```
 
-The successful setup did **not** require exposing a public Codex TCP port.
+No public Codex TCP listener was required for the confirmed mobile Remote Control setup.
 
 ---
 
-# 2. Confirmed Environment History
+# 2. Versions and State History
 
-| Stage         | Codex version | Result                                                             |
-| ------------- | ------------: | ------------------------------------------------------------------ |
-| Initial setup |     `0.151.0` | Managed App Server + Mobile Remote successfully paired             |
-| Update        |     `0.152.1` | Managed daemon failed                                              |
-| Recovery      |     `0.153.0` | Managed App Server restored                                        |
-| Current state |     `0.153.0` | Remote connection works; pairing currently returns `token_revoked` |
+| Stage         |   Version | Result                                              |
+| ------------- | --------: | --------------------------------------------------- |
+| Initial setup | `0.151.0` | Remote Control and mobile pairing succeeded         |
+| Upgrade       | `0.152.1` | Managed daemon failed                               |
+| Recovery      | `0.153.0` | Managed daemon restored                             |
+| Latest state  | `0.153.0` | App Server healthy; pairing returns `token_revoked` |
 
-The latest confirmed CLI output is:
+The latest verified managed-daemon output is equivalent to:
 
-```text
-codex-cli 0.153.0
-```
-
-The managed daemon also reports:
-
-```text
-managedCodexVersion: 0.153.0
-cliVersion:          0.153.0
-appServerVersion:    0.153.0
+```json
+{
+  "status": "running",
+  "managedCodexVersion": "0.153.0",
+  "cliVersion": "0.153.0",
+  "appServerVersion": "0.153.0"
+}
 ```
 
 ---
@@ -84,47 +94,47 @@ appServerVersion:    0.153.0
 Required:
 
 * Codex CLI installed.
-* A Codex version supporting:
+* A version supporting:
 
   * `codex app-server`
   * `codex remote-control`
 * A valid ChatGPT account login.
 * Outbound network connectivity.
-* A Linux user under which Codex can run.
+* A Linux user that can run Codex and access the project workspace.
 
-The verified server workspace was:
+The verified project workspace was:
 
 ```text
 ~/AutonomousTrading
 ```
-
-Replace that path for another project.
 
 ## Mobile
 
 Required:
 
 * ChatGPT mobile app.
-* Codex/Remote functionality available.
-* The mobile app signed into the account intended for the remote environment.
+* Access to the Codex Remote experience.
+* The intended ChatGPT account signed in on the phone.
+
+OpenAI's current documentation states that the ChatGPT mobile app can access supported desktop/remote Codex chats through the Remote tab.
 
 ---
 
-# 4. Verify Codex Installation
+# 4. Verify Codex
 
-Check the CLI:
+Check the installed version:
 
 ```bash
 codex --version
 ```
 
-The latest confirmed version is:
+The latest verified environment is:
 
 ```text
 codex-cli 0.153.0
 ```
 
-Verify Remote Control support:
+Check Remote Control:
 
 ```bash
 codex remote-control --help
@@ -138,7 +148,7 @@ stop
 pair
 ```
 
-Verify App Server support:
+Check App Server:
 
 ```bash
 codex app-server --help
@@ -157,35 +167,39 @@ generate-json-schema
 
 # 5. Authenticate the Linux Server
 
-Codex can authenticate to the ChatGPT account using device authentication.
-
-Run:
+Use ChatGPT device authentication:
 
 ```bash
 codex login --device-auth
 ```
 
-The browser/device flow supplies a temporary device code.
+Complete the device authorization in the browser.
 
-Never publish the actual device code.
+Do not publish the temporary device code.
 
-After successful login:
+Verify the login:
 
 ```bash
 codex login status
 ```
 
-The confirmed successful result was:
+Expected:
 
 ```text
 Logged in using ChatGPT
 ```
 
-### Important authentication distinction
+### Important
 
-`codex login status` confirms that the CLI has a ChatGPT login, but it does not by itself prove that every Remote Control enrollment request will succeed.
+A successful:
 
-That distinction became important later when:
+```bash
+codex login status
+```
+
+does not by itself guarantee that Remote Control pairing will succeed.
+
+The latest environment demonstrated:
 
 ```text
 codex login status
@@ -194,62 +208,40 @@ codex login status
 
 while:
 
-```text
+```bash
 codex remote-control pair
-→ HTTP 401
-→ token_revoked
 ```
 
-This behavior is also consistent with reported Codex remote-control authentication/enrollment issues.
+still returned:
+
+```text
+HTTP 401 Unauthorized
+token_revoked
+```
+
+This separates ordinary CLI authentication from Remote Control enrollment. Current upstream reports document related Remote Control authentication/enrollment failures.
 
 ---
 
 # 6. Bootstrap the Managed App Server
 
-The managed daemon is installed using:
-
-```bash
-codex app-server daemon bootstrap
-```
-
-For a Remote Control environment, the CLI also supports:
+For a fresh setup:
 
 ```bash
 codex app-server daemon bootstrap --remote-control
 ```
 
-The latter is the preferred explicit configuration when rebuilding the managed environment for Remote Control.
+This installs durable managed App Server management with Remote Control enabled.
 
-The bootstrap operation creates managed App Server state under:
+The resulting managed state uses the local control socket:
 
 ```text
-~/.codex/app-server-control/
-```
-
-including the control socket.
-
----
-
-# 7. Enable Remote Control
-
-Run:
-
-```bash
-codex app-server daemon enable-remote-control
-```
-
-The confirmed result was equivalent to:
-
-```json
-{
-  "status": "enabled",
-  "remoteControlEnabled": true
-}
+~/.codex/app-server-control/app-server-control.sock
 ```
 
 ---
 
-# 8. Start the Managed Daemon
+# 7. Start the Managed App Server
 
 Run:
 
@@ -257,17 +249,17 @@ Run:
 codex app-server daemon start
 ```
 
-If the command reports:
+Possible healthy response:
 
 ```text
 alreadyRunning
 ```
 
-that is not an error; it means the managed daemon is already running.
+That means the managed daemon was already running.
 
 ---
 
-# 9. Verify the Managed App Server
+# 8. Verify the Managed App Server
 
 Run:
 
@@ -275,13 +267,13 @@ Run:
 codex app-server daemon version
 ```
 
-A healthy state should report:
+Healthy output should contain:
 
 ```text
 status: running
 ```
 
-The current verified version values are:
+For the latest verified environment:
 
 ```text
 managedCodexVersion: 0.153.0
@@ -291,7 +283,7 @@ appServerVersion:    0.153.0
 
 ---
 
-# 10. Verify the Control Socket
+# 9. Verify the Local Control Socket
 
 Run:
 
@@ -299,17 +291,17 @@ Run:
 ls -l ~/.codex/app-server-control/app-server-control.sock
 ```
 
-A healthy installation should show a Unix socket similar to:
+Expected type:
 
 ```text
-srw------- ... /home/admin/.codex/app-server-control/app-server-control.sock
+srw-------
 ```
 
-The exact username/path is environment-specific and should not be copied into public documentation.
+The socket is local IPC and should not be treated as a public network endpoint.
 
 ---
 
-# 11. Verify the Running Processes
+# 10. Verify Managed Processes
 
 Run:
 
@@ -317,7 +309,7 @@ Run:
 ps aux | grep -E 'codex|app-server' | grep -v grep
 ```
 
-A healthy managed setup can include processes resembling:
+A healthy managed environment can contain processes similar to:
 
 ```text
 codex app-server --remote-control --listen unix://
@@ -327,43 +319,35 @@ codex app-server --remote-control --listen unix://
 codex app-server daemon pid-update-loop
 ```
 
-and potentially:
+and:
 
 ```text
 codex-code-mode-host
 ```
 
-These processes should **not** be killed merely because they appear in process inspection.
+These are normal managed components when the daemon is healthy.
+
+Do not kill them merely because they appear in `ps`.
 
 ---
 
-# 12. Public Network Exposure Is Not Required
+# 11. Verify Public Network Exposure
 
-The successful configuration uses:
-
-```text
---listen unix://
-```
-
-rather than a public TCP listener.
-
-The diagnostic command:
+Check whether Codex is listening on TCP:
 
 ```bash
 ss -lntp | grep -i codex
 ```
 
-returned no Codex TCP listener during the successful setup.
+The verified working configuration showed no Codex TCP listener.
 
-Therefore:
+That is compatible with the managed Remote Control architecture.
 
-* Do not expose a Codex port publicly solely for Remote Control.
-* Do not add an AWS security-group rule for this purpose.
-* Do not convert the managed daemon to `0.0.0.0:<port>` unless a separate, explicit requirement exists and the security implications are understood.
+Do not add an AWS security-group rule simply because the command returns no Codex TCP listener.
 
 ---
 
-# 13. Check Remote Control Connectivity
+# 12. Check Remote Control Connectivity
 
 Run:
 
@@ -371,7 +355,7 @@ Run:
 codex remote-control --json
 ```
 
-A healthy connection can report:
+A healthy foreground connection can report:
 
 ```json
 {
@@ -383,57 +367,47 @@ A healthy connection can report:
 }
 ```
 
-The exact `serverName` and `environmentId` are environment-specific and should be treated as private connection metadata.
+The exact `serverName` and `environmentId` are private environment metadata and should not be published.
 
-### Important interpretation
+### Current interpretation
 
-The current server demonstrated:
+Remote Control connectivity and Remote Control pairing are separate operations.
+
+The latest environment has demonstrated:
 
 ```text
 Remote Control connection → connected
 ```
 
-even when pairing later failed.
-
-Therefore:
+while:
 
 ```text
-Remote connection
+Remote Control pairing    → 401 token_revoked
 ```
-
-and:
-
-```text
-Pairing enrollment
-```
-
-must be treated as separate operations.
 
 ---
 
-# 14. Generate a Mobile Pairing Code
+# 13. Generate a Mobile Pairing Code
 
-When the managed service is healthy, run:
+When the managed environment is healthy:
 
 ```bash
 codex remote-control pair
 ```
 
-The CLI generates a short-lived pairing code.
+A short-lived pairing code is generated.
 
-Example:
+Example format:
 
 ```text
 Pairing code: XXXX-XXXX
 ```
 
-The real code must not be published.
-
-The code is intended for the mobile pairing flow.
+Never publish the real code.
 
 ---
 
-# 15. Pair with ChatGPT Mobile
+# 14. Pair the ChatGPT Mobile App
 
 On the phone:
 
@@ -441,36 +415,32 @@ On the phone:
 ChatGPT
 → Codex
 → Remote
-→ Pair/Add Remote
+→ Pair / Add Remote
 ```
 
-Enter the freshly generated pairing code.
+Enter the fresh pairing code generated by:
 
-This was **successfully completed earlier in the actual environment**, establishing that Linux-side CLI Remote Control can be paired with ChatGPT Mobile through the experimental CLI/headless workflow.
+```bash
+codex remote-control pair
+```
 
-Current Codex sources expose the experimental Remote Control pairing methods at the App Server protocol level, and the repository documents CLI/headless pairing support.
+The original `0.151.0` setup successfully completed this mobile pairing.
+
+OpenAI's current release notes state that Remote Control uses authenticated one-to-one pairing between supported mobile devices and hosts.
 
 ---
 
-# 16. Important Distinction: Existing CLI Session vs Managed App Server
+# 15. Important Session Distinction
 
-Do not assume that:
+Do not assume that an ordinary interactive terminal session:
 
 ```bash
 codex
 ```
 
-started as an ordinary terminal process is automatically the same session as:
+is automatically identical to the managed Remote Control session.
 
-```text
-Managed App Server
-```
-
-used by Remote Control.
-
-The conversation established mobile access to the managed Remote Control environment, but did **not conclusively prove automatic attachment of an arbitrary pre-existing interactive CLI process**.
-
-Therefore, treat these separately:
+The environment contains separate concepts:
 
 ```text
 Interactive CLI session
@@ -479,33 +449,45 @@ Interactive CLI session
 and:
 
 ```text
-Managed App Server / Remote Control session
+Managed App Server / Remote Control environment
 ```
+
+The conversation confirmed successful mobile Remote access to the managed environment, but did not conclusively establish automatic attachment of an arbitrary already-running CLI process.
+
+There is also an upstream issue specifically describing difficulty attaching Remote Control to an in-progress live CLI session while completed threads can work differently.
 
 ---
 
-# 17. The 0.151.0 → 0.152.1 Failure
+# 16. Failure After 0.151.0 → 0.152.1
 
-After Codex updated:
+After updating from:
 
 ```text
-0.151.0 → 0.152.1
+0.151.0
 ```
 
-the managed App Server stopped working.
+to:
 
-The observed symptoms were:
+```text
+0.152.1
+```
+
+the managed App Server stopped functioning.
+
+Symptoms included:
 
 ```text
 codex app-server daemon version
 → failed to connect to ~/.codex/app-server-control/app-server-control.sock
 ```
 
-The managed App Server itself was no longer running.
+and:
 
-The Unix socket was missing.
+```text
+codex remote-control stop
+```
 
-`codex remote-control stop` also hung for more than one minute.
+hanging for more than one minute.
 
 Process inspection showed:
 
@@ -519,26 +501,26 @@ and:
 [codex] <defunct>
 ```
 
-At the same time, foreground Remote Control could still connect successfully.
+The managed App Server itself was no longer running and the control socket was missing.
 
-The evidence therefore distinguished:
+At the same time, foreground Remote Control was able to connect successfully.
+
+Therefore:
 
 ```text
-Foreground Remote Control    ✅
-Managed App Server           ❌
-Managed daemon updater       ⚠️
-Unix control socket          ❌
+Foreground Remote Control   ✅
+Managed daemon              ❌
+Updater                     ⚠️ stale
+Unix socket                 ❌
 ```
 
-The issue was the **persistent managed daemon**, not general Remote Control network connectivity.
+This isolated the failure to the persistent managed daemon.
 
 ---
 
-# 18. Recovery from the Stale Managed Daemon
+# 17. Managed-Daemon Recovery
 
-For that incident, the stale updater had a specific PID.
-
-Because PIDs change between incidents, never hard-code that historical PID into a future runbook.
+Do not use the hanging stop command repeatedly.
 
 First inspect:
 
@@ -546,52 +528,47 @@ First inspect:
 ps aux | grep -E 'codex|app-server' | grep -v grep
 ```
 
-Identify the stale:
+Identify the current stale:
 
 ```text
 codex app-server daemon pid-update-loop
 ```
 
-process.
+PID.
 
-Gracefully terminate the current stale updater:
+Terminate it gracefully:
 
 ```bash
 kill -TERM <CURRENT_STALE_PID>
 ```
 
-Then inspect again:
+Recheck:
 
 ```bash
 ps aux | grep -E 'codex|app-server' | grep -v grep
 ```
 
-If the updater remains:
+Only if it remains:
 
 ```bash
 kill -KILL <CURRENT_STALE_PID>
 ```
 
-Do not attempt to kill a process whose state is:
+Do not kill a process shown as:
 
 ```text
-Z
-<defunct>
+[codex] <defunct>
 ```
 
-A zombie process has already exited and must be reaped by its parent.
+A defunct process has already exited and must be reaped by its parent.
 
----
-
-# 19. Rebuild the Managed Remote-Control Environment
-
-After stale-process cleanup:
+Then rebuild the managed Remote Control configuration:
 
 ```bash
 codex app-server daemon bootstrap --remote-control
 ```
 
-Then:
+and start:
 
 ```bash
 codex app-server daemon start
@@ -603,38 +580,37 @@ Verify:
 codex app-server daemon version
 ```
 
-And:
+Then verify:
 
 ```bash
 ls -l ~/.codex/app-server-control/app-server-control.sock
 ```
 
-The desired state is:
-
-```text
-status: running
-```
-
-with the control socket present.
-
 ---
 
-# 20. The 0.153.0 Authentication Failure
+# 18. Codex 0.153.0 Authentication Failure
 
-After the recovery, the environment was upgraded to:
+After the recovery, the environment was upgraded to `0.153.0`.
 
-```text
-0.153.0
+The following succeeded:
+
+```bash
+codex login --device-auth
 ```
 
-The following became true:
+and:
 
-```text
+```bash
 codex login status
-→ Logged in using ChatGPT
 ```
 
-The managed App Server was healthy:
+returned:
+
+```text
+Logged in using ChatGPT
+```
+
+The managed daemon was also healthy:
 
 ```text
 status: running
@@ -642,13 +618,12 @@ status: running
 
 The control socket existed.
 
-The Remote Control connection itself was healthy:
+Remote Control connectivity could also report:
 
 ```json
 {
   "mode": "foreground",
-  "status": "connected",
-  ...
+  "status": "connected"
 }
 ```
 
@@ -670,55 +645,55 @@ with:
 auth error code: token_revoked
 ```
 
-The failing endpoint was:
-
-```text
-https://chatgpt.com/backend-api/wham/remote/control/server/refresh
-```
-
-The exact request identifiers and server metadata are intentionally omitted.
+The failing backend operation was the Remote Control server refresh/enrollment path.
 
 ---
 
-# 21. Correct Interpretation of the Current Failure
+# 19. Current Root-Cause Classification
 
-The latest confirmed state is:
+The latest evidence supports this layered diagnosis:
 
 ```text
-Codex CLI                     0.153.0   ✅
-ChatGPT CLI login             active    ✅
-Managed App Server            running   ✅
-Unix control socket           present   ✅
-Remote Control connection     connected ✅
-Remote Control pairing       failing   ❌
-Pairing API response          401       ❌
-Authentication error          token_revoked
+Authentication
+    └── CLI login:                 ✅
+
+Managed App Server
+    └── running:                   ✅
+
+Unix control socket
+    └── present:                   ✅
+
+Remote Control transport
+    └── foreground connected:      ✅
+
+Remote Control pairing/enrollment
+    └── HTTP 401 token_revoked:    ❌
 ```
 
-Therefore the problem is **not currently**:
+Therefore the current problem should **not** be treated as:
 
-* a missing Unix socket,
-* a dead App Server,
-* a missing TCP port,
+* a missing control socket,
+* a dead managed daemon,
+* a missing public TCP port,
 * an AWS security-group problem,
-* general Remote Control connectivity.
+* or general network reachability.
 
-The immediate failure is specifically:
+The unresolved layer is **Remote Control pairing/enrollment authentication**.
 
-```text
-Remote Control pairing enrollment
-→ token_revoked
-```
-
-There are current upstream reports of Codex remote-control enrollment/client state becoming invalid after revocation or authentication changes, including cases involving mobile pairing and stale enrollment state.
+Current upstream reports document related cases involving revoked/stale Remote Control enrollment and mobile pairing failures.
 
 ---
 
-# 22. Authentication Recovery Procedure
+# 20. Authentication Refresh Procedure
 
-Because the current pairing request is returning `token_revoked`, refresh the CLI's account authentication.
+When pairing returns:
 
-First:
+```text
+401 Unauthorized
+token_revoked
+```
+
+refresh the CLI authentication:
 
 ```bash
 codex logout
@@ -730,7 +705,7 @@ Then:
 codex login --device-auth
 ```
 
-Complete the device authentication using the intended ChatGPT account.
+Complete the device login using the intended ChatGPT account.
 
 Verify:
 
@@ -738,106 +713,53 @@ Verify:
 codex login status
 ```
 
-Expected:
-
-```text
-Logged in using ChatGPT
-```
-
-Then test the existing Remote Control connection:
+Then check Remote Control:
 
 ```bash
 codex remote-control --json
 ```
 
-A healthy connection can report:
-
-```json
-{
-  "mode": "foreground",
-  "status": "connected"
-}
-```
-
-Then generate a new pairing code:
+If the connection is healthy, generate a fresh pairing code:
 
 ```bash
 codex remote-control pair
 ```
+
+Use that new code in the ChatGPT mobile Remote pairing flow.
 
 Do not reuse an old pairing code.
 
 ---
 
-# 23. If Pairing Still Returns `token_revoked`
+# 21. If `token_revoked` Persists
 
-If this sequence:
+If all of the following are true:
 
-```bash
-codex logout
-codex login --device-auth
+```text
 codex login status
+→ Logged in using ChatGPT
+
+codex app-server daemon version
+→ status: running
+
 codex remote-control --json
+→ connected / otherwise healthy
+
 codex remote-control pair
+→ 401 token_revoked
 ```
 
-still ends with:
+then the managed daemon should not be repeatedly killed and restarted.
 
-```text
-401 Unauthorized
-token_revoked
-```
+The available evidence points to a Remote Control enrollment/authentication issue that can involve persisted or server-side enrollment state. Current upstream reports describe stale/revoked enrollment continuing to interfere with pairing even after local authentication changes.
 
-then restarting the daemon repeatedly is not the primary next step.
-
-At that point the evidence indicates a **Remote Control authentication/enrollment issue**, potentially involving stale or revoked remote-control enrollment state rather than the Linux App Server itself.
-
-Upstream reports document related cases where:
-
-* the remote host remains online,
-* Remote Control connectivity works,
-* the client/enrollment remains stale or revoked,
-* and re-pairing fails.
+At that point, investigate the specific Remote Control enrollment state or current upstream issue rather than deleting the complete Codex state directory.
 
 ---
 
-# 24. What Not to Do
+# 22. Bubblewrap Warning
 
-Do not use:
-
-```bash
-rm -rf ~/.codex
-```
-
-Do not delete Codex databases or state files as a first response.
-
-Do not expose an arbitrary Codex TCP port publicly.
-
-Do not modify AWS security-group rules for a Unix-socket/Remote-Control authentication error.
-
-Do not repeatedly kill healthy:
-
-```text
-codex app-server --remote-control --listen unix://
-```
-
-or:
-
-```text
-codex app-server daemon pid-update-loop
-```
-
-processes when the managed daemon is already healthy.
-
-Do not kill `[codex] <defunct>` directly.
-
-Do not publish device-auth codes or Remote Control pairing codes.
-
----
-
-# 25. Bubblewrap Warning
-
-The managed App Server has also produced:
+The managed App Server has produced:
 
 ```text
 Codex could not find bubblewrap on PATH.
@@ -845,27 +767,75 @@ Install bubblewrap with your OS package manager.
 Codex will use the bundled bubblewrap in the meantime.
 ```
 
-Based on the message itself, Codex explicitly states that it will use the bundled `bubblewrap` fallback.
+The message itself states that Codex will use the bundled fallback.
 
-Therefore this warning was **not established as the cause of the Remote Control pairing failure**.
+Therefore this warning has **not been established as the cause** of the current Remote Control pairing failure.
 
 The confirmed pairing failure is:
 
 ```text
-401 Unauthorized
-token_revoked
+HTTP 401 Unauthorized
+auth error code: token_revoked
 ```
 
 ---
 
-# 26. Operational Health Checks
+# 23. Files That Should Not Be Deleted as a First Response
 
-Use these commands to determine which layer is broken.
+The Codex state directory contains significant state, including:
+
+```text
+auth.json
+thread_history_1.sqlite
+logs_2.sqlite
+state_5.sqlite
+queue_1.sqlite
+memories_1.sqlite
+sessions/
+archived_sessions/
+```
+
+Do not begin troubleshooting by deleting:
+
+```bash
+rm -rf ~/.codex
+```
+
+Do not delete Codex SQLite databases or session history simply to repair Remote Control pairing.
+
+The available evidence does not justify that level of destructive reset.
+
+---
+
+# 24. Sensitive Information
+
+Do not publish:
+
+* Device authorization codes.
+* Remote Control pairing codes.
+* OAuth tokens.
+* Refresh tokens.
+* Cookies.
+* Credentials from `auth.json`.
+* Private environment IDs when unnecessary.
+* Private server identifiers or public IP addresses.
+
+If diagnostic logs contain such information, redact it before sharing.
+
+---
+
+# 25. Standard Health-Check Commands
 
 ### Authentication
 
 ```bash
 codex login status
+```
+
+### Codex version
+
+```bash
+codex --version
 ```
 
 ### Managed App Server
@@ -874,19 +844,19 @@ codex login status
 codex app-server daemon version
 ```
 
-### Local socket
+### Control socket
 
 ```bash
 ls -l ~/.codex/app-server-control/app-server-control.sock
 ```
 
-### Running processes
+### Managed processes
 
 ```bash
 ps aux | grep -E 'codex|app-server' | grep -v grep
 ```
 
-### Network listener check
+### Public TCP listener
 
 ```bash
 ss -lntp | grep -i codex
@@ -898,17 +868,27 @@ ss -lntp | grep -i codex
 codex remote-control --json
 ```
 
-### Mobile pairing
+### Remote pairing
 
 ```bash
 codex remote-control pair
 ```
 
+### Managed App Server log
+
+```bash
+tail -n 100 ~/.codex/app-server-daemon/app-server.stderr.log
+```
+
+### Managed App Server updater log
+
+```bash
+tail -n 100 ~/.codex/app-server-daemon/app-server-updater.stderr.log
+```
+
 ---
 
-# 27. Diagnostic Decision Tree
-
-Use this order.
+# 26. Diagnostic Decision Tree
 
 ```text
 codex login status
@@ -921,7 +901,7 @@ codex login status
                 ↓
 codex app-server daemon version
         │
-        ├── socket/connection failure
+        ├── Failed / socket missing
         │       ↓
         │   inspect processes
         │   clean stale daemon
@@ -932,39 +912,44 @@ codex app-server daemon version
                 ↓
 codex remote-control --json
         │
-        ├── not connected
+        ├── Not connected
         │       ↓
-        │   investigate Remote Control connectivity
+        │   inspect Remote Control connectivity
         │
-        └── connected
+        └── Connected
                 ↓
 codex remote-control pair
         │
-        ├── pairing code generated
+        ├── Pairing code created
         │       ↓
         │   ChatGPT Mobile → Codex → Remote
         │
         └── HTTP 401 token_revoked
                 ↓
-        refresh ChatGPT CLI authentication
+        refresh ChatGPT CLI login
                 ↓
-        retry pairing
+        retry pairing once
+                ↓
+        still token_revoked?
+                ↓
+        investigate Remote Control
+        enrollment/backend state
 ```
 
 ---
 
-# 28. Complete Fresh Setup
+# 27. Fresh Setup Runbook
 
-For a clean new Linux host/account, the sequence is:
+For a new Linux host/account:
 
 ```bash
-# 1. Check Codex
+# 1. Verify installation
 codex --version
 
-# 2. Authenticate
+# 2. Authenticate the intended ChatGPT account
 codex login --device-auth
 
-# 3. Confirm login
+# 3. Verify authentication
 codex login status
 
 # 4. Bootstrap managed App Server with Remote Control
@@ -976,39 +961,36 @@ codex app-server daemon start
 # 6. Verify daemon
 codex app-server daemon version
 
-# 7. Verify Unix socket
+# 7. Verify local control socket
 ls -l ~/.codex/app-server-control/app-server-control.sock
 
-# 8. Check Remote Control connectivity
+# 8. Verify Remote Control connection
 codex remote-control --json
 
-# 9. Generate pairing code
+# 9. Generate fresh mobile pairing code
 codex remote-control pair
 ```
 
-Then on the phone:
+Then:
 
 ```text
-ChatGPT
+ChatGPT Mobile
 → Codex
 → Remote
-→ Pair/Add Remote
+→ Pair / Add Remote
 ```
-
-Use the fresh pairing code.
 
 ---
 
-# 29. Complete Recovery Procedure
+# 28. Managed-Daemon Recovery Runbook
 
-For an already-configured host whose managed daemon has broken:
+For a broken managed daemon:
 
 ```bash
-# 1. Inspect current Codex/App Server processes
+# 1. Inspect current processes
 ps aux | grep -E 'codex|app-server' | grep -v grep
 
 # 2. Identify the current stale pid-update-loop PID
-#    Replace <CURRENT_STALE_PID> below.
 
 # 3. Gracefully terminate it
 kill -TERM <CURRENT_STALE_PID>
@@ -1016,7 +998,7 @@ kill -TERM <CURRENT_STALE_PID>
 # 4. Recheck
 ps aux | grep -E 'codex|app-server' | grep -v grep
 
-# 5. Force-kill only if it remains
+# 5. Force-kill only if the stale updater remains
 kill -KILL <CURRENT_STALE_PID>
 
 # 6. Rebuild managed Remote Control configuration
@@ -1034,15 +1016,47 @@ ls -l ~/.codex/app-server-control/app-server-control.sock
 # 10. Verify Remote Control
 codex remote-control --json
 
-# 11. Generate a fresh pairing code
+# 11. Generate new pairing code if healthy
 codex remote-control pair
 ```
 
 ---
 
+# 29. Authentication-Recovery Runbook
+
+For:
+
+```text
+401 Unauthorized
+token_revoked
+```
+
+use:
+
+```bash
+# 1. Refresh CLI authentication
+codex logout
+
+# 2. Authenticate the intended account
+codex login --device-auth
+
+# 3. Verify
+codex login status
+
+# 4. Check Remote Control
+codex remote-control --json
+
+# 5. Generate fresh pairing code
+codex remote-control pair
+```
+
+If `token_revoked` persists after this sequence, do not keep deleting local Codex state or repeatedly restarting the healthy managed daemon.
+
+---
+
 # 30. Final Verified State
 
-The latest successful server-side state is:
+The latest confirmed Linux environment is:
 
 ```text
 Codex CLI
@@ -1054,41 +1068,57 @@ Codex CLI
     ├── Managed App Server
     │     └── Running
     │
-    ├── Remote Control
-    │     └── Connected
-    │
     ├── Unix control socket
     │     └── Present
     │
-    └── Mobile Remote
-          └── Previously proven to pair successfully
+    ├── Remote Control process
+    │     └── Running
+    │
+    ├── Remote Control connection
+    │     └── Previously confirmed connected
+    │
+    └── Mobile pairing
+          └── Current attempt fails with
+              HTTP 401 token_revoked
 ```
 
-The latest unresolved condition is specifically:
+The correct current interpretation is therefore:
 
 ```text
-codex remote-control pair
-        ↓
-HTTP 401 Unauthorized
-        ↓
-token_revoked
+Linux Codex/App Server        ✅
+Remote Control transport     ✅ / previously confirmed
+Mobile pairing enrollment    ❌
+Failure class                authentication/enrollment
 ```
 
-This should therefore be handled as an **authentication/enrollment problem**, not as a managed-daemon or public-networking problem.
+---
+
+# 31. Known Gaps and Assumptions
+
+### Confirmed
+
+* Codex `0.153.0` is installed.
+* The ChatGPT CLI login reports `Logged in using ChatGPT`.
+* The managed App Server reports `status: running`.
+* The Unix control socket exists.
+* Remote Control can reach a connected foreground state.
+* Mobile pairing succeeded earlier in the history.
+* The current pairing attempt returns `HTTP 401 token_revoked`.
+
+### Not conclusively established
+
+* Whether an arbitrary already-running interactive CLI process can be attached directly to the managed mobile Remote session.
+* Whether the present `token_revoked` pairing failure is entirely server-side or partly caused by client-side persisted enrollment state.
+* Whether a specific additional account-level action is required beyond CLI logout/login.
+
+These remain intentionally unresolved rather than being filled with assumptions.
 
 ---
 
 # References
 
-The following references were used only to validate current behavior relevant to the consolidated runbook:
-
-* Codex App Server protocol includes experimental Remote Control pairing/status/client methods.
-* Current Codex issue discussion documents the experimental CLI/headless workflow using `codex remote-control start` and `codex remote-control pair`.
-* Current upstream reports document Remote Control authentication/enrollment problems involving revoked or stale client state.
-* Current reports also document OAuth/refresh-token invalidation producing Remote Control authentication failures.
-
-## Known documentation caveat
-
-Current Codex documentation and issue discussions have shown some inconsistency between the general Remote Connections documentation and the newer experimental CLI/headless Remote Control workflow. The **actual successful pairing in this environment is the strongest evidence for this specific setup**: Linux Codex CLI → Remote Control → ChatGPT Mobile was successfully paired.
-
-That workflow should therefore be treated here as **verified experimental behavior**, rather than generalized beyond the confirmed environment.
+* OpenAI Help Center — ChatGPT release notes: Codex Remote became generally available and Remote Control uses authenticated one-to-one pairing for supported mobile/host connections.
+* OpenAI Help Center — ChatGPT Work and Codex: the mobile app can access supported remote Codex chats from the Remote tab.
+* OpenAI Codex GitHub — Linux/Android Remote Control pairing failures have been reported, including cases where the host registers and creates pairing codes but mobile pairing fails.
+* OpenAI Codex GitHub — stale/revoked Remote Control enrollment and re-pairing failures have been reported.
+* OpenAI Codex GitHub — live/in-progress CLI session attachment has been reported as a limitation in Remote Control.
