@@ -1,130 +1,237 @@
-I think the AI agent is being too manual here.
+# Binding Product-Scope Decision
 
-### Why the agent asks for this every day
+The project currently supports and develops only two strategy families:
 
-The receipt is basically a **daily safety acknowledgment**:
+1. **Options Buyer**
+2. **Options Seller**
 
-> “Before today's strategy starts, verify the account state and confirm today's configured limits are based on current facts.”
+Do not expand the project into additional trading markets or standalone instrument strategies without a new explicit owner decision.
 
-It checks:
+## Priority 1 — Preserve complete market evidence
+
+Continuously capture and verify all market evidence required to reproduce, evaluate and audit options-buyer and options-seller decisions:
+
+* Spot and option-chain snapshots.
+* One-minute OHLCV.
+* Ticks where required.
+* Bid, ask and spread where upstream provides them.
+* Volume and open interest.
+* Greeks, including their source and validity indicators.
+* Instrument, strike, expiry and DTE.
+* Market-data source.
+* Observation timestamp and monotonic sequence.
+* Missing, stale, zero-filled or upstream-failed fields.
+* Exchange-rule and contract-regime boundaries.
+
+Quality flags must distinguish:
+
+* Genuine zero.
+* Missing value.
+* Unsupported upstream field.
+* Stale value.
+* Failed request.
+* No process running.
+* No subscription.
+* Reconstructed historical value.
+
+Never silently substitute zero for missing market evidence.
+
+Expired contracts must remain reproducible before their upstream history disappears. Historical sessions lacking full chains, spreads or fills must be labelled according to their actual evidence quality and must not be presented as complete evidence.
+
+## Included
+
+### Options Buyer
+
+* Buying call options.
+* Buying put options.
+* BuyerEdge and future options-buying strategies.
+* Long-premium entries and exits.
+* Premium-based stops and trailing protection.
+* Theta-decay, IV, liquidity and spread analysis.
+* Strike, expiry and DTE selection.
+* Buyer-specific costs, slippage and risk limits.
+
+### Options Seller
+
+* Selling call options.
+* Selling put options.
+* Hedged or multi-leg option-selling structures when explicitly declared by the strategy.
+* Short-premium entries, adjustments and exits.
+* Margin and available-funds checks.
+* Defined-risk and undefined-risk classification.
+* Seller-specific stop, hedge and square-off behaviour.
+* Gamma, vega, theta and expiry risk.
+* Multi-leg partial-fill and orphan-leg protection.
+* Seller-specific charges, slippage and capital limits.
+
+Options selling must not silently reuse options-buyer assumptions. It requires its own:
+
+* Strategy manifest and configuration profile.
+* Position lifecycle.
+* Risk limits.
+* Margin checks.
+* Cost model.
+* Fill and slippage model.
+* Protection policy.
+* Replay validation.
+* Research evidence.
+* Capital allocation.
+* Promotion evidence.
+
+## Supporting data allowed
+
+The project may capture and use the following when they support options buying or options selling:
+
+* Underlying index spot price.
+* Futures reference price or synthetic-futures value.
+* Option chains.
+* Bid, ask and spread.
+* Volume and open interest.
+* IV and Greeks.
+* Expiry calendar and DTE.
+* Market regime and liquidity measurements.
+* Broker positions, orders, trades, funds and margin.
+
+Spot or futures data may be used as an input, reference, hedge measurement or pricing signal. This does **not** authorize standalone equity or futures trading.
+
+All supporting data must retain its source, timestamp, sequence, validity and quality status. Reconstructed or derived values must be explicitly identified as such and must not be represented as direct upstream observations.
+
+## Explicitly outside current scope
+
+Do not build, optimize or activate:
+
+* Cash-equity trading strategies.
+* Standalone futures strategies or futures orders.
+* Commodity trading.
+* Currency or forex trading.
+* Cryptocurrency trading.
+* Bonds or fixed-income trading.
+* International market expansion.
+* Additional asset classes.
+* Generic multi-asset portfolio optimization.
+* Market-coverage expansion performed merely to collect more data.
+
+Do not interpret “collect diverse evidence” as “add more markets.”
+
+Evidence diversity must currently come from within options buying and selling:
+
+* Different expiries.
+* Different DTE bands.
+* Different strikes and moneyness.
+* Different IV conditions.
+* Trending and ranging sessions.
+* Event and non-event sessions.
+* Different liquidity and spread conditions.
+* Buyer versus seller behaviour.
+* Different option structures where explicitly supported.
+
+## Separate buyer and seller authority
+
+Options Buyer and Options Seller must be treated as separate strategy and risk families.
+
+Each must have independently declared:
+
+* Strategy identity.
+* Enabled status.
+* `none`, `plan` or `trade` authority.
+* Capital allocation.
+* Maximum loss.
+* Maximum exposure.
+* Maximum open positions.
+* Allowed structures.
+* Allowed expiries and strikes.
+* Required market inputs.
+* Execution policy.
+* Protection policy.
+* Research lineage.
+* Performance attribution.
+
+The AI must not dynamically switch a strategy from buyer to seller, or seller to buyer, unless that behaviour is explicitly declared, bounded and approved as part of the strategy contract.
+
+An advisor response must not gain seller authority merely because it returns `SELL`. Order side and strategy family are different concepts:
+
+* An options buyer uses `BUY` to enter and `SELL` to exit.
+* An options seller uses `SELL` to enter and `BUY` to exit.
+
+The strategy manifest and position lifecycle—not the model’s text—must determine which meaning applies.
+
+## Options-seller safety requirements
+
+Before an options-selling strategy receives live authority, verify:
+
+1. Broker margin and available funds are fresh.
+2. Worst-case exposure is computable or the order is refused.
+3. Required hedge legs are identified.
+4. Multi-leg order sequencing is deterministic.
+5. Partial fills cannot leave an unmanaged naked position.
+6. Orphan-leg detection and recovery exist.
+7. Position limits cover every leg and the combined structure.
+8. Gap and expiry risk are represented.
+9. Stop and emergency-exit behaviour are replayed and sandbox-tested.
+10. Broker square-off and expiry handling are attributable.
+11. Costs are seller-side aware.
+12. Account-level portfolio limits include buyer and seller positions together.
+13. Required market evidence is complete and sufficiently fresh for the proposed structure.
+14. Missing, stale, reconstructed or upstream-failed fields cannot be mistaken for valid observations.
+
+If the system cannot safely evaluate margin, exposure, hedge state, remaining risk or required market evidence, it must refuse the seller entry.
+
+## Updated project direction
+
+Continue improving the shared deterministic framework, but validate every change against both supported families:
 
 ```text
-capital
-+ P&L
-+ exposure
-+ broker state
-+ session limits
-        ↓
-daily receipt
-        ↓
-strategy allowed to start
+Options Buyer Intent ─┐
+                      ├─→ Shared deterministic planning and risk
+Options Seller Intent ┘        ↓
+                       Execution Gateway
+                              ↓
+                       OpenAlgo and Broker
+                              ↓
+                  Reconciliation and attribution
 ```
 
-It exists because those values can change from one session to another, and the system does not want yesterday's approval silently reused.
+Shared infrastructure may include:
 
-Also, it is **not an order approval**. It is a check that the strategy's daily operating assumptions are still valid.
+* Market capture.
+* Complete evidence preservation.
+* `MarketView`.
+* Strategy runtime.
+* Intent contracts.
+* Planning gates.
+* Execution gateway.
+* Order FSM.
+* Reconciliation.
+* Replay.
+* AI lineage.
+* Research lifecycle.
+* Monitoring and operations.
 
-### But the current implementation is unnecessarily manual
+Buyer and seller policies must remain separate where their economics or risks differ.
 
-The current model is:
+Market capture and replay must preserve enough evidence to determine:
 
-```text
-Every day
-   ↓
-Human reviews
-   ↓
-runs governance_evidence.py manually
-   ↓
-strategy starts
-```
+* What was observed.
+* When it was observed.
+* Which source supplied it.
+* Whether it was direct, reconstructed, stale, missing or failed.
+* Which contract and exchange rules applied.
+* Whether the evidence was sufficient for the resulting decision.
+* Whether expired instruments remain reproducible.
 
-For a real autonomous desk, this should become:
+## Maintainer decision rule
 
-```text
-Session start
-      ↓
-Auto-read current capital/P&L/exposure/broker state/config
-      ↓
-Validate against configured rules
-      ↓
-Generate signed/recorded receipt automatically
-      ↓
-Strategy starts
-```
+For every proposed feature, ask:
 
-Then:
+> Does this directly improve the safety, evidence, research, execution or operation of an options-buyer or options-seller strategy?
 
-```text
-Anything changed?
-   YES → invalidate receipt → re-check
-   NO  → existing receipt remains valid for this session
-```
+* If **yes**, continue through the normal evidence and verification process.
+* If **no**, classify it as outside the current scope.
+* If uncertain, stop and request an owner decision.
+* Never expand market coverage by assumption.
+* Never weaken evidence quality by silently filling, substituting or relabelling missing data.
+* Never treat incomplete historical sessions as complete evidence.
 
-That is much better than asking a human to manually run a command every morning.
+The immediate objective is therefore:
 
-### The important distinction
-
-I would **not remove the safety check**.
-
-I would remove only the **manual ceremony**.
-
-So the desired behavior is:
-
-```text
-MANUAL TODAY
-human must create receipt
-
-TARGET
-system creates receipt automatically
-          ↓
-if checks pass → READY
-if checks fail → BLOCKED
-```
-
-The human should only be required when the system detects something that genuinely needs judgment, such as:
-
-```text
-capital changed unexpectedly
-broker position mismatch
-risk limit changed
-P&L state abnormal
-configuration changed
-data unavailable
-```
-
-### Best architecture
-
-I'd make it **session-scoped**, not simply “expires every 24 hours.”
-
-```text
-New session
-    ↓
-governance check
-    ↓
-receipt(session_id, strategy, config_hash, broker_state_hash, reviewed_at)
-    ↓
-START
-```
-
-And invalidate it when material inputs change:
-
-```text
-capital changed        ┐
-P&L state changed       │
-exposure changed        ├──→ receipt invalid
-broker state changed    │
-risk/session caps changed
-                        ┘
-```
-
-This is more precise than a blunt daily expiration.
-
-### Bottom line
-
-**Keep the governance concept. Automate the receipt generation and validation.**
-
-The ideal rule is:
-
-> **The strategy must prove its current operating state is valid before starting; a human should not have to manually produce that proof every day when the system can verify it itself.**
-
-That would be a meaningful improvement toward your autonomous-desk goal without weakening the safety boundary.
+> Prove and improve genuine net edge across options buying and options selling, using complete and accurately labelled market evidence and the existing deterministic execution foundation, without expanding into additional markets or standalone asset classes.
