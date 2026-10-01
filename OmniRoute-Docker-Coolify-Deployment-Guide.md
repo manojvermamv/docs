@@ -147,7 +147,7 @@ Instructions above and resolves every pitfall in the table.
 services:
   # ── Redis (Rate Limiter Backend) ──────────────────────────────────
   redis:
-    image: redis:8.6.2-alpine
+    image: redis:8.6.5-alpine
     container_name: omniroute-redis-prod
     restart: unless-stopped
     volumes:
@@ -161,10 +161,10 @@ services:
 
   omniroute-prod:
     container_name: omniroute-prod
-    # Pinned to the newest published web/Chromium build (3.8.49-web).
-    # v3.8.50 is not yet published as a Docker image tag — swap to
+    # Pinned to the newest published web/Chromium build (3.8.51-web).
+    # Above v3.8.51 is not yet published as a Docker image tag — swap to
     # "latest-web" to auto-track whatever the maintainer publishes next.
-    image: diegosouzapw/omniroute:3.8.49-web
+    image: diegosouzapw/omniroute:3.8.51-web
     depends_on:
       redis:
         condition: service_healthy
