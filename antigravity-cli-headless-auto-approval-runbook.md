@@ -73,7 +73,7 @@ nano ~/.gemini/antigravity-cli/settings.json
   "toolPermission": "always-proceed",
   "artifactReviewPolicy": "always-proceed",
   "allowNonWorkspaceAccess": true,
-  "enableTerminalSandbox": false
+  "enableTerminalSandbox": false,
   "mode": "accept-edits",
   "trustedWorkspaces": [
     "/home/admin"
