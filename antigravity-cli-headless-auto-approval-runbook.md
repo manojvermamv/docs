@@ -38,7 +38,7 @@ nano ~/.gemini/config/config.json
         "read_file(*)",
         "write_file(*)",
         "mcp(*)",
-        "read_url(raw.githubusercontent.com)"
+        "read_url(raw.githubusercontent.com)",
         ...
       ]
     }
