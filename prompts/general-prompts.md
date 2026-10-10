@@ -180,6 +180,23 @@ Now refetch the new script and validate against applied patches (By checking dif
 
 ---
 
+## Verified Research Dossier / Cross-Checked Knowledge Pack (11-10-2026)
+```text
+Topic: {TOPIC}
+Sources I'm providing (optional — URLs, papers, figures, files; leave blank if none): {SOURCE_1}, {SOURCE_2}, ...
+Specific focus areas (optional): {FOCUS_AREAS}
+
+First, deeply understand, review, analyze, and verify, step by step, the topic above. Do this in a multi-step, deep, and correct way: understand it, review and analyze it, then cross-check what you've learned before treating anything as established.
+
+My sources are the ones listed above (if any), plus other sources that you find and review yourself. If I haven't listed any, find and review sources yourself. If a source I provide is a figure, image, or excerpt from a larger work, read the item itself and the full work it comes from. Treat my provided sources as equivalent to the sources you find: give them the same weight and the same scrutiny, neither privileged nor discounted. Cross-check key claims across more than one source where possible, say so when sources disagree instead of silently picking one, and mark what is verified versus unverified.
+
+Just collect precise system-architecture design and build knowledge on this topic, for use in my later prompts and requests. This is knowledge-gathering only: don't start designing or building anything yet. The Markdown file described next is the only deliverable. Note which source each key point comes from.
+
+Then collect everything you gathered, together with your own deep understanding and judgment, into one downloadable, human-readable Markdown file. Link every key point to its source, with a long, detailed explanation of each point; include a full list of references and working links (including every source I provided); and clearly mark what is verified, unverified, or disputed between sources, along with any other useful detail you judge relevant.
+```
+
+---
+
 ## 9Router Docker Compose + Prompt
 
 ### Docker Compose
