@@ -1,3 +1,5 @@
+<a id="multi-device-ssh-key-architecture-guide-cloud--ec2"></a>
+
 # 🔑 SSH from all your devices
 
 **Connect to your servers with one short command, while keeping a separate SSH key on each device.**
@@ -18,9 +20,14 @@ Works with Windows, macOS, Linux and Android Termux clients connecting to Linux 
 - Replace every `<PLACEHOLDER>` before running a command. The same names are used throughout this guide.
 - `~/.ssh` is the SSH folder in your home directory. On Windows it is normally `C:\Users\<USER>\.ssh`; in PowerShell, use `$HOME\.ssh`.
 
+<a id="️-1-architecture--security-model"></a>
+<a id="the-core-principle"></a>
+
 ### How the keys fit together
 
 Each device keeps its **private key**. Only its **public key** (the `.pub` file) goes into the chosen server user's `~/.ssh/authorized_keys`. The server's own public **host key**, saved in the client's `known_hosts`, lets the client verify which server it reached.
+
+<a id="architecture-diagram"></a>
 
 ```mermaid
 flowchart LR
@@ -32,6 +39,8 @@ flowchart LR
 
 You decide which connections are allowed. A phone can have access to development servers only, while office and personal computers have different access lists.
 
+<a id="choosing-your-key-isolation-model"></a>
+
 | Key choice | What it means | When to use it |
 |---|---|---|
 | **One key per device** — default | Reuse that device's public key across your own servers | Simple to manage |
@@ -39,6 +48,8 @@ You decide which connections are allowed. A phone can have access to development
 
 > [!CAUTION]
 > Keep private keys on their original devices. A shared-key model must be an explicit choice; this guide uses separate device keys. If a device is lost or compromised, [remove its access](#revoke) from every server that trusts it.
+
+<a id="-2-ai-agent-interactive-setup--grill-me-protocol"></a>
 
 <a id="plan"></a>
 ## 🤖 Plan with an AI assistant, or fill this in yourself
@@ -51,6 +62,9 @@ Inspect existing settings and ask only for missing information.
 Ask whether I want optional EC2 auto-wake; if yes, configure and test it
 on each selected client. Preserve working access and unrelated settings.
 ```
+
+<a id="agent-interrogation-checklist-collect-first"></a>
+<a id="-3-setup-planning-worksheet"></a>
 
 ### Settings to collect once
 
@@ -67,6 +81,8 @@ on each selected client. Preserve working access and unrelated settings.
 | If auto-wake is selected | Existing `WakePageUrl`, its target instance, fixed or changing IP, and a local `~/.ssh/<ALIAS>-wake.pin` file. Never record the PIN here |
 | Live wake test | Ask whether work is saved and the instance may be stopped for testing |
 
+<a id="automated-agent-pre-flight-safety-checks-check-automatically-when-possible"></a>
+
 ### Before changing files
 
 The setup agent must reuse session answers and inspect what it can, rather than repeat questions or assume placeholder values:
@@ -79,10 +95,14 @@ The setup agent must reuse session answers and inspect what it can, rather than 
 
 If auto-wake is selected, **install and configure it on every selected client**, using [the auto-wake steps](#wake). Do not stop at suggesting commands. Client setup does not authorize creating AWS infrastructure or changing the server's idle policy. If one device is unavailable, finish the others and report the exact blocker.
 
+<a id="-5-client-side-setup-by-device"></a>
+
 <a id="keys"></a>
 ## 💻 Step 1: Create a key on each client
 
 Skip generation when reusing a verified key. The commands prompt for a passphrase; only for intentionally unattended access, add `-N ""`. Never overwrite an existing key at that prompt.
+
+<a id="a-windows-powershell"></a>
 
 ### Windows
 
@@ -109,6 +129,9 @@ icacls $keyPath
 
 These commands remove inherited permissions and grant your user read access. **Existing explicit grants remain:** inspect them and remove unwanted entries with `icacls $keyPath /remove:g "<UNWANTED_ACCOUNT_OR_SID>"`. Do not remove your own access. Recheck the final ACL; do not assume permissions were fixed just because the commands ran.
 
+<a id="b-linux--macos-bash-or-zsh"></a>
+<a id="c-android-termux"></a>
+
 ### macOS, Linux and Android Termux
 
 **▶ Run in: the client's terminal**
@@ -129,6 +152,10 @@ cat ~/.ssh/<KEY_FILENAME>.pub
 ```
 
 **You should see:** a private key and a `.pub` file. The private key has mode `600` (`-rw-------`). Keep Termux keys in its private home, never Android shared storage.
+
+<a id="-4-server-side-setup-cloud-instance"></a>
+<a id="step-1-initialize-directory--lock-permissions"></a>
+<a id="step-2-idempotent-key-installation-prevents-duplicates"></a>
 
 <a id="server"></a>
 ## 🔒 Step 2: Add the public key to the server
@@ -155,10 +182,38 @@ If configuring another account as an administrator, use that account's home and 
 
 **You should see:** the public key in the target user's `authorized_keys`, directory mode `700`, file mode `600`, and both owned by that user.
 
+<a id="-6-client-ssh-config-one-word-shortcuts"></a>
+<a id="configuration-snippets"></a>
+<a id="on-windows-powershell"></a>
+<a id="on-linux--macos"></a>
+<a id="on-android-termux"></a>
+
 <a id="shortcuts"></a>
 ## ⚡ Step 3: Give the connection a short name
 
 All platforms use the **same SSH config format**. Open the client file below and add or update one block per server; avoid duplicate aliases.
+
+**Create the file if needed.** These commands preserve an existing config.
+
+**▶ Windows PowerShell:**
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$HOME\.ssh" | Out-Null
+$configPath = "$HOME\.ssh\config"
+if (-not (Test-Path -LiteralPath $configPath)) {
+    New-Item -ItemType File -Path $configPath | Out-Null
+}
+```
+
+**▶ macOS / Linux / Termux terminal:**
+
+```bash
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+touch ~/.ssh/config && chmod 600 ~/.ssh/config
+```
+
+Then edit the file:
+
 
 | Client | File / editor |
 |---|---|
@@ -172,6 +227,8 @@ Host <ALIAS>
     IdentityFile ~/.ssh/<KEY_FILENAME>
     IdentitiesOnly yes
 ```
+
+<a id="configuration-best-practices"></a>
 
 - `Host` is your shortcut, for example `ec2-ubuntu`. Use another block such as `ec2-debian` for another server, only on devices that should access it.
 - `HostName` contains the address only, without `user@`. `User` is the remote login name.
@@ -250,10 +307,14 @@ Use real absolute paths, not `$HOME` or unresolved placeholders. On Windows, use
 
 The helper's default wait is 300 seconds; `ConnectTimeout 360` gives it time to finish. If you raise `--timeout`, raise SSH's timeout too. Verify the effective options with `ssh -G <ALIAS>` and complete the tests below. If setup breaks access, restore only the affected settings and diagnose before retrying.
 
+<a id="-7-step-by-step-verification-pipeline"></a>
+
 <a id="test"></a>
 ## ✅ Step 5: Test each device
 
 **▶ Run in: a second client terminal**, while keeping fallback access open.
+
+<a id="verification-steps"></a>
 
 ### Normal SSH checks
 
@@ -263,6 +324,29 @@ The helper's default wait is 300 seconds; `ConnectTimeout 360` gives it time to 
 | Server key | The intended public key is in the correct user's `authorized_keys`; ownership and permissions match Step 2 |
 | Direct login | `ssh -o IdentitiesOnly=yes -i <PRIVATE_KEY_PATH> <SSH_USER>@<SERVER_IP_OR_DNS>` logs into the intended server; add `-p <PORT>` if needed. For example, use `ubuntu` or `admin` as appropriate |
 | Alias login | `ssh <ALIAS> 'hostname; whoami'` returns the expected machine and user; inspect `ssh -G <ALIAS>` for the correct identity and no unintended duplicate definitions |
+
+**Quick permission checks — these do not change files:**
+
+**▶ Windows client, PowerShell:**
+
+```powershell
+icacls "$HOME\.ssh\<KEY_FILENAME>"
+```
+
+**▶ macOS / Linux / Termux client:**
+
+```bash
+ls -ld ~/.ssh
+ls -l ~/.ssh/<KEY_FILENAME> ~/.ssh/config
+```
+
+**▶ Server, as the intended SSH user:**
+
+```bash
+ls -ld ~/.ssh ~/.ssh/authorized_keys
+```
+
+**You should see:** Unix directories as `drwx------` (`700`), private keys and config/authorized-key files as `-rw-------` (`600`), and the intended owner. On Windows, review the ACL against Step 1, including explicit grants.
 
 Direct login isolates key and address problems from alias mistakes. If global SSH rules apply even to direct addresses, account for those routes when interpreting the test.
 
@@ -294,6 +378,9 @@ If a cold test is deferred, report **not tested**. A terminal login does not pro
 | Undo client setup | Restore only the affected client configuration. Do not delete the AWS wake deployment as part of client rollback |
 | Remove a device's access | Follow the next section on every server that trusts that device's key |
 
+<a id="️-8-safe-key-revocation-by-unique-comment"></a>
+<a id="safe-revocation-procedure-server-side"></a>
+
 <a id="revoke"></a>
 ## 🗑️ Remove access for a lost or retired device
 
@@ -312,10 +399,15 @@ If a cold test is deferred, report **not tested**. A terminal login does not pro
 
 Repeat for every key/server pairing belonging to the device. Revocation blocks future authentication; existing sessions are not automatically disconnected. If the device also stored a wake PIN, rotate that PIN and update the remaining clients through the [wake project's runbook](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/RUNBOOK.md).
 
+<a id="-9-comprehensive-troubleshooting-matrix"></a>
+<a id="diagnostic-mode-ssh--vvv"></a>
+
 <a id="fix"></a>
 ## 🔧 Fix a problem
 
 Start with `ssh -vvv <ALIAS>` (or add `-vvv` to your direct SSH command). `Will attempt key` shows which key SSH found; `Offering public key` shows what it sent. A return to `Authentications that can continue: publickey` after an offer means authentication has not succeeded. Never print the wake PIN during diagnosis.
+
+<a id="common-issues--targeted-fixes"></a>
 
 | You see | Check / fix |
 |---|---|
