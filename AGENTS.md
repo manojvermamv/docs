@@ -78,6 +78,8 @@ Default section order:
 
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
+- `antigravity-cli-headless-auto-approval-runbook.md` owns Linux Antigravity headless setup. Use clear steps, command locations, valid JSON examples and verification tables in the SSH guide's style. Preserve original settings, environment mappings and service commands when restructuring; compare coverage against the original and distinguish tested behavior from unverified policy settings.
+
 - `multi_device_ssh_guide.md` owns multi-device SSH setup, including optional EC2 auto-wake. Setup agents must ask whether to enable it and configure the upstream `ec2_up.py` helper on every selected client when requested. Keep PINs local, preserve device-specific SSH keys and host verification, and report running and authorized cold-wake tests separately. Detailed procedures belong in that guide rather than duplicated here.
 - For this guide, follow the approachable style of `manojvermamv/ec2-idle-stop-wake` documentation: plain language, clear command locations, expected results, and short comparison tables. Consolidate shared steps across platforms while retaining their differences, safety requirements, verification, recovery and optional setup choices.
 - Preserve the guide's legacy section anchors and short, non-destructive config-file creation and permission-check commands when editing; keep the consolidated configuration and verified key-removal procedure.
