@@ -1,349 +1,238 @@
-# Multi-Device SSH Key Architecture Guide (Cloud & EC2)
+# 🔑 SSH from all your devices
 
-A production-grade, minimal, copy-pasteable reference for establishing and maintaining secure SSH access across multiple client devices and multiple cloud servers without sharing private keys.
+**Connect to your servers with one short command, while keeping a separate SSH key on each device.**
 
----
+Works with Windows, macOS, Linux and Android Termux clients connecting to Linux servers, including Ubuntu and Debian on EC2. Optionally, your normal SSH command can wake a stopped EC2 instance before connecting.
 
-## 🏗️ 1. Architecture & Security Model
+> [!TIP]
+> **What you'll do:** choose which devices can reach which servers, create their keys, add public keys to the servers, then test a connection.
+> **You need:** OpenSSH on each client and an existing way into each server. Auto-wake also needs Python and an existing wake deployment.
+> **Already set up?** Reuse verified working keys and aliases. Only change what is needed.
 
-### The Core Principle
-> [!CAUTION]
-> **Never copy or share private keys between devices unless intentionally choosing a shared-key model.**
-> Each physical client generates its own private key that never leaves that machine. Only public keys (`.pub`) are copied to destination servers. If any device is lost, replaced, or compromised, revoke its public key immediately on the server.
+[Plan](#plan) · [Create keys](#keys) · [Server setup](#server) · [SSH shortcuts](#shortcuts) · [Auto-wake](#wake) · [Test](#test) · [Remove access](#revoke) · [Troubleshooting](#fix)
 
-### Architecture Diagram
+## 🧭 Before you start
 
-> [!NOTE]
-> **Selective Access**: Not every client must connect to every server. Access is granted strictly on a per-key basis. For example, mobile phones may be granted access only to dev/staging, while office machines access both.
+- **Client** means your computer or phone. **Server** means the Linux machine you connect to.
+- **▶ Run in** tells you where a command belongs. Setup commands change files on that device; verification commands are read-only unless stated otherwise.
+- Replace every `<PLACEHOLDER>` before running a command. The same names are used throughout this guide.
+- `~/.ssh` is the SSH folder in your home directory. On Windows it is normally `C:\Users\<USER>\.ssh`; in PowerShell, use `$HOME\.ssh`.
+
+### How the keys fit together
+
+Each device keeps its **private key**. Only its **public key** (the `.pub` file) goes into the chosen server user's `~/.ssh/authorized_keys`. The server's own public **host key**, saved in the client's `known_hosts`, lets the client verify which server it reached.
 
 ```mermaid
 flowchart LR
-    subgraph Clients["Client Devices (Private Keys Stored Locally)"]
-        W_Off["Office Windows\n<KEY_OFFICE_UBUNTU>\n<KEY_OFFICE_DEBIAN>"]
-        W_Per["Personal Windows / Laptop\n<KEY_LAPTOP_UBUNTU>\n<KEY_LAPTOP_DEBIAN>"]
-        Mac["macOS / Linux Desktop\n<KEY_DESKTOP_UBUNTU>"]
-        And["Android Phone (Termux)\n<KEY_PHONE_UBUNTU>"]
-    end
-
-    subgraph ServerUbuntu["Destination: Ubuntu Instance (<UBUNTU_HOST>)"]
-        U_Auth["User: <UBUNTU_USER> (e.g. ubuntu)\n~/.ssh/authorized_keys\n- office-key\n- laptop-key\n- desktop-key\n- phone-key"]
-    end
-
-    subgraph ServerDebian["Destination: Debian Instance (<DEBIAN_HOST>)"]
-        D_Auth["User: <DEBIAN_USER> (e.g. admin)\n~/.ssh/authorized_keys\n- office-key\n- laptop-key"]
-    end
-
-    W_Off -->|Authorized| U_Auth
-    W_Off -->|Authorized| D_Auth
-    W_Per -->|Authorized| U_Auth
-    W_Per -->|Authorized| D_Auth
-    Mac -->|Authorized| U_Auth
-    And -->|Authorized (Selective)| U_Auth
-    %% Note: Phone and Desktop do not connect to Debian
+    W["Windows • own private key"] --> U["Ubuntu • allowed public keys"]
+    W --> D["Debian • allowed public keys"]
+    L["macOS / Linux • own private key"] --> U
+    T["Termux • own private key"] --> U
 ```
 
-### Choosing Your Key Isolation Model
+You decide which connections are allowed. A phone can have access to development servers only, while office and personal computers have different access lists.
 
-| Model | Setup | Best For |
-| :--- | :--- | :--- |
-| **Per-Device Key** (Recommended default) | 1 key pair per physical device, reused across your own accessible servers | Balances strong security with minimal key management overhead. |
-| **Per-Device-Per-Server Key** (Maximum isolation) | Dedicated key pair for each (Device + Server) combination | Limits credential reuse between servers so that access credentials for one environment are not shared with another. |
+| Key choice | What it means | When to use it |
+|---|---|---|
+| **One key per device** — default | Reuse that device's public key across your own servers | Simple to manage |
+| **One key per device and server** | A separate pair for every device/server combination | Stronger separation between environments |
 
----
+> [!CAUTION]
+> Keep private keys on their original devices. A shared-key model must be an explicit choice; this guide uses separate device keys. If a device is lost or compromised, [remove its access](#revoke) from every server that trusts it.
 
-## 🤖 2. AI Agent Interactive Setup / "Grill-Me" Protocol
+<a id="plan"></a>
+## 🤖 Plan with an AI assistant, or fill this in yourself
 
-When an AI coding assistant or autonomous agent performs this setup with a user, it **must not blindly execute scripts with placeholder assumptions**. The agent must conduct a brief interrogation to collect actual environment values and run automated safety checks before touching the filesystem.
+You can give an assistant this prompt:
 
-### Agent Interrogation Checklist (Collect First)
-The agent asks the user only the essential parameters:
-1. **Client Device & OS**: Windows PowerShell, macOS/Linux terminal, or Android Termux?
-2. **Device / Machine Name**: What identifier should be used in key names and comments? (e.g. `office-win`, `personal-laptop`).
-3. **Live Target Server**: Which server is being configured? (e.g. AWS Ubuntu EC2, Debian instance).
-4. **Server Hostname or IP**: Exact public IP or public DNS name.
-5. **SSH Username**: Exact login account on that server (e.g. `ubuntu`, `admin`, or custom).
-6. **Desired SSH Alias**: Shorthand connection name for `~/.ssh/config` (e.g. `ec2-ubuntu`).
-7. **Key Isolation Preference**: One key per device, or one key per device-per-server?
-8. **Optional EC2 Auto-Wake**: “Should `ssh <ALIAS>` automatically wake this EC2 instance when stopped? If yes, which clients should use it?” Default: off. If enabled, collect the existing **WakePageUrl**, confirm which instance it controls, and identify a fixed-IP or changing-IP connection. Have the user enter their wake PIN locally, never in chat. Ask separately whether saved work permits a live stop-and-wake test.
-
-Reuse answers and verified configuration already available in the session. If auto-wake is selected, **configure it on every selected client as part of setup**, following [Section 6A](#6a-optional-ec2-auto-wake-on-each-selected-client); do not finish by merely suggesting commands. If a device or prerequisite is unavailable, complete the other clients and name the exact blocker. Choosing client auto-wake does not authorize deploying AWS infrastructure or changing the server's idle policy.
-
-### Automated Agent Pre-Flight Safety Checks (Check Automatically When Possible)
-Before creating keys or modifying configurations, the agent must verify:
-- [ ] **Anti-Lockout Check**: Confirm the user has fallback access available (such as an active working SSH session, AWS EC2 Instance Connect, EC2 Serial Console, or AWS Systems Manager Session Manager) before changing `authorized_keys`.
-- [ ] **Key Collision Check**: Test whether the proposed private key file (e.g. `~/.ssh/<KEY_FILENAME>`) already exists. If it exists, alert the user rather than overwriting.
-- [ ] **SSH Config Collision Check**: Inspect client `~/.ssh/config` to check if `Host <ALIAS>` is already defined. If present, edit the existing block rather than appending a duplicate.
-- [ ] **Windows Permission Verification**: On Windows, check actual file ACLs with `Get-Acl` or `icacls` before assuming permissions are too broad.
-- [ ] **Safe Defaults**: Assume Ed25519 algorithm, standard permissions (`700`/`600`), and `IdentitiesOnly yes`. Use empty passphrase only when unattended/non-interactive access is intentionally required; otherwise ask if the user prefers a passphrase. Skip minor setup questions unless an issue arises.
-- [ ] **Auto-Wake Preflight (only if selected)**: Confirm the existing wake endpoint belongs to the intended instance, Python runs on each client, and the client can reach SSH once the instance is running. Inspect effective settings with `ssh -G <ALIAS>`, including `Include`, wildcard `Host`, `Match`, `ProxyCommand` and `ProxyJump` rules. Do not overwrite an existing proxy route blindly. Back up affected files and preserve unrelated hosts, keys and host-key verification.
-
----
-
-## 📋 3. Setup Planning Worksheet
-
-| Field | Description | Example Value |
-| :--- | :--- | :--- |
-| **Key Isolation Model** | Choose `Per-device` or `Per-device-per-server` | `Per-device-per-server` |
-| **Client OS** | Windows / macOS / Linux / Android Termux | `Windows (PowerShell)` |
-| **Device Label** | Unique name of your physical machine | `office-win` or `personal-laptop` |
-| **Target Server Host** | Public IP address or Public DNS hostname | `<SERVER_IP>` or `<PUBLIC_DNS_NAME>` |
-| **SSH Username** | Typical/default for the selected AMI (`ubuntu` for Ubuntu, `admin` for Debian) or custom account | `ubuntu` |
-| **Key Filename** | Name for this specific private key | `id_ed25519_ubuntu_laptop` |
-| **Key Comment** | Recommended to be unique to identify and safely revoke this key | `laptop-to-ec2-ubuntu-2026` |
-| **SSH Alias** | 1-word shortcut name | `ec2-ubuntu` |
-| **Existing SSH Config?** | Does `~/.ssh/config` already exist on your client? | `Yes` (edit) / `No` (create) |
-| **Auto-Wake / Selected Clients** | Optional; configure only the devices selected by the user | `Off` / `Windows + Termux` |
-| **Wake Endpoint / Address Mode** | Existing WakePageUrl for this instance; fixed IP or changing IP | `<WAKE_URL>` / `fixed` |
-| **Local Wake PIN File** | One protected file per target on each selected client; never record its contents here | `~/.ssh/<ALIAS>-wake.pin` |
-| **Live Wake Test** | User confirms work saved and permission to stop the instance | `Approved` / `Deferred` |
-
----
-
-## 🔒 4. Server-Side Setup (Cloud Instance)
-
-> [!WARNING]
-> **Anti-Lockout Rule**: Always keep your current, working SSH connection open in one terminal while configuring or updating `authorized_keys`. Test new keys in a **second, separate terminal window** before closing your active session.
-
-### Step 1: Initialize Directory & Lock Permissions
-
-Log into your server. (Typical AMI defaults are `ubuntu` on standard Ubuntu AMIs and `admin` on standard Debian AMIs):
-
-```bash
-# 1. Initialize .ssh with 700 (rwx------) and authorized_keys with 600 (rw-------)
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
-touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-
-# 2. Confirm ownership for the target account (essential if commands were run via sudo or root)
-# Recommended dynamic form (resolves user and primary group automatically):
-sudo chown -R $(id -un):$(id -gn) ~/.ssh
-
-# Or specify explicitly if configuring another user account:
-sudo chown -R <SSH_USER>:<SSH_GROUP> /home/<SSH_USER>/.ssh
+```text
+Follow multi_device_ssh_guide.md to set up SSH on my selected devices.
+Inspect existing settings and ask only for missing information.
+Ask whether I want optional EC2 auto-wake; if yes, configure and test it
+on each selected client. Preserve working access and unrelated settings.
 ```
 
-### Step 2: Idempotent Key Installation (Prevents Duplicates)
+### Settings to collect once
 
-Never append blindly. Avoid adding the same public key multiple times by using this check:
+| Setting | What to record or ask |
+|---|---|
+| Devices and OS | Windows PowerShell, macOS/Linux, Android Termux; which devices can access each server? |
+| Device label | A unique name such as `office-win`, `personal-laptop` or `phone` |
+| Server and address | Which live server, and its exact IP or DNS name? |
+| Login user | Usually `ubuntu` for Ubuntu, `admin` for Debian, or your custom account |
+| SSH alias | A short name such as `ec2-ubuntu` or `ec2-debian` |
+| Key choice | One per device, or one per device/server? Use a descriptive filename such as `id_ed25519_ubuntu_laptop` and unique comment such as `laptop-to-ubuntu-2026` |
+| Passphrase | Ask the user's preference. Use an empty passphrase only when unattended access is intentionally required; a passphrase-protected key can use an SSH agent |
+| Optional auto-wake | **“Should `ssh <ALIAS>` wake this EC2 instance when stopped? If yes, on which clients?”** Default: off |
+| If auto-wake is selected | Existing `WakePageUrl`, its target instance, fixed or changing IP, and a local `~/.ssh/<ALIAS>-wake.pin` file. Never record the PIN here |
+| Live wake test | Ask whether work is saved and the instance may be stopped for testing |
 
-```bash
-PUB_KEY='<PASTE_PUBLIC_KEY_STRING_HERE>'
+### Before changing files
 
-grep -qxF "$PUB_KEY" ~/.ssh/authorized_keys || echo "$PUB_KEY" >> ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-```
+The setup agent must reuse session answers and inspect what it can, rather than repeat questions or assume placeholder values:
 
-## 💻 5. Client-Side Setup (By Device)
+- Confirm fallback server access before changing `authorized_keys`: a working SSH session, or a verified console, EC2 Instance Connect, Serial Console or Systems Manager route.
+- Check whether the key already exists. Do not overwrite it; report the collision and reuse a verified key or agree on another filename.
+- Back up files that will change. Edit an existing `Host` block in place; preserve unrelated aliases, keys, ports and host verification.
+- Inspect `ssh -G <ALIAS>` and the configuration sources, including `Include`, wildcard `Host`, `Match`, `ProxyCommand` and `ProxyJump`. Earlier matching settings can take precedence. Do not silently replace an existing proxy route.
+- Check actual Windows ACLs with `Get-Acl` or `icacls`. Use Ed25519, `IdentitiesOnly yes`, and the file permissions below by default.
 
-> [!TIP]
-> **Passphrase Policy**: The standard commands below run interactively so you can set a passphrase for added security. If an unattended, non-interactive setup is intentionally required, add `-N ""` to bypass the interactive prompt:
-> `ssh-keygen -t ed25519 -C "<UNIQUE_COMMENT>" -f "<KEY_PATH>" -N ""`
+If auto-wake is selected, **install and configure it on every selected client**, using [the auto-wake steps](#wake). Do not stop at suggesting commands. Client setup does not authorize creating AWS infrastructure or changing the server's idle policy. If one device is unavailable, finish the others and report the exact blocker.
 
-### A. Windows (PowerShell)
+<a id="keys"></a>
+## 💻 Step 1: Create a key on each client
 
-> [!NOTE]
-> **Windows File Permissions**: OpenSSH on Windows may reject the private key when NTFS ACL permissions are too broad (e.g. inherited access granted to `BUILTIN\Users`). Verify permissions on the key file using `icacls "$HOME\.ssh\<KEY_FILENAME>"`. If inherited access or multiple users are listed, use `icacls` to remove inheritance and grant exclusive Read access to your Windows user account.
+Skip generation when reusing a verified key. The commands prompt for a passphrase; only for intentionally unattended access, add `-N ""`. Never overwrite an existing key at that prompt.
 
-Run this **combined block** in PowerShell (replace `<KEY_FILENAME>` and `<UNIQUE_COMMENT>`):
+### Windows
+
+**▶ Run in: PowerShell on the client**
 
 ```powershell
-# 1. Create .ssh folder
 New-Item -ItemType Directory -Force -Path "$HOME\.ssh" | Out-Null
-
-# 2. Generate ed25519 key interactively (press Enter twice for no passphrase, or enter a passphrase)
 ssh-keygen -t ed25519 -C "<UNIQUE_COMMENT>" -f "$HOME\.ssh\<KEY_FILENAME>"
-
-# 3. Restrict NTFS permissions if needed
-icacls "$HOME\.ssh\<KEY_FILENAME>" /inheritance:r | Out-Null
-icacls "$HOME\.ssh\<KEY_FILENAME>" /grant:r "$($env:USERNAME):(R)" | Out-Null
-
-# 4. Display public key to copy to server
-Write-Host "`n=== COPY THIS PUBLIC KEY TO SERVER authorized_keys ===" -ForegroundColor Green
+icacls "$HOME\.ssh\<KEY_FILENAME>"
 Get-Content "$HOME\.ssh\<KEY_FILENAME>.pub"
 ```
 
----
+**You should see:** the key pair exists, and the final command prints a public key beginning with `ssh-ed25519`. Copy only that public line to the server.
 
-### B. Linux / macOS (Bash or Zsh)
+If the private key grants other users access, restrict it and check again:
 
-Run this **combined block** in terminal:
-
-```bash
-# 1. Create .ssh directory with 700 permissions
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
-
-# 2. Generate ed25519 key with a unique comment
-ssh-keygen -t ed25519 -C "<UNIQUE_COMMENT>" -f ~/.ssh/<KEY_FILENAME>
-
-# 3. Lock private key permissions to 600
-chmod 600 ~/.ssh/<KEY_FILENAME>
-
-# 4. Display public key to copy to server
-echo -e "\n=== COPY THIS PUBLIC KEY TO SERVER authorized_keys ==="
-cat ~/.ssh/<KEY_FILENAME>.pub
+```powershell
+$keyPath = "$HOME\.ssh\<KEY_FILENAME>"
+$userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls $keyPath /inheritance:r
+icacls $keyPath /grant:r "*${userSid}:(R)"
+icacls $keyPath
 ```
 
----
+These commands remove inherited permissions and grant your user read access. **Existing explicit grants remain:** inspect them and remove unwanted entries with `icacls $keyPath /remove:g "<UNWANTED_ACCOUNT_OR_SID>"`. Do not remove your own access. Recheck the final ACL; do not assume permissions were fixed just because the commands ran.
 
-### C. Android (Termux)
+### macOS, Linux and Android Termux
 
-Run this **combined block** in Termux:
+**▶ Run in: the client's terminal**
+
+On Termux, install OpenSSH first if missing:
 
 ```bash
-# 1. Install OpenSSH package if missing
 pkg update -y && pkg install -y openssh
+```
 
-# 2. Create .ssh directory and generate key
+Then use the same key commands on all three platforms:
+
+```bash
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 ssh-keygen -t ed25519 -C "<UNIQUE_COMMENT>" -f ~/.ssh/<KEY_FILENAME>
 chmod 600 ~/.ssh/<KEY_FILENAME>
-
-# 3. Display public key to copy to server
-echo -e "\n=== COPY THIS PUBLIC KEY TO SERVER ==="
 cat ~/.ssh/<KEY_FILENAME>.pub
 ```
 
----
+**You should see:** a private key and a `.pub` file. The private key has mode `600` (`-rw-------`). Keep Termux keys in its private home, never Android shared storage.
 
-## ⚡ 6. Client SSH Config (One-Word Shortcuts)
-
-Configuring `~/.ssh/config` allows you to connect with simple commands like `ssh ec2-ubuntu` instead of typing out IP addresses and `-i` flags.
+<a id="server"></a>
+## 🔒 Step 2: Add the public key to the server
 
 > [!WARNING]
-> **Check Before Appending**: The snippets below append to `~/.ssh/config`. If you already have an entry for that `Host`, do not blindly rerun the append block as it will create duplicate definitions. Open the file in an editor (`notepad` or `nano`) and update the existing entry.
+> Keep your working connection open. Test the new key in a **second terminal** before closing the old session or removing any old key.
 
-### Configuration Best Practices:
-1. **`HostName`**: Contains only the IP address (e.g. `<SERVER_IP>`) or public DNS hostname (e.g. `ec2-xxx.compute.amazonaws.com`). Do **not** prefix with `user@`.
-2. **`User`**: Specifies the remote username (e.g. `ubuntu` or `admin`).
-3. **`IdentitiesOnly yes`**: Recommended when multiple SSH keys or an SSH agent exist. It instructs SSH to use only the key specified in `IdentityFile`, preventing connection failures caused by exhausting the server's `MaxAuthTries` with other loaded keys.
+**▶ Run in: the server, logged in as the intended SSH user**
 
----
-
-### Configuration Snippets
-
-#### On Windows (PowerShell)
-```powershell
-$configPath = "$HOME\.ssh\config"
-$aliasesToCheck = @("ec2-ubuntu", "ec2-debian")
-$existingAliases = @()
-
-if (Test-Path $configPath) {
-    foreach ($alias in $aliasesToCheck) {
-        if (Select-String -Path $configPath -Pattern "^\s*Host\s+.*\b$alias\b" -Quiet) {
-            $existingAliases += $alias
-        }
-    }
-}
-
-if ($existingAliases.Count -gt 0) {
-    Write-Warning "Existing Host entries found in $configPath for: $($existingAliases -join ', '). Edit the file manually to prevent duplicate blocks."
-} else {
-    @'
-
-# Ubuntu Instance
-Host ec2-ubuntu
-    HostName <UBUNTU_IP_OR_DNS>
-    User <UBUNTU_USER>
-    IdentityFile ~/.ssh/<UBUNTU_KEY_FILENAME>
-    IdentitiesOnly yes
-
-# Debian Instance
-Host ec2-debian
-    HostName <DEBIAN_IP_OR_DNS>
-    User <DEBIAN_USER>
-    IdentityFile ~/.ssh/<DEBIAN_KEY_FILENAME>
-    IdentitiesOnly yes
-'@ | Out-File -Append -Encoding ascii $configPath
-    Write-Host "Config entries appended successfully." -ForegroundColor Green
-}
-```
-
-#### On Linux / macOS
 ```bash
-CONFIG="$HOME/.ssh/config"
-touch "$CONFIG" && chmod 600 "$CONFIG"
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak.$(date +%Y%m%d-%H%M%S)
+sudo chown -R "$(id -un):$(id -gn)" ~/.ssh
 
-# POSIX-compliant check for existing Host aliases
-if grep -Eq '^[[:space:]]*Host[[:space:]]+([^#]*[[:space:]])?(ec2-ubuntu|ec2-debian)([[:space:]]|$)' "$CONFIG"; then
-    echo "WARNING: One or more target Host aliases already exist in $CONFIG. Edit manually to prevent duplicate blocks."
-else
-    cat << 'EOF' >> "$CONFIG"
-
-# Ubuntu Instance
-Host ec2-ubuntu
-    HostName <UBUNTU_IP_OR_DNS>
-    User <UBUNTU_USER>
-    IdentityFile ~/.ssh/<UBUNTU_KEY_FILENAME>
-    IdentitiesOnly yes
-
-# Debian Instance
-Host ec2-debian
-    HostName <DEBIAN_IP_OR_DNS>
-    User <DEBIAN_USER>
-    IdentityFile ~/.ssh/<DEBIAN_KEY_FILENAME>
-    IdentitiesOnly yes
-EOF
-    chmod 600 "$CONFIG"
-    echo "Config entries appended successfully."
-fi
+PUB_KEY='<PASTE_THE_SINGLE_PUBLIC_KEY_LINE>'
+grep -qxF "$PUB_KEY" ~/.ssh/authorized_keys || printf '%s\n' "$PUB_KEY" >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
 ```
 
-#### On Android (Termux)
-```bash
-CONFIG="$HOME/.ssh/config"
-touch "$CONFIG" && chmod 600 "$CONFIG"
+The check prevents duplicate **identical lines**. If a key's comment has changed, compare its key type and base64 key data before adding it; the same key does not need a second entry.
 
-# POSIX-compliant check for existing Host aliases
-if grep -Eq '^[[:space:]]*Host[[:space:]]+([^#]*[[:space:]])?(ec2-ubuntu|ec2-debian)([[:space:]]|$)' "$CONFIG"; then
-    echo "WARNING: One or more target Host aliases already exist in $CONFIG. Edit manually to prevent duplicate blocks."
-else
-    cat << 'EOF' >> "$CONFIG"
+If configuring another account as an administrator, use that account's home and ownership instead: `sudo chown -R <SSH_USER>:<SSH_GROUP> /home/<SSH_USER>/.ssh`. Do not accidentally install the key for `root`.
 
-# Ubuntu Instance
-Host ec2-ubuntu
-    HostName <UBUNTU_IP_OR_DNS>
-    User <UBUNTU_USER>
-    IdentityFile ~/.ssh/<TERMUX_UBUNTU_KEY>
-    IdentitiesOnly yes
+**You should see:** the public key in the target user's `authorized_keys`, directory mode `700`, file mode `600`, and both owned by that user.
 
-# Debian Instance
-Host ec2-debian
-    HostName <DEBIAN_IP_OR_DNS>
-    User <DEBIAN_USER>
-    IdentityFile ~/.ssh/<TERMUX_DEBIAN_KEY>
-    IdentitiesOnly yes
-EOF
-    chmod 600 "$CONFIG"
-    echo "Config entries appended successfully."
-fi
-```
+<a id="shortcuts"></a>
+## ⚡ Step 3: Give the connection a short name
 
----
+All platforms use the **same SSH config format**. Open the client file below and add or update one block per server; avoid duplicate aliases.
 
-## 6A. Optional EC2 Auto-Wake on Each Selected Client
-
-Use the upstream [ec2_up.py](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/src/ec2_up.py) helper with the existing [EC2 Idle Stop and Wake deployment](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/SETUP.md). It runs **on the client**, not on Ubuntu. Python 3.6+ and its standard library are sufficient; client AWS CLI credentials are not needed. The wake PIN only authorizes waking; each device still authenticates SSH with its own private key.
-
-With a reachable fixed IP, the helper connects directly without calling the wake endpoint. Otherwise it requests a wake, waits for SSH, and carries the original connection through. It does not bypass firewalls or create a network route. Keep any required VPN connected. Starting EC2 resumes normal compute billing; this helper does not install or change auto-stop.
-
-### Agent installation procedure
-
-1. **Verify prerequisites.** Read the current upstream helper and setup instructions. Confirm the existing endpoint's target using trusted deployment information. If no wake deployment exists, explain the prerequisite and obtain authorization for that separate AWS setup; retain working direct SSH meanwhile.
-2. **Install a reviewed copy on each selected client.** Resolve an upstream Git commit and download `https://raw.githubusercontent.com/manojvermamv/ec2-idle-stop-wake/<COMMIT>/src/ec2_up.py` into `~/.ssh/ec2_up.py`. Record the commit and SHA-256 in the handoff, and compare installed bytes across clients. Back up an existing helper before replacement. Do not fetch or execute `main` on every SSH connection.
-3. **Find Python.** Verify the actual interpreter with `python --version` or `python3 --version`. On Windows, obtain its absolute path with `python -c "import sys; print(sys.executable)"`; a Store launcher that does not execute Python is insufficient. On Termux, install missing prerequisites with `pkg install python openssh` and resolve paths with `command -v python` and `printf '%s\n' "$HOME"`. On macOS/Linux, use the available Python 3 interpreter or the platform's package manager if missing.
-4. **Save the PIN privately.** Have the user enter it through a local hidden prompt into `~/.ssh/<ALIAS>-wake.pin`, one line, UTF-8 without BOM. Never embed it in the SSH config, command arguments, shell history, repository, logs or handoff. Set directory mode `700` and file mode `600` on Unix/Termux. On Windows, inspect and restrict the PIN file's ACL to the user; removing inheritance alone does not remove existing explicit grants. Protect the helper and config against modification by other users too. Do not overwrite a valid PIN file without checking whether replacement is needed. Store Termux files in its private home, not Android shared storage. A secure device-to-device PIN transfer needs the user's authorization; SSH private keys must stay on their original devices.
-5. **Update the existing alias in place.** Back up the config; keep the alias, username, port and device-specific `IdentityFile`. Add the options below only to the selected target. Inspect effective config again because earlier matching options can override later ones. Do not add a duplicate host block or silently replace a working `ProxyJump`/`ProxyCommand`; resolve that route first.
-6. **Verify each client**, using the checks below. Keep the direct-access backup until successful login. If a change breaks access, restore only the affected settings and diagnose the exact error before retrying.
-
-### SSH configuration
-
-Merge these settings into the target's existing block, substituting discovered values. This is a template, not an append command:
+| Client | File / editor |
+|---|---|
+| Windows | `notepad "$HOME\.ssh\config"` — save as `config`, not `config.txt` |
+| macOS / Linux / Termux | Edit `~/.ssh/config` using your editor, then run `chmod 600 ~/.ssh/config` |
 
 ```sshconfig
 Host <ALIAS>
-    HostName <FIXED_IP_OR_ALIAS.invalid>
+    HostName <SERVER_IP_OR_DNS>
     User <SSH_USER>
-    IdentityFile ~/.ssh/<DEVICE_KEY_FILENAME>
+    IdentityFile ~/.ssh/<KEY_FILENAME>
     IdentitiesOnly yes
+```
+
+- `Host` is your shortcut, for example `ec2-ubuntu`. Use another block such as `ec2-debian` for another server, only on devices that should access it.
+- `HostName` contains the address only, without `user@`. `User` is the remote login name.
+- `IdentityFile` points to this device's private key. `IdentitiesOnly yes` avoids trying unrelated agent keys and exhausting the server's authentication attempts.
+- Keep an existing custom `Port` or other required route settings. Verify the effective result with `ssh -G <ALIAS>`.
+
+**Before trusting a new server:** compare its host-key fingerprint with one obtained through an existing trusted session or console. For an Ed25519 host key, run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server. A scan alone does not prove identity. Preserve verified `known_hosts` entries; never disable host checking or erase a mismatch merely to make login work.
+
+**You should see:** `ssh <ALIAS>` opens the intended server as the intended user. Follow [the test checklist](#test) before closing your fallback connection.
+
+<a id="wake"></a>
+<a id="6a-optional-ec2-auto-wake-on-each-selected-client"></a>
+## 🌅 Step 4: Optional — wake EC2 when you connect
+
+With [ec2_up.py](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/src/ec2_up.py), keep using `ssh <ALIAS>`. A running server connects immediately; a stopped one wakes, then the **same SSH request** continues. You do not need to retry.
+
+| You need | Why |
+|---|---|
+| An existing [EC2 Idle Stop and Wake deployment](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/SETUP.md) | Its wake URL starts the intended instance; verify the target from trusted deployment information |
+| Python 3.6+ on each selected client | The helper runs locally using only the standard library; no client AWS CLI credentials are needed |
+| The wake PIN and the device's SSH key | The PIN permits waking; SSH still uses the device's own key to log in |
+| A working route to SSH | The helper does not open firewalls or create a VPN; keep any required VPN connected |
+
+Starting EC2 resumes normal compute billing. Client auto-wake does not install or alter the server's auto-stop timer. If the wake deployment is missing, keep direct SSH working and get authorization for that separate AWS setup.
+
+### A. Install the helper and find Python
+
+**▶ Run on: every selected client**
+
+Read the current upstream helper and setup instructions, choose a reviewed Git commit, and download:
+
+```text
+https://raw.githubusercontent.com/manojvermamv/ec2-idle-stop-wake/<COMMIT>/src/ec2_up.py
+```
+
+Save it as `~/.ssh/ec2_up.py`. Back up an existing copy first. Record the commit and SHA-256, and compare installed copies across clients. Download once during setup, not on every connection.
+
+| Platform | Find a working interpreter |
+|---|---|
+| Windows | Run `python --version`, then `python -c "import sys; print(sys.executable)"`. Use that full path; a launcher opening the Microsoft Store is not a working interpreter |
+| macOS / Linux | Check `python3 --version` and `command -v python3`; install Python through the platform's package manager if missing |
+| Termux | Install missing tools with `pkg install python openssh`. Check `python --version`, `command -v python` and `printf '%s\n' "$HOME"` |
+
+For Android automation, execute as the **Termux user**. ADB's shell is not automatically Termux. If `run-as com.termux` is unavailable, use an authorized Termux terminal route; do not root the phone or move secrets into shared storage to bypass this.
+
+### B. Save the PIN locally
+
+Have the user enter the PIN through a **local hidden prompt**, writing one line of UTF-8 without BOM to `~/.ssh/<ALIAS>-wake.pin`. Never put the PIN in chat, command arguments, shell history, SSH config, repository, logs or the handoff report. Reuse a valid file; check before replacing it.
+
+| Client | Protect the file |
+|---|---|
+| macOS / Linux / Termux | SSH directory `700`, PIN file `600`; use Termux's private home |
+| Windows | Restrict the PIN file ACL to the user and verify it, including explicit grants, as explained in Step 1 |
+
+Also protect the helper and config from modification by other users. Transferring a PIN securely between devices needs the user's authorization; SSH private keys stay on their original devices.
+
+### C. Add automatic wake to the existing alias
+
+Back up the config. Keep its existing alias, user, port and device-specific key. Resolve any existing proxy conflict before adding these settings **inside that target's block**:
+
+```sshconfig
     StrictHostKeyChecking yes
     ConnectTimeout 360
     ServerAliveInterval 30
@@ -351,129 +240,95 @@ Host <ALIAS>
     ProxyCommand "<ABSOLUTE_PYTHON_PATH>" "<ABSOLUTE_HELPER_PATH>" <WAKE_URL> %h %p --pin-file "<ABSOLUTE_PIN_PATH>"
 ```
 
-- **Windows:** use forward slashes and quote paths containing spaces, e.g. `"C:/Users/<USER>/.ssh/ec2_up.py"`. Use the verified interpreter path, not an assumed `python3` command. Test through Windows OpenSSH itself.
-- **Linux/macOS:** resolve paths under the actual user's home; do not leave `$HOME` variables or placeholders in the final `ProxyCommand`.
-- **Termux:** discover the actual private paths, normally `/data/data/com.termux/files/usr/bin/python` and `/data/data/com.termux/files/home/.ssh/...`. Run and test under the Termux user. A connected ADB shell is not automatically a Termux shell; if `run-as com.termux` is unavailable, use an authorized Termux terminal route instead of rooting the device or placing secrets in shared storage.
-- **Fixed IP:** retain the current `HostName` and trusted `known_hosts` entry. No `HostKeyAlias` change is needed.
-- **Changing IP:** set `HostName <ALIAS>.invalid` to avoid the old IP fast path, and add `HostKeyAlias <ALIAS>`. Before enabling strict checking, install the independently verified server host public key under that alias in `known_hosts`. Obtain it through an existing trusted session or trusted console and compare its fingerprint. Do not blindly trust `ssh-keyscan`, disable host-key checking, or delete a mismatch to make login succeed.
-- **Private route:** add `--private-ip` only when a VPN or other working route reaches the instance's private address. It controls the API-returned address, not the initial `HostName` fast path; use the private address or `<ALIAS>.invalid` there as appropriate.
-- **Timing:** the helper waits up to 300 seconds by default; SSH's `ConnectTimeout 360` allows it to finish. If increasing `--timeout`, increase `ConnectTimeout` too.
+Use real absolute paths, not `$HOME` or unresolved placeholders. On Windows, use forward slashes and quote paths containing spaces, for example `"C:/Users/<USER>/.ssh/ec2_up.py"`. Termux paths are normally under `/data/data/com.termux/files/usr/bin/` and `/data/data/com.termux/files/home/.ssh/`; discover them rather than assume.
 
-### Required client verification
+| Address type | Configure it this way |
+|---|---|
+| **Fixed public IP** | Keep `HostName` and its trusted `known_hosts` entry. The helper tries that address for 3 seconds; if SSH answers, it skips the wake API. No new `HostKeyAlias` is needed |
+| **Changing public IP** | Set `HostName <ALIAS>.invalid` to avoid trying an old address, and add `HostKeyAlias <ALIAS>`. Save the independently verified server host public key under that alias in `known_hosts` **before** enabling strict checking |
+| **Private address / VPN** | Add `--private-ip` to the proxy command only with a working private route. This chooses the API-returned address, not the initial fast-path address: use a private `HostName` or `<ALIAS>.invalid` too |
 
-| Check | Action | Evidence |
-|---|---|---|
-| Effective config | `ssh -G <ALIAS>` | Correct identity, host verification, Python/helper/PIN paths, proxy and timeout; no unresolved placeholders |
-| Wake API and PIN, without starting | Run `"<PYTHON>" "<HELPER>" <WAKE_URL> --pin-file "<PIN_PATH>" --no-wake --check` (prefix with `&` in PowerShell). **Omit the host argument** to force the API path. | Running + SSH reachable, or an explicit stopped/`--no-wake` result; a successful fixed-IP fast path alone does not prove the PIN works |
-| Already-running connection | `ssh <ALIAS> 'hostname; whoami'` | Expected server and user through the configured proxy |
-| Cold wake, when approved | Save work, close sessions, stop the intended instance and verify **stopped**. Run the same SSH command on one selected client. Repeat a separate stop-and-wake cycle for every selected client. | Same request wakes and logs in successfully; record elapsed time and exit status |
-| Server after reboot | Verify the existing idle timer and its settings if this deployment uses them | Timer remains active with the user's original timings; do not shorten them just to test the client |
+The helper's default wait is 300 seconds; `ConnectTimeout 360` gives it time to finish. If you raise `--timeout`, raise SSH's timeout too. Verify the effective options with `ssh -G <ALIAS>` and complete the tests below. If setup breaks access, restore only the affected settings and diagnose before retrying.
 
-Never stop active work without authorization. If a cold test is deferred, label it **not tested**, even if running-instance and API checks pass. The agent must report results per device, installed paths and revision, backups, remaining blockers, and the instance's final state. Do not claim an IDE was tested based only on a terminal login.
+<a id="test"></a>
+## ✅ Step 5: Test each device
 
-**Everyday use:** `ssh <ALIAS>` on any configured client. SSH-based editors can select the same alias. Close SSH/editor sessions when finished so the server's idle timer can begin counting down. To disable client auto-wake, remove its `ProxyCommand` and restore the prior host settings (or the verified backup); keep the SSH key. For a changing IP, update `HostName` to the current address before using direct SSH. Do not delete the AWS wake deployment as part of client rollback.
+**▶ Run in: a second client terminal**, while keeping fallback access open.
 
-**Recovery:** missing PIN/Python errors require fixing the local path or permissions. For a wrong PIN or lockout, use the upstream [runbook](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/RUNBOOK.md); do not repeatedly guess. If the API reports running but SSH times out, check the route, security group, port and sshd. If the API fails, start EC2 through an authorized AWS route and use direct SSH; a reachable fixed-IP fast path can also work when the endpoint is unavailable. Never log the PIN while diagnosing.
+### Normal SSH checks
 
----
+| Check | What should pass |
+|---|---|
+| Local key | Both private and `.pub` files exist; Windows ACLs or Unix `700`/`600` permissions are correct |
+| Server key | The intended public key is in the correct user's `authorized_keys`; ownership and permissions match Step 2 |
+| Direct login | `ssh -o IdentitiesOnly=yes -i <PRIVATE_KEY_PATH> <SSH_USER>@<SERVER_IP_OR_DNS>` logs into the intended server; add `-p <PORT>` if needed. For example, use `ubuntu` or `admin` as appropriate |
+| Alias login | `ssh <ALIAS> 'hostname; whoami'` returns the expected machine and user; inspect `ssh -G <ALIAS>` for the correct identity and no unintended duplicate definitions |
 
-## ✅ 7. Step-by-Step Verification Pipeline
+Direct login isolates key and address problems from alias mistakes. If global SSH rules apply even to direct addresses, account for those routes when interpreting the test.
 
-Verify each stage in sequence before moving to the next:
+<a id="required-client-verification"></a>
+### Extra checks when auto-wake is enabled
 
-```
-[1. Key Generated] ──► [2. Public Key Copied] ──► [3. Server Installed]
-                                                           │
-[6. Alias Connected] ◄── [5. Direct Connected] ◄── [4. Permissions Verified]
-```
+1. **Check the effective config.** Confirm Python, helper and PIN paths, proxy, timeout and host verification. Test with the platform's actual SSH client, including Windows OpenSSH and Termux.
+2. **Test the wake API without starting EC2.** Run:
 
-### Verification Steps:
-
-1. **Step 1 — Verify Local Key Creation**:
-   Confirm both the private key (`<KEY_FILENAME>`) and public key (`<KEY_FILENAME>.pub`) exist in `~/.ssh/`.
-2. **Step 2 — Client-Side Permissions**:
-   - **Windows**: Check permissions with `icacls` if OpenSSH rejects the key.
-   - **Linux / macOS / Termux**: Run `ls -l ~/.ssh/<KEY_FILENAME>` and confirm `-rw-------` (`600`).
-3. **Step 3 — Server-Side Key Presence**:
-   On the server, confirm the key string exists in `~/.ssh/authorized_keys`.
-4. **Step 4 — Server-Side Permissions**:
-   On the server, confirm permissions:
    ```bash
-   ls -ld ~/.ssh ~/.ssh/authorized_keys
-   # Required:
-   # drwx------ ~/.ssh              (700)
-   # -rw------- ~/.ssh/authorized_keys (600)
+   "<PYTHON>" "<HELPER>" <WAKE_URL> --pin-file "<PIN_PATH>" --no-wake --check
    ```
-5. **Step 5 — Test Direct Connection (Bypass Alias First)**:
-   Always test using direct command line parameters to isolate key issues from config file typos:
+
+   In PowerShell, put `&` before the quoted executable. **Leave out the host argument** to force the API path. Expect running plus SSH reachable, or an explicit stopped/`--no-wake` result (which exits with an error because no connection was made). A fixed-IP fast-path success alone does not prove the PIN works.
+3. **Test while running.** Run the alias login from the table above through the configured proxy.
+4. **Test a cold wake, only with permission.** Save work, close sessions, stop the intended instance and confirm **stopped**. Run the same alias login. It should wake and log in without a retry. Record elapsed time and exit status; repeat a separate stop-and-wake cycle for every selected client.
+5. **Check the server after reboot.** If it uses the idle timer, confirm the timer is active with the user's original settings. Do not shorten idle times to test the client.
+
+If a cold test is deferred, report **not tested**. A terminal login does not prove an IDE integration works. Finish with a per-device report: aliases, installed paths, helper commit/hash, backups, test results, blockers and the instance's final state. Keep direct-access backups until successful login; report any unfinished client setup clearly.
+
+<a id="daily"></a>
+## ☀️ Everyday use and undo
+
+| You want to… | Do this |
+|---|---|
+| Connect | `ssh <ALIAS>`; SSH-based editors can select that alias too |
+| Finish work | Close SSH and editor connections so the server's idle timer can start counting down |
+| Disable client auto-wake | Remove its `ProxyCommand` and restore prior host settings or the verified backup. Keep the SSH key. For a changing IP, set `HostName` to the current address before direct login |
+| Undo client setup | Restore only the affected client configuration. Do not delete the AWS wake deployment as part of client rollback |
+| Remove a device's access | Follow the next section on every server that trusts that device's key |
+
+<a id="revoke"></a>
+## 🗑️ Remove access for a lost or retired device
+
+**▶ Run in: the server, as the affected SSH user**
+
+1. Keep a working connection from another authorized device open.
+2. Back up and review the file:
+
    ```bash
-   # Generic syntax:
-   ssh -i <PATH_TO_PRIVATE_KEY> <USER>@<HOST>
-
-   # Ubuntu example:
-   ssh -i ~/.ssh/id_ed25519_ubuntu_laptop ubuntu@<UBUNTU_IP_OR_DNS>
-
-   # Debian example:
-   ssh -i ~/.ssh/id_ed25519_debian_laptop admin@<DEBIAN_IP_OR_DNS>
+   cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak.$(date +%Y%m%d-%H%M%S)
+   cat -n ~/.ssh/authorized_keys
    ```
-6. **Step 6 — Verify No Duplicate Aliases & Test Shortcut**:
-   Confirm the alias appears only once in `~/.ssh/config`, then test:
-   ```bash
-   ssh ec2-ubuntu
-   ssh ec2-debian
-   ```
-7. **Step 7 — Optional Auto-Wake**:
-   If selected during interrogation, complete [Section 6A's client verification](#required-client-verification) on every selected device. Otherwise retain normal direct SSH with no wake helper or PIN requirement.
 
----
+3. Use the unique device comment to find the key, then verify its key data. Edit `~/.ssh/authorized_keys` and delete **only that device's entry**. Comments are labels, not identities: duplicate comments can name different keys. Do not automate deletion by line number or an unescaped comment pattern.
+4. Run `chmod 600 ~/.ssh/authorized_keys`, review the result and confirm another authorized device still connects.
 
-## 🗑️ 8. Safe Key Revocation by Unique Comment
+Repeat for every key/server pairing belonging to the device. Revocation blocks future authentication; existing sessions are not automatically disconnected. If the device also stored a wake PIN, rotate that PIN and update the remaining clients through the [wake project's runbook](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/RUNBOOK.md).
 
-> [!NOTE]
-> **Unique Comments Strongly Recommended**: Giving every key a distinct, descriptive comment (e.g. `<device>-to-<server>-<id>`) makes audit and revocation safe and simple. Do not rely on line numbers, which shift whenever keys are added or removed. If two keys share the same comment, matching tools will delete both.
+<a id="fix"></a>
+## 🔧 Fix a problem
 
-### Safe Revocation Procedure (Server-Side)
+Start with `ssh -vvv <ALIAS>` (or add `-vvv` to your direct SSH command). `Will attempt key` shows which key SSH found; `Offering public key` shows what it sent. A return to `Authentications that can continue: publickey` after an offer means authentication has not succeeded. Never print the wake PIN during diagnosis.
 
-When a laptop, phone, or office computer is replaced, lost, or decommissioned:
+| You see | Check / fix |
+|---|---|
+| `Permission denied (publickey)` | Check username, chosen key and server `authorized_keys`. Inspect client ACLs and server ownership/permissions; this error alone does not identify the cause |
+| `Permissions ... are too open` or a Windows key-permission warning | Apply Step 1's permissions and verify them. Unix private keys need `600`, SSH directory `700`; Windows explicit grants need inspection too |
+| `Load key ... invalid format` | Check file contents and encoding. Copying through an editor can corrupt a key or its line endings. Restore the original valid key; writing different encoding cannot repair missing key data |
+| `Too many authentication failures` | Set `IdentitiesOnly yes` with the intended `IdentityFile` |
+| `Connection timed out` | Check the current address, VPN/route and firewall. For public EC2 SSH, allow the SSH port (usually 22) from your current public IP in the security group |
+| `Connection refused` | Check the port and server SSH service with `sudo systemctl status ssh` or `sshd` |
+| Host-key mismatch | Verify the server identity through a trusted route; investigate a replaced server or changed address before updating `known_hosts` |
+| Helper cannot find Python or the PIN | Correct the absolute path, installation or file permissions; do not put the PIN in the command line |
+| Wrong wake PIN or locked page | Stop guessing and use the [wake runbook](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/RUNBOOK.md) |
+| Wake API says running, but SSH fails | Check the SSH route, security group, port and sshd; running does not mean reachable |
+| Wake API unavailable | Start EC2 through an authorized AWS route, then use direct SSH. A reachable fixed-IP fast path may still work without the API |
 
-```bash
-# 1. Create a timestamped backup before making any changes
-cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak.$(date +%F_%T)
-
-# 2. Delete the specific key matching its unique comment
-sed -i '/<EXACT_UNIQUE_COMMENT>/d' ~/.ssh/authorized_keys
-
-# 3. Ensure permissions remain correct
-chmod 600 ~/.ssh/authorized_keys
-
-# 4. Audit authorized_keys to verify only the intended key was removed
-cat -n ~/.ssh/authorized_keys
-```
-
-The revoked device will be denied immediately on its next connection attempt, while all other authorized devices continue working without interruption.
-
----
-
-## 🔍 9. Comprehensive Troubleshooting Matrix
-
-### Diagnostic Mode: `ssh -vvv`
-If an alias or key fails, run the connection with maximum debug logging:
-```bash
-ssh -vvv <ALIAS_OR_DIRECT_COMMAND>
-```
-Look for:
-- `debug1: Will attempt key: ...` — Did SSH find and open your private key file?
-- `debug1: Offering public key: ...` — Which public key is presented to the server?
-- `debug1: Authentications that can continue: publickey` — Server rejected the offered key.
-
-### Common Issues & Targeted Fixes
-
-| Symptom | Layer | Root Cause | Targeted Solution |
-| :--- | :--- | :--- | :--- |
-| `Permission denied (publickey)` | **Windows Client** | NTFS ACL inheritance grants access to other groups | Check actual ACLs; run `icacls <keyfile> /inheritance:r` and `icacls <keyfile> /grant:r "$($env:USERNAME):(R)"` if permissions are too broad. |
-| `Load key ... invalid format` | **Windows Client** | File was created with Windows CRLF (`\r\n`) or corrupted encoding | Generate key natively with `ssh-keygen` or write using `[IO.File]::WriteAllText("$path", "$content`n")`. |
-| `Permissions ... are too open` | **Linux/macOS Client** | Client private key permissions are not restricted | Run `chmod 600 ~/.ssh/<keyfile>` and `chmod 700 ~/.ssh` on the client. |
-| `Permission denied (publickey)` | **Server Side** | Server `.ssh` or `authorized_keys` permissions/ownership wrong | On the server, run `chmod 700 ~/.ssh`, `chmod 600 ~/.ssh/authorized_keys`, and `sudo chown -R $(id -un):$(id -gn) ~/.ssh`. |
-| `Too many authentication failures` | **Client SSH Config** | SSH agent presents multiple keys before the correct one | Add `IdentitiesOnly yes` under the corresponding `Host` block in `~/.ssh/config`. |
-| `Connection timed out` | **Network / Firewall** | Cloud Security Group or firewall blocking port 22 | Verify that the cloud security group permits inbound traffic on **Port 22** from your current public IP. |
-| `Connection refused` | **Server Daemon** | SSH service stopped or listening on a non-standard port | Verify the SSH daemon status on the server (`sudo systemctl status ssh` or `sshd`). |
+When a step fails, inspect what succeeded before retrying. Preserve working access, fix the specific cause, and rerun the failed check rather than create duplicate keys or config entries.
