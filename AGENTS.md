@@ -78,6 +78,8 @@ Default section order:
 
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
+- `multi_device_ssh_guide.md` owns multi-device SSH setup, including optional EC2 auto-wake. Setup agents must ask whether to enable it and configure the upstream `ec2_up.py` helper on every selected client when requested. Keep PINs local, preserve device-specific SSH keys and host verification, and report running and authorized cold-wake tests separately. Detailed procedures belong in that guide rather than duplicated here.
+
 ## Child DOX Index
 
 | Path | Scope | Lines | Created |

@@ -64,6 +64,9 @@ The agent asks the user only the essential parameters:
 5. **SSH Username**: Exact login account on that server (e.g. `ubuntu`, `admin`, or custom).
 6. **Desired SSH Alias**: Shorthand connection name for `~/.ssh/config` (e.g. `ec2-ubuntu`).
 7. **Key Isolation Preference**: One key per device, or one key per device-per-server?
+8. **Optional EC2 Auto-Wake**: “Should `ssh <ALIAS>` automatically wake this EC2 instance when stopped? If yes, which clients should use it?” Default: off. If enabled, collect the existing **WakePageUrl**, confirm which instance it controls, and identify a fixed-IP or changing-IP connection. Have the user enter their wake PIN locally, never in chat. Ask separately whether saved work permits a live stop-and-wake test.
+
+Reuse answers and verified configuration already available in the session. If auto-wake is selected, **configure it on every selected client as part of setup**, following [Section 6A](#6a-optional-ec2-auto-wake-on-each-selected-client); do not finish by merely suggesting commands. If a device or prerequisite is unavailable, complete the other clients and name the exact blocker. Choosing client auto-wake does not authorize deploying AWS infrastructure or changing the server's idle policy.
 
 ### Automated Agent Pre-Flight Safety Checks (Check Automatically When Possible)
 Before creating keys or modifying configurations, the agent must verify:
@@ -72,6 +75,7 @@ Before creating keys or modifying configurations, the agent must verify:
 - [ ] **SSH Config Collision Check**: Inspect client `~/.ssh/config` to check if `Host <ALIAS>` is already defined. If present, edit the existing block rather than appending a duplicate.
 - [ ] **Windows Permission Verification**: On Windows, check actual file ACLs with `Get-Acl` or `icacls` before assuming permissions are too broad.
 - [ ] **Safe Defaults**: Assume Ed25519 algorithm, standard permissions (`700`/`600`), and `IdentitiesOnly yes`. Use empty passphrase only when unattended/non-interactive access is intentionally required; otherwise ask if the user prefers a passphrase. Skip minor setup questions unless an issue arises.
+- [ ] **Auto-Wake Preflight (only if selected)**: Confirm the existing wake endpoint belongs to the intended instance, Python runs on each client, and the client can reach SSH once the instance is running. Inspect effective settings with `ssh -G <ALIAS>`, including `Include`, wildcard `Host`, `Match`, `ProxyCommand` and `ProxyJump` rules. Do not overwrite an existing proxy route blindly. Back up affected files and preserve unrelated hosts, keys and host-key verification.
 
 ---
 
@@ -88,6 +92,10 @@ Before creating keys or modifying configurations, the agent must verify:
 | **Key Comment** | Recommended to be unique to identify and safely revoke this key | `laptop-to-ec2-ubuntu-2026` |
 | **SSH Alias** | 1-word shortcut name | `ec2-ubuntu` |
 | **Existing SSH Config?** | Does `~/.ssh/config` already exist on your client? | `Yes` (edit) / `No` (create) |
+| **Auto-Wake / Selected Clients** | Optional; configure only the devices selected by the user | `Off` / `Windows + Termux` |
+| **Wake Endpoint / Address Mode** | Existing WakePageUrl for this instance; fixed IP or changing IP | `<WAKE_URL>` / `fixed` |
+| **Local Wake PIN File** | One protected file per target on each selected client; never record its contents here | `~/.ssh/<ALIAS>-wake.pin` |
+| **Live Wake Test** | User confirms work saved and permission to stop the instance | `Approved` / `Deferred` |
 
 ---
 
@@ -311,6 +319,64 @@ fi
 
 ---
 
+## 6A. Optional EC2 Auto-Wake on Each Selected Client
+
+Use the upstream [ec2_up.py](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/src/ec2_up.py) helper with the existing [EC2 Idle Stop and Wake deployment](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/SETUP.md). It runs **on the client**, not on Ubuntu. Python 3.6+ and its standard library are sufficient; client AWS CLI credentials are not needed. The wake PIN only authorizes waking; each device still authenticates SSH with its own private key.
+
+With a reachable fixed IP, the helper connects directly without calling the wake endpoint. Otherwise it requests a wake, waits for SSH, and carries the original connection through. It does not bypass firewalls or create a network route. Keep any required VPN connected. Starting EC2 resumes normal compute billing; this helper does not install or change auto-stop.
+
+### Agent installation procedure
+
+1. **Verify prerequisites.** Read the current upstream helper and setup instructions. Confirm the existing endpoint's target using trusted deployment information. If no wake deployment exists, explain the prerequisite and obtain authorization for that separate AWS setup; retain working direct SSH meanwhile.
+2. **Install a reviewed copy on each selected client.** Resolve an upstream Git commit and download `https://raw.githubusercontent.com/manojvermamv/ec2-idle-stop-wake/<COMMIT>/src/ec2_up.py` into `~/.ssh/ec2_up.py`. Record the commit and SHA-256 in the handoff, and compare installed bytes across clients. Back up an existing helper before replacement. Do not fetch or execute `main` on every SSH connection.
+3. **Find Python.** Verify the actual interpreter with `python --version` or `python3 --version`. On Windows, obtain its absolute path with `python -c "import sys; print(sys.executable)"`; a Store launcher that does not execute Python is insufficient. On Termux, install missing prerequisites with `pkg install python openssh` and resolve paths with `command -v python` and `printf '%s\n' "$HOME"`. On macOS/Linux, use the available Python 3 interpreter or the platform's package manager if missing.
+4. **Save the PIN privately.** Have the user enter it through a local hidden prompt into `~/.ssh/<ALIAS>-wake.pin`, one line, UTF-8 without BOM. Never embed it in the SSH config, command arguments, shell history, repository, logs or handoff. Set directory mode `700` and file mode `600` on Unix/Termux. On Windows, inspect and restrict the PIN file's ACL to the user; removing inheritance alone does not remove existing explicit grants. Protect the helper and config against modification by other users too. Do not overwrite a valid PIN file without checking whether replacement is needed. Store Termux files in its private home, not Android shared storage. A secure device-to-device PIN transfer needs the user's authorization; SSH private keys must stay on their original devices.
+5. **Update the existing alias in place.** Back up the config; keep the alias, username, port and device-specific `IdentityFile`. Add the options below only to the selected target. Inspect effective config again because earlier matching options can override later ones. Do not add a duplicate host block or silently replace a working `ProxyJump`/`ProxyCommand`; resolve that route first.
+6. **Verify each client**, using the checks below. Keep the direct-access backup until successful login. If a change breaks access, restore only the affected settings and diagnose the exact error before retrying.
+
+### SSH configuration
+
+Merge these settings into the target's existing block, substituting discovered values. This is a template, not an append command:
+
+```sshconfig
+Host <ALIAS>
+    HostName <FIXED_IP_OR_ALIAS.invalid>
+    User <SSH_USER>
+    IdentityFile ~/.ssh/<DEVICE_KEY_FILENAME>
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    ConnectTimeout 360
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    ProxyCommand "<ABSOLUTE_PYTHON_PATH>" "<ABSOLUTE_HELPER_PATH>" <WAKE_URL> %h %p --pin-file "<ABSOLUTE_PIN_PATH>"
+```
+
+- **Windows:** use forward slashes and quote paths containing spaces, e.g. `"C:/Users/<USER>/.ssh/ec2_up.py"`. Use the verified interpreter path, not an assumed `python3` command. Test through Windows OpenSSH itself.
+- **Linux/macOS:** resolve paths under the actual user's home; do not leave `$HOME` variables or placeholders in the final `ProxyCommand`.
+- **Termux:** discover the actual private paths, normally `/data/data/com.termux/files/usr/bin/python` and `/data/data/com.termux/files/home/.ssh/...`. Run and test under the Termux user. A connected ADB shell is not automatically a Termux shell; if `run-as com.termux` is unavailable, use an authorized Termux terminal route instead of rooting the device or placing secrets in shared storage.
+- **Fixed IP:** retain the current `HostName` and trusted `known_hosts` entry. No `HostKeyAlias` change is needed.
+- **Changing IP:** set `HostName <ALIAS>.invalid` to avoid the old IP fast path, and add `HostKeyAlias <ALIAS>`. Before enabling strict checking, install the independently verified server host public key under that alias in `known_hosts`. Obtain it through an existing trusted session or trusted console and compare its fingerprint. Do not blindly trust `ssh-keyscan`, disable host-key checking, or delete a mismatch to make login succeed.
+- **Private route:** add `--private-ip` only when a VPN or other working route reaches the instance's private address. It controls the API-returned address, not the initial `HostName` fast path; use the private address or `<ALIAS>.invalid` there as appropriate.
+- **Timing:** the helper waits up to 300 seconds by default; SSH's `ConnectTimeout 360` allows it to finish. If increasing `--timeout`, increase `ConnectTimeout` too.
+
+### Required client verification
+
+| Check | Action | Evidence |
+|---|---|---|
+| Effective config | `ssh -G <ALIAS>` | Correct identity, host verification, Python/helper/PIN paths, proxy and timeout; no unresolved placeholders |
+| Wake API and PIN, without starting | Run `"<PYTHON>" "<HELPER>" <WAKE_URL> --pin-file "<PIN_PATH>" --no-wake --check` (prefix with `&` in PowerShell). **Omit the host argument** to force the API path. | Running + SSH reachable, or an explicit stopped/`--no-wake` result; a successful fixed-IP fast path alone does not prove the PIN works |
+| Already-running connection | `ssh <ALIAS> 'hostname; whoami'` | Expected server and user through the configured proxy |
+| Cold wake, when approved | Save work, close sessions, stop the intended instance and verify **stopped**. Run the same SSH command on one selected client. Repeat a separate stop-and-wake cycle for every selected client. | Same request wakes and logs in successfully; record elapsed time and exit status |
+| Server after reboot | Verify the existing idle timer and its settings if this deployment uses them | Timer remains active with the user's original timings; do not shorten them just to test the client |
+
+Never stop active work without authorization. If a cold test is deferred, label it **not tested**, even if running-instance and API checks pass. The agent must report results per device, installed paths and revision, backups, remaining blockers, and the instance's final state. Do not claim an IDE was tested based only on a terminal login.
+
+**Everyday use:** `ssh <ALIAS>` on any configured client. SSH-based editors can select the same alias. Close SSH/editor sessions when finished so the server's idle timer can begin counting down. To disable client auto-wake, remove its `ProxyCommand` and restore the prior host settings (or the verified backup); keep the SSH key. For a changing IP, update `HostName` to the current address before using direct SSH. Do not delete the AWS wake deployment as part of client rollback.
+
+**Recovery:** missing PIN/Python errors require fixing the local path or permissions. For a wrong PIN or lockout, use the upstream [runbook](https://github.com/manojvermamv/ec2-idle-stop-wake/blob/main/RUNBOOK.md); do not repeatedly guess. If the API reports running but SSH times out, check the route, security group, port and sshd. If the API fails, start EC2 through an authorized AWS route and use direct SSH; a reachable fixed-IP fast path can also work when the endpoint is unavailable. Never log the PIN while diagnosing.
+
+---
+
 ## ✅ 7. Step-by-Step Verification Pipeline
 
 Verify each stage in sequence before moving to the next:
@@ -356,6 +422,8 @@ Verify each stage in sequence before moving to the next:
    ssh ec2-ubuntu
    ssh ec2-debian
    ```
+7. **Step 7 — Optional Auto-Wake**:
+   If selected during interrogation, complete [Section 6A's client verification](#required-client-verification) on every selected device. Otherwise retain normal direct SSH with no wake helper or PIN requirement.
 
 ---
 
